@@ -1,0 +1,6 @@
+{
+  "name": "PulseWave Studio",
+  "description": "Audio-reactive music visualizer, synced lyric video creator, and fast offline MP4 generator running 100% in the browser.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
