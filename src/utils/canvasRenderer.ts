@@ -7,8 +7,12 @@ import {
   StudioSettings,
 } from '../types/studio';
 
+export type RenderCanvas = HTMLCanvasElement | OffscreenCanvas;
+export type RenderContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+export type RenderImageSource = HTMLImageElement | ImageBitmap;
+
 export interface RenderFrameParams {
-  ctx: CanvasRenderingContext2D;
+  ctx: RenderContext2D;
   width: number;
   height: number;
   currentTime: number; // absolute track time in seconds (for lyric matching)
@@ -17,15 +21,29 @@ export interface RenderFrameParams {
   timeDomainData: Uint8Array;
   settings: StudioSettings;
   lyrics: LyricLine[];
-  bgImage: HTMLImageElement | null;
-  albumImage: HTMLImageElement | null;
+  bgImage: RenderImageSource | null;
+  albumImage: RenderImageSource | null;
   particles: Particle[];
   isExport?: boolean;
-  albumRotationRef?: { angle: number };
+  albumRotationRef?: { angle: number; cubeX?: number; cubeY?: number; cubeZ?: number };
   beatBurst?: number; // 0..1 decaying bass-drum impulse
   beatTriggered?: boolean;
   beatShockwaves?: BeatShockwave[];
   motionBlurState?: MotionBlurState;
+}
+
+function getImageDimensions(
+  img: RenderImageSource | null
+): { width: number; height: number } | null {
+  if (!img) return null;
+  if ('naturalWidth' in img) {
+    if (!img.complete || img.naturalWidth <= 0) return null;
+    return {
+      width: img.naturalWidth || img.width,
+      height: img.naturalHeight || img.height,
+    };
+  }
+  return img.width > 0 && img.height > 0 ? { width: img.width, height: img.height } : null;
 }
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -49,7 +67,7 @@ function hexToRgba(hex: string, alpha: number): string {
  * Word-wraps text cleanly to never exceed maxWidth on narrow 9:16 or wide canvases
  */
 export function wrapTextLines(
-  ctx: CanvasRenderingContext2D,
+  ctx: RenderContext2D,
   text: string,
   maxWidth: number
 ): string[] {
@@ -74,15 +92,15 @@ export function wrapTextLines(
 }
 
 function drawCoverImage(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  ctx: RenderContext2D,
+  img: RenderImageSource,
   width: number,
   height: number,
   overscan = 0
 ): void {
-  const imgW = img.naturalWidth || img.width;
-  const imgH = img.naturalHeight || img.height;
-  if (!imgW || !imgH) return;
+  const dims = getImageDimensions(img);
+  if (!dims) return;
+  const { width: imgW, height: imgH } = dims;
 
   const targetW = width + overscan * 2;
   const targetH = height + overscan * 2;
@@ -153,22 +171,44 @@ function getPerceptualBarValue(
   return Math.min(1, (avg / 255) * sensitivity);
 }
 
-// Reusable offscreen scratch canvases for zero-GC iterative bloom blur passes
-let bloomLayerCanvas: HTMLCanvasElement | null = null;
-let bloomHalfCanvas: HTMLCanvasElement | null = null;
-let bloomQuarterCanvas: HTMLCanvasElement | null = null;
+// Reusable offscreen scratch canvases for zero-GC iterative bloom blur passes & background caching
+let bloomLayerCanvas: RenderCanvas | null = null;
+let bloomHalfCanvas: RenderCanvas | null = null;
+let bloomQuarterCanvas: RenderCanvas | null = null;
+let bloomEighthCanvas: RenderCanvas | null = null;
+
+let cachedBgCanvas: RenderCanvas | null = null;
+let cachedBgKey = '';
+let cachedBgImageRef: RenderImageSource | null = null;
+
+function createRenderCanvas(width: number, height: number): RenderCanvas {
+  if (typeof document !== 'undefined') {
+    const c = document.createElement('canvas');
+    c.width = width;
+    c.height = height;
+    return c;
+  }
+  return new OffscreenCanvas(width, height);
+}
 
 function ensureScratchCanvas(
-  existing: HTMLCanvasElement | null,
+  existing: RenderCanvas | null,
   width: number,
   height: number
-): HTMLCanvasElement {
-  const canvas = existing ?? document.createElement('canvas');
+): RenderCanvas {
+  const canvas = existing ?? createRenderCanvas(width, height);
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
   return canvas;
+}
+
+function getContext2d(
+  canvas: RenderCanvas,
+  options?: CanvasRenderingContext2DSettings
+): RenderContext2D | null {
+  return canvas.getContext('2d', options) as RenderContext2D | null;
 }
 
 export function renderVisualizerFrame(params: RenderFrameParams): void {
@@ -198,38 +238,52 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   const safePadX = width * 0.075;
   const safePadY = height * 0.065;
 
-  // 1. Background Fill & Optional Cover Image
+  // 1. Background Fill & Optional Cover Image (cached across frames for fast export & 60fps playback)
   ctx.save();
-  ctx.fillStyle = settings.bgColor;
-  ctx.fillRect(0, 0, width, height);
+  const bgDims = getImageDimensions(bgImage);
+  const bgKey = `${width}x${height}|${settings.bgColor}|${settings.bgBlur}|${settings.bgDim}|${settings.primaryColor}|${settings.secondaryColor}|${bgDims ? `${bgDims.width}x${bgDims.height}` : 'none'}`;
 
-  if (bgImage && bgImage.complete && bgImage.naturalWidth > 0) {
-    ctx.save();
-    if (settings.bgBlur > 0) {
-      ctx.filter = `blur(${settings.bgBlur}px)`;
-    }
-    drawCoverImage(ctx, bgImage, width, height, settings.bgBlur * 1.6);
-    ctx.restore();
-
-    if (settings.bgDim > 0) {
-      ctx.fillStyle = `rgba(0, 0, 0, ${settings.bgDim})`;
-      ctx.fillRect(0, 0, width, height);
-    }
+  if (cachedBgCanvas && cachedBgKey === bgKey && cachedBgImageRef === bgImage) {
+    ctx.drawImage(cachedBgCanvas, 0, 0, width, height);
   } else {
-    // Subtle atmospheric radial gradient behind visualizer so solid backgrounds feel deep
-    const ambient = ctx.createRadialGradient(
-      width * 0.5,
-      height * 0.48,
-      minDim * 0.04,
-      width * 0.5,
-      height * 0.48,
-      Math.max(width, height) * 0.72
-    );
-    ambient.addColorStop(0, hexToRgba(settings.primaryColor, 0.11));
-    ambient.addColorStop(0.45, hexToRgba(settings.secondaryColor, 0.05));
-    ambient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-    ctx.fillStyle = ambient;
-    ctx.fillRect(0, 0, width, height);
+    cachedBgCanvas = ensureScratchCanvas(cachedBgCanvas, width, height);
+    const bgCtx = getContext2d(cachedBgCanvas, { alpha: false });
+    if (bgCtx) {
+      bgCtx.fillStyle = settings.bgColor;
+      bgCtx.fillRect(0, 0, width, height);
+
+      if (bgDims && bgImage) {
+        bgCtx.save();
+        if (settings.bgBlur > 0) {
+          bgCtx.filter = `blur(${settings.bgBlur}px)`;
+        }
+        drawCoverImage(bgCtx, bgImage, width, height, settings.bgBlur * 1.6);
+        bgCtx.restore();
+
+        if (settings.bgDim > 0) {
+          bgCtx.fillStyle = `rgba(0, 0, 0, ${settings.bgDim})`;
+          bgCtx.fillRect(0, 0, width, height);
+        }
+      } else {
+        // Subtle atmospheric radial gradient behind visualizer so solid backgrounds feel deep
+        const ambient = bgCtx.createRadialGradient(
+          width * 0.5,
+          height * 0.48,
+          minDim * 0.04,
+          width * 0.5,
+          height * 0.48,
+          Math.max(width, height) * 0.72
+        );
+        ambient.addColorStop(0, hexToRgba(settings.primaryColor, 0.11));
+        ambient.addColorStop(0.45, hexToRgba(settings.secondaryColor, 0.05));
+        ambient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        bgCtx.fillStyle = ambient;
+        bgCtx.fillRect(0, 0, width, height);
+      }
+      cachedBgKey = bgKey;
+      cachedBgImageRef = bgImage;
+      ctx.drawImage(cachedBgCanvas, 0, 0, width, height);
+    }
   }
 
   // 1b. Motion Blur: Draw the previous frame with slight transparency before rendering current frame
@@ -247,35 +301,48 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     ctx.restore();
   }
 
-  const { bass, mid } = computeBands(frequencyData, settings.sensitivity);
+  const { bass, mid, treble } = computeBands(frequencyData, settings.sensitivity);
+  const beatBoost = settings.beatDetection ? beatBurst : 0;
 
-  // Advance album rotation subtly with bass
+  // Advance album rotation subtly with bass, and 3D cube rotation scaled by beat intensity
+  const cubeSpeedMult = 1 + beatBoost * 3.4 + bass * 0.95;
   if (albumRotationRef) {
     albumRotationRef.angle += dt * (0.18 + bass * 0.35);
+    albumRotationRef.cubeX = (albumRotationRef.cubeX ?? 0.48) + dt * 0.44 * cubeSpeedMult;
+    albumRotationRef.cubeY = (albumRotationRef.cubeY ?? 0.68) + dt * 0.72 * cubeSpeedMult;
+    albumRotationRef.cubeZ = (albumRotationRef.cubeZ ?? 0.18) + dt * 0.24 * cubeSpeedMult;
   }
 
   // 2. Visualizer Modes & Beat-Detection Bursts (with optional additive Bloom passes)
   const visCenterY = isPortrait ? height * 0.42 : height * 0.46;
-  const beatBoost = settings.beatDetection ? beatBurst : 0;
   const bloom = Math.max(0, Math.min(1.5, settings.bloomIntensity ?? 0));
-  const burstCenterY =
-    settings.visualizerMode === 'circular-ring' ||
-    settings.visualizerMode === 'hybrid-particles'
-      ? isPortrait
-        ? height * 0.41
-        : height * 0.45
-      : visCenterY;
-
   const isCircularMode =
     settings.visualizerMode === 'circular-ring' ||
-    settings.visualizerMode === 'hybrid-particles';
+    settings.visualizerMode === 'hybrid-particles' ||
+    settings.visualizerMode === 'harmonic-orb';
+  const burstCenterY = isCircularMode
+    ? isPortrait
+      ? height * 0.41
+      : height * 0.45
+    : visCenterY;
+
   const circularCx = width * 0.5;
   const circularCy = isPortrait ? height * 0.41 : height * 0.45;
   const circularBaseRadius =
     minDim * (isPortrait ? 0.21 : 0.22) * (1 + bass * 0.13 + beatBoost * 0.1);
   const circularArtRadius = circularBaseRadius * 0.87;
 
-  const drawVisualizerLayer = (vCtx: CanvasRenderingContext2D) => {
+  const drawVisualizerLayer = (vCtx: RenderContext2D) => {
+    const enableElemShadow = bloom <= 0.005;
+    const applyShadow = (color: string, blurPx: number) => {
+      if (enableElemShadow) {
+        vCtx.shadowColor = color;
+        vCtx.shadowBlur = blurPx;
+      } else {
+        vCtx.shadowBlur = 0;
+      }
+    };
+
     // Beat-Detection Ambient Flash & Expanding Shockwaves
     if (settings.beatDetection && beatBoost > 0.01) {
       vCtx.save();
@@ -312,9 +379,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     // Beat-triggered burst particle spawning across all visualizer modes
     if (settings.beatDetection && beatTriggered) {
       const burstCount = 18;
-      const isLinearMode =
-        settings.visualizerMode === 'mirrored-bars' ||
-        settings.visualizerMode === 'neon-wave';
+      const isLinearMode = !isCircularMode;
       for (let s = 0; s < burstCount; s++) {
         if (particles.length >= 180) break;
         const angle = (s / burstCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.28;
@@ -370,8 +435,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.beginPath();
         vCtx.arc(p.x, p.y, p.radius * (1 - lifeProgress * 0.35), 0, Math.PI * 2);
         vCtx.fillStyle = hexToRgba(p.color, alpha);
-        vCtx.shadowColor = p.color;
-        vCtx.shadowBlur = minDim * 0.014;
+        applyShadow(p.color, minDim * 0.014);
         vCtx.fill();
       }
       vCtx.restore();
@@ -391,8 +455,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
 
       vCtx.save();
       vCtx.fillStyle = grad;
-      vCtx.shadowColor = hexToRgba(settings.primaryColor, 0.55 + beatBoost * 0.35);
-      vCtx.shadowBlur = minDim * (0.018 + beatBoost * 0.015);
+      applyShadow(hexToRgba(settings.primaryColor, 0.55 + beatBoost * 0.35), minDim * (0.018 + beatBoost * 0.015));
 
       // Subtle center horizon line
       vCtx.fillRect(safePadX, visCenterY - 1, totalW, 2);
@@ -480,6 +543,704 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       drawWaveLayer(settings.secondaryColor, 0.82, 18, Math.max(2.5, minDim * 0.0045), 0.78, false);
       // Primary foreground curve
       drawWaveLayer(settings.primaryColor, 1.05, 0, Math.max(3.5, minDim * 0.0065), 0.98, true);
+    } else if (settings.visualizerMode === 'dual-ribbon') {
+      // Aurora Frequency Ribbons: smooth overlapping spline terrain waves with glowing crests
+      const spanW = width - safePadX * 2;
+      const pointCount = Math.max(36, Math.min(72, Math.round(settings.barCount * 0.6)));
+      const maxRibbonH = (isPortrait ? height * 0.165 : height * 0.24) * (1 + beatBoost * 0.18);
+
+      const drawRibbon = (
+        color: string,
+        direction: 1 | -1,
+        ampScale: number,
+        freqShift: number,
+        phaseSpeed: number,
+        fillAlpha: number
+      ) => {
+        const pts: Array<{ x: number; y: number }> = [];
+        for (let i = 0; i <= pointCount; i++) {
+          const progress = i / pointCount;
+          const symProgress = 1 - Math.abs(progress * 2 - 1);
+          const binIdx = Math.min(
+            pointCount - 1,
+            Math.floor(Math.abs(progress * 2 - 1) * pointCount * 0.72) + freqShift
+          );
+          const specVal = getPerceptualBarValue(
+            frequencyData,
+            Math.max(0, Math.min(pointCount - 1, binIdx)),
+            pointCount,
+            settings.sensitivity
+          );
+          const waveRipple =
+            0.5 +
+            0.5 *
+              Math.sin(
+                progress * Math.PI * 5 + currentTime * phaseSpeed + freqShift * 0.4
+              );
+          const edgeEnvelope = Math.pow(Math.sin(progress * Math.PI), 0.65);
+          const amplitude =
+            (Math.pow(specVal, 1.08) * 0.82 + waveRipple * (0.08 + mid * 0.14)) *
+            maxRibbonH *
+            ampScale *
+            (0.35 + 0.65 * symProgress) *
+            edgeEnvelope;
+
+          pts.push({
+            x: safePadX + progress * spanW,
+            y: visCenterY + direction * Math.max(3, amplitude),
+          });
+        }
+
+        vCtx.save();
+        vCtx.beginPath();
+        vCtx.moveTo(pts[0].x, visCenterY);
+        vCtx.lineTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          const prev = pts[i - 1];
+          const curr = pts[i];
+          const midX = (prev.x + curr.x) * 0.5;
+          const midY = (prev.y + curr.y) * 0.5;
+          vCtx.quadraticCurveTo(prev.x, prev.y, midX, midY);
+        }
+        const last = pts[pts.length - 1];
+        vCtx.lineTo(last.x, last.y);
+        vCtx.lineTo(last.x, visCenterY);
+        vCtx.closePath();
+
+        const ribbonGrad = vCtx.createLinearGradient(
+          0,
+          visCenterY,
+          0,
+          visCenterY + direction * maxRibbonH * ampScale
+        );
+        ribbonGrad.addColorStop(0, hexToRgba(color, fillAlpha * 0.12));
+        ribbonGrad.addColorStop(0.55, hexToRgba(color, fillAlpha * 0.55));
+        ribbonGrad.addColorStop(1, hexToRgba(color, fillAlpha));
+        vCtx.fillStyle = ribbonGrad;
+        vCtx.fill();
+
+        // Luminous crest outline
+        vCtx.beginPath();
+        vCtx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          const prev = pts[i - 1];
+          const curr = pts[i];
+          const midX = (prev.x + curr.x) * 0.5;
+          const midY = (prev.y + curr.y) * 0.5;
+          vCtx.quadraticCurveTo(prev.x, prev.y, midX, midY);
+        }
+        vCtx.lineTo(last.x, last.y);
+        vCtx.strokeStyle = hexToRgba(color, 0.94);
+        vCtx.lineWidth = Math.max(2, minDim * 0.0042);
+        vCtx.lineCap = 'round';
+        vCtx.shadowColor = color;
+        vCtx.shadowBlur = minDim * (0.022 + beatBoost * 0.015);
+        vCtx.stroke();
+        vCtx.restore();
+      };
+
+      // Back depth ribbons
+      drawRibbon(settings.secondaryColor, -1, 0.84, 4, 2.4, 0.34);
+      drawRibbon(settings.primaryColor, 1, 0.78, 5, -2.1, 0.3);
+      // Foreground dominant ribbons
+      drawRibbon(settings.primaryColor, -1, 1.04, 0, 3.1, 0.48);
+      drawRibbon(settings.secondaryColor, 1, 0.96, 1, -2.8, 0.42);
+
+      // Subtle horizontal aurora axis
+      vCtx.save();
+      const axisGrad = vCtx.createLinearGradient(safePadX, 0, width - safePadX, 0);
+      axisGrad.addColorStop(0, 'rgba(255,255,255,0)');
+      axisGrad.addColorStop(0.2, hexToRgba(settings.primaryColor, 0.55));
+      axisGrad.addColorStop(0.5, hexToRgba('#ffffff', 0.8));
+      axisGrad.addColorStop(0.8, hexToRgba(settings.secondaryColor, 0.55));
+      axisGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      vCtx.fillStyle = axisGrad;
+      vCtx.fillRect(safePadX, visCenterY - 1, spanW, 2);
+      vCtx.restore();
+    } else if (settings.visualizerMode === 'led-matrix') {
+      // Segmented LED Spectrum: studio hardware meter bricks with peak-hold cap blocks & floor reflection
+      const cols = Math.max(20, Math.min(56, Math.round(settings.barCount * 0.48)));
+      const totalW = width - safePadX * 2;
+      const colStep = totalW / cols;
+      const cellW = Math.max(4, colStep * 0.72);
+      const baseLineY = visCenterY + (isPortrait ? height * 0.075 : height * 0.115);
+      const maxMeterH = (isPortrait ? height * 0.22 : height * 0.32) * (1 + beatBoost * 0.14);
+      const rows = isPortrait ? 14 : 16;
+      const rowStep = maxMeterH / rows;
+      const cellH = Math.max(3, rowStep * 0.64);
+      const cellRadius = Math.max(1.5, Math.min(4, cellH * 0.28));
+
+      vCtx.save();
+      // Sleek hardware baseline rail
+      vCtx.fillStyle = hexToRgba(settings.primaryColor, 0.38);
+      vCtx.fillRect(safePadX, baseLineY, totalW, Math.max(2, minDim * 0.0028));
+
+      for (let c = 0; c < cols; c++) {
+        // Center-focused perceptual symmetry or left-to-right rack meter
+        const val = getPerceptualBarValue(frequencyData, c, cols, settings.sensitivity);
+        const litRows = Math.max(1, Math.min(rows, Math.round(Math.pow(val, 1.05) * rows)));
+        const peakRow = Math.min(
+          rows - 1,
+          Math.max(litRows, Math.round(Math.min(1, val * 1.12 + 0.08) * rows))
+        );
+        const x = safePadX + c * colStep + (colStep - cellW) * 0.5;
+
+        for (let r = 0; r < rows; r++) {
+          const y = baseLineY - (r + 1) * rowStep + (rowStep - cellH) * 0.5;
+          const heightRatio = r / Math.max(1, rows - 1);
+          const tierColor =
+            heightRatio > 0.62 ? settings.secondaryColor : settings.primaryColor;
+
+          if (r < litRows) {
+            vCtx.fillStyle = hexToRgba(tierColor, 0.72 + heightRatio * 0.28);
+            vCtx.beginPath();
+            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
+            vCtx.fill();
+          } else if (r === peakRow && val > 0.06) {
+            // Detached luminous peak-hold brick
+            vCtx.fillStyle = hexToRgba('#ffffff', 0.88);
+            vCtx.beginPath();
+            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
+            vCtx.fill();
+          } else {
+            // Unlit recessed LED socket
+            vCtx.fillStyle = 'rgba(255, 255, 255, 0.045)';
+            vCtx.beginPath();
+            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
+            vCtx.fill();
+          }
+        }
+
+        // Subtle console reflection below rail (top 4 mirrored bricks)
+        const reflectRows = Math.min(4, litRows);
+        for (let rr = 0; rr < reflectRows; rr++) {
+          const ry = baseLineY + 5 + rr * rowStep;
+          const rAlpha = (1 - rr / 4) * 0.22;
+          vCtx.shadowBlur = 0;
+          vCtx.fillStyle = hexToRgba(settings.primaryColor, rAlpha);
+          vCtx.beginPath();
+          vCtx.roundRect(x, ry, cellW, cellH, cellRadius);
+          vCtx.fill();
+        }
+      }
+      vCtx.restore();
+    } else if (settings.visualizerMode === 'stereo-prism') {
+      // Perspective Spectrum Horizon: retro-futurist horizon core + mirrored geometric prism blades
+      const spanW = width - safePadX * 2;
+      const bladeCount = Math.max(24, Math.min(72, Math.round(settings.barCount * 0.65)));
+      const halfBlades = Math.floor(bladeCount / 2);
+      const step = spanW / bladeCount;
+      const maxSpikeH = (isPortrait ? height * 0.16 : height * 0.24) * (1 + beatBoost * 0.2);
+
+      vCtx.save();
+      // Background perspective floor rays anchored beneath horizon
+      const floorDepth = isPortrait ? height * 0.14 : height * 0.2;
+      const rayCount = 11;
+      vCtx.strokeStyle = hexToRgba(settings.secondaryColor, 0.18 + bass * 0.16);
+      vCtx.lineWidth = Math.max(1, minDim * 0.0018);
+      for (let r = 0; r < rayCount; r++) {
+        const t = r / (rayCount - 1) - 0.5;
+        const topX = width * 0.5 + t * (spanW * 0.34);
+        const botX = width * 0.5 + t * (spanW * 1.25);
+        vCtx.beginPath();
+        vCtx.moveTo(topX, visCenterY);
+        vCtx.lineTo(botX, visCenterY + floorDepth);
+        vCtx.stroke();
+      }
+      for (let hLine = 1; hLine <= 4; hLine++) {
+        const p = Math.pow(hLine / 4, 1.55);
+        const ly = visCenterY + p * floorDepth;
+        vCtx.beginPath();
+        vCtx.moveTo(safePadX * 0.7, ly);
+        vCtx.lineTo(width - safePadX * 0.7, ly);
+        vCtx.stroke();
+      }
+
+      // Luminous center prism halo
+      const coreR = minDim * (0.065 + bass * 0.025 + beatBoost * 0.02);
+      const coreGrad = vCtx.createRadialGradient(
+        width * 0.5,
+        visCenterY,
+        0,
+        width * 0.5,
+        visCenterY,
+        coreR * 2.2
+      );
+      coreGrad.addColorStop(0, hexToRgba(settings.primaryColor, 0.34));
+      coreGrad.addColorStop(0.55, hexToRgba(settings.secondaryColor, 0.12));
+      coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      vCtx.fillStyle = coreGrad;
+      vCtx.beginPath();
+      vCtx.arc(width * 0.5, visCenterY, coreR * 2.2, 0, Math.PI * 2);
+      vCtx.fill();
+
+      // Symmetrical diamond/prism blades
+      const bladeHalfW = Math.max(2, step * 0.42);
+      for (let i = 0; i < bladeCount; i++) {
+        const distFromCenter = Math.abs(i - (bladeCount - 1) / 2) / Math.max(1, halfBlades);
+        const val = getPerceptualBarValue(
+          frequencyData,
+          Math.floor(distFromCenter * (bladeCount * 0.65)),
+          bladeCount,
+          settings.sensitivity
+        );
+        const bladeH = Math.max(minDim * 0.014, Math.pow(val, 1.12) * maxSpikeH);
+        const cx = safePadX + i * step + step * 0.5;
+
+        const bladeGrad = vCtx.createLinearGradient(0, visCenterY - bladeH, 0, visCenterY + bladeH);
+        bladeGrad.addColorStop(0, settings.secondaryColor);
+        bladeGrad.addColorStop(0.5, settings.primaryColor);
+        bladeGrad.addColorStop(1, settings.secondaryColor);
+
+        vCtx.fillStyle = bladeGrad;
+        vCtx.shadowColor = distFromCenter < 0.35 ? settings.primaryColor : settings.secondaryColor;
+        vCtx.shadowBlur = minDim * (0.015 + beatBoost * 0.012);
+
+        // Diamond / tapered prism shard silhouette
+        vCtx.beginPath();
+        vCtx.moveTo(cx, visCenterY - bladeH);
+        vCtx.lineTo(cx + bladeHalfW, visCenterY);
+        vCtx.lineTo(cx, visCenterY + bladeH * 0.72);
+        vCtx.lineTo(cx - bladeHalfW, visCenterY);
+        vCtx.closePath();
+        vCtx.fill();
+      }
+
+      // Crisp horizon beam
+      const beamGrad = vCtx.createLinearGradient(safePadX, 0, width - safePadX, 0);
+      beamGrad.addColorStop(0, 'rgba(255,255,255,0)');
+      beamGrad.addColorStop(0.5, '#ffffff');
+      beamGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      vCtx.shadowColor = settings.primaryColor;
+      vCtx.shadowBlur = minDim * 0.02;
+      vCtx.fillStyle = beamGrad;
+      vCtx.fillRect(safePadX, visCenterY - 1.2, spanW, 2.4);
+      vCtx.restore();
+    } else if (settings.visualizerMode === 'harmonic-orb') {
+      // Harmonic Orbital Mandala: concentric closed audio-spline rings, rotating polygon lattice & orbiting nodes
+      const cx = circularCx;
+      const cy = circularCy;
+      const baseRadius = circularBaseRadius;
+      const outerReach = minDim * (isPortrait ? 0.14 : 0.155) * (1 + beatBoost * 0.16);
+
+      // Ambient orbital aura
+      vCtx.save();
+      const aura = vCtx.createRadialGradient(cx, cy, baseRadius * 0.7, cx, cy, baseRadius + outerReach);
+      aura.addColorStop(0, hexToRgba(settings.primaryColor, 0.18 + bass * 0.16));
+      aura.addColorStop(0.55, hexToRgba(settings.secondaryColor, 0.08 + mid * 0.08));
+      aura.addColorStop(1, 'rgba(0,0,0,0)');
+      vCtx.fillStyle = aura;
+      vCtx.beginPath();
+      vCtx.arc(cx, cy, baseRadius + outerReach, 0, Math.PI * 2);
+      vCtx.fill();
+      vCtx.restore();
+
+      // Rotating polygonal geometric halos outside center art
+      const drawPolyRing = (
+        sides: number,
+        radius: number,
+        rot: number,
+        color: string,
+        lineW: number,
+        alpha: number
+      ) => {
+        vCtx.save();
+        vCtx.beginPath();
+        for (let i = 0; i <= sides; i++) {
+          const a = (i / sides) * Math.PI * 2 + rot;
+          const x = cx + Math.cos(a) * radius;
+          const y = cy + Math.sin(a) * radius;
+          if (i === 0) vCtx.moveTo(x, y);
+          else vCtx.lineTo(x, y);
+        }
+        vCtx.closePath();
+        vCtx.strokeStyle = hexToRgba(color, alpha);
+        vCtx.lineWidth = lineW;
+        vCtx.shadowColor = color;
+        vCtx.shadowBlur = minDim * 0.016;
+        vCtx.stroke();
+        vCtx.restore();
+      };
+
+      drawPolyRing(
+        8,
+        baseRadius * (1.06 + bass * 0.1),
+        currentTime * 0.35,
+        settings.primaryColor,
+        Math.max(1.8, minDim * 0.0032),
+        0.72
+      );
+      drawPolyRing(
+        6,
+        baseRadius * (1.14 + mid * 0.12),
+        -currentTime * 0.28,
+        settings.secondaryColor,
+        Math.max(1.6, minDim * 0.0028),
+        0.58
+      );
+
+      // Smooth closed harmonic wave petals (dual phase)
+      const drawOrbitalSpline = (
+        color: string,
+        radiusOffset: number,
+        ampScale: number,
+        rotOffset: number,
+        lineW: number,
+        fillAlpha: number
+      ) => {
+        const segments = 96;
+        const pts: Array<{ x: number; y: number }> = [];
+        for (let i = 0; i < segments; i++) {
+          const sym = i < segments / 2 ? i : segments - i;
+          const spec = getPerceptualBarValue(
+            frequencyData,
+            Math.floor((sym / (segments / 2)) * 42),
+            48,
+            settings.sensitivity
+          );
+          const tdIdx = Math.floor((i / segments) * (timeDomainData.length * 0.5));
+          const wave = ((timeDomainData[tdIdx] ?? 128) - 128) / 128;
+          const harmonic = Math.sin((i / segments) * Math.PI * 6 + currentTime * 2.2) * (0.06 + treble * 0.12);
+          const r =
+            baseRadius +
+            radiusOffset +
+            (Math.pow(spec, 1.1) * 0.78 + Math.abs(wave) * 0.25 + harmonic) * outerReach * ampScale;
+          const angle = (i / segments) * Math.PI * 2 - Math.PI * 0.5 + rotOffset;
+          pts.push({
+            x: cx + Math.cos(angle) * r,
+            y: cy + Math.sin(angle) * r,
+          });
+        }
+
+        vCtx.save();
+        vCtx.beginPath();
+        const last = pts[pts.length - 1];
+        const first = pts[0];
+        vCtx.moveTo((last.x + first.x) * 0.5, (last.y + first.y) * 0.5);
+        for (let i = 0; i < pts.length; i++) {
+          const curr = pts[i];
+          const next = pts[(i + 1) % pts.length];
+          vCtx.quadraticCurveTo(curr.x, curr.y, (curr.x + next.x) * 0.5, (curr.y + next.y) * 0.5);
+        }
+        vCtx.closePath();
+
+        if (fillAlpha > 0) {
+          vCtx.fillStyle = hexToRgba(color, fillAlpha);
+          vCtx.fill();
+        }
+        vCtx.strokeStyle = hexToRgba(color, 0.92);
+        vCtx.lineWidth = lineW;
+        vCtx.shadowColor = color;
+        vCtx.shadowBlur = minDim * (0.02 + beatBoost * 0.015);
+        vCtx.stroke();
+        vCtx.restore();
+      };
+
+      drawOrbitalSpline(
+        settings.secondaryColor,
+        minDim * 0.016,
+        0.92,
+        -currentTime * 0.15,
+        Math.max(2.2, minDim * 0.0042),
+        0.09
+      );
+      drawOrbitalSpline(
+        settings.primaryColor,
+        minDim * 0.004,
+        1.05,
+        currentTime * 0.12,
+        Math.max(2.8, minDim * 0.0054),
+        0.13
+      );
+
+      // Orbiting frequency beads along outer halo
+      const nodeCount = Math.max(12, Math.min(36, Math.round(settings.barCount * 0.3)));
+      vCtx.save();
+      for (let n = 0; n < nodeCount; n++) {
+        const sym = n < nodeCount / 2 ? n : nodeCount - 1 - n;
+        const val = getPerceptualBarValue(frequencyData, sym, Math.max(8, nodeCount / 2), settings.sensitivity);
+        const angle = (n / nodeCount) * Math.PI * 2 + currentTime * 0.42;
+        const dist = baseRadius + outerReach * (0.48 + val * 0.68);
+        const nx = cx + Math.cos(angle) * dist;
+        const ny = cy + Math.sin(angle) * dist;
+        const nodeR = Math.max(2, minDim * (0.0032 + val * 0.0055));
+        const nodeColor = n % 2 === 0 ? settings.primaryColor : settings.secondaryColor;
+
+        vCtx.beginPath();
+        vCtx.arc(nx, ny, nodeR, 0, Math.PI * 2);
+        vCtx.fillStyle = hexToRgba(nodeColor, 0.85);
+        vCtx.shadowColor = nodeColor;
+        vCtx.shadowBlur = minDim * 0.014;
+        vCtx.fill();
+      }
+      vCtx.restore();
+
+      // Inner rim stroke
+      vCtx.save();
+      vCtx.beginPath();
+      vCtx.arc(cx, cy, circularArtRadius, 0, Math.PI * 2);
+      vCtx.strokeStyle = hexToRgba(settings.primaryColor, 0.78);
+      vCtx.lineWidth = Math.max(2, minDim * 0.0038);
+      vCtx.shadowColor = settings.primaryColor;
+      vCtx.shadowBlur = minDim * 0.015;
+      vCtx.stroke();
+      vCtx.restore();
+    } else if (settings.visualizerMode === 'cube-3d') {
+      // 3D Cube Mesh: perspective-projected rotating cube with 6 frequency-reactive faces
+      const cx = width * 0.5;
+      const cy = visCenterY;
+      const baseHalf = minDim * (isPortrait ? 0.145 : 0.165) * (1 + beatBoost * 0.1);
+      const focalLen = minDim * 1.45;
+      const camDist = baseHalf * 5.2;
+
+      const rotX = albumRotationRef?.cubeX ?? 0.48 + currentTime * 0.44 * cubeSpeedMult;
+      const rotY = albumRotationRef?.cubeY ?? 0.68 + currentTime * 0.72 * cubeSpeedMult;
+      const rotZ = albumRotationRef?.cubeZ ?? 0.18 + currentTime * 0.24 * cubeSpeedMult;
+
+      const cosX = Math.cos(rotX);
+      const sinX = Math.sin(rotX);
+      const cosY = Math.cos(rotY);
+      const sinY = Math.sin(rotY);
+      const cosZ = Math.cos(rotZ);
+      const sinZ = Math.sin(rotZ);
+
+      type Vec3 = [number, number, number];
+      const rotatePoint = (vx: number, vy: number, vz: number): Vec3 => {
+        // Rotate X
+        const y1 = vy * cosX - vz * sinX;
+        const z1 = vy * sinX + vz * cosX;
+        // Rotate Y
+        const x2 = vx * cosY + z1 * sinY;
+        const z2 = -vx * sinY + z1 * cosY;
+        // Rotate Z
+        const x3 = x2 * cosZ - y1 * sinZ;
+        const y3 = x2 * sinZ + y1 * cosZ;
+        return [x3, y3, z2];
+      };
+
+      const projectPoint = (p: Vec3) => {
+        const depth = Math.max(baseHalf * 1.2, camDist - p[2]);
+        const scale = focalLen / depth;
+        return {
+          x: cx + p[0] * scale,
+          y: cy + p[1] * scale,
+          z: p[2],
+        };
+      };
+
+      // Ambient radial glow behind the 3D cube
+      vCtx.save();
+      const cubeGlow = vCtx.createRadialGradient(cx, cy, baseHalf * 0.25, cx, cy, baseHalf * 2.4);
+      cubeGlow.addColorStop(0, hexToRgba(settings.primaryColor, 0.2 + bass * 0.22 + beatBoost * 0.12));
+      cubeGlow.addColorStop(0.55, hexToRgba(settings.secondaryColor, 0.08 + mid * 0.08));
+      cubeGlow.addColorStop(1, 'rgba(0,0,0,0)');
+      vCtx.fillStyle = cubeGlow;
+      vCtx.beginPath();
+      vCtx.arc(cx, cy, baseHalf * 2.4, 0, Math.PI * 2);
+      vCtx.fill();
+      vCtx.restore();
+
+      // Inner frequency-pulsing wireframe core cube for structural depth
+      const coreHalf = baseHalf * (0.46 + bass * 0.2 + beatBoost * 0.12);
+      const coreProj = [
+        [-1, -1, -1],
+        [1, -1, -1],
+        [1, 1, -1],
+        [-1, 1, -1],
+        [-1, -1, 1],
+        [1, -1, 1],
+        [1, 1, 1],
+        [-1, 1, 1],
+      ].map(([x, y, z]) => projectPoint(rotatePoint(x * coreHalf, y * coreHalf, z * coreHalf)));
+      const coreEdges: Array<[number, number]> = [
+        [0, 1], [1, 2], [2, 3], [3, 0],
+        [4, 5], [5, 6], [6, 7], [7, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+      ];
+
+      vCtx.save();
+      vCtx.strokeStyle = hexToRgba(settings.secondaryColor, 0.45 + treble * 0.35);
+      vCtx.lineWidth = Math.max(1.2, minDim * 0.0024);
+      vCtx.shadowColor = settings.secondaryColor;
+      vCtx.shadowBlur = minDim * 0.014;
+      vCtx.beginPath();
+      for (const [a, b] of coreEdges) {
+        vCtx.moveTo(coreProj[a].x, coreProj[a].y);
+        vCtx.lineTo(coreProj[b].x, coreProj[b].y);
+      }
+      vCtx.stroke();
+      vCtx.restore();
+
+      // 6 faces mapped to 6 distinct frequency bands (sub-bass -> high treble)
+      const faceSpecs: Array<{
+        normal: Vec3;
+        uAxis: Vec3;
+        vAxis: Vec3;
+        bandIndex: number;
+      }> = [
+        { normal: [0, 0, 1], uAxis: [1, 0, 0], vAxis: [0, 1, 0], bandIndex: 0 },   // Front (+Z) -> Sub-Bass
+        { normal: [0, -1, 0], uAxis: [1, 0, 0], vAxis: [0, 0, 1], bandIndex: 1 },  // Top (-Y) -> Bass Punch
+        { normal: [1, 0, 0], uAxis: [0, 0, -1], vAxis: [0, 1, 0], bandIndex: 2 },  // Right (+X) -> Low-Mid
+        { normal: [-1, 0, 0], uAxis: [0, 0, 1], vAxis: [0, 1, 0], bandIndex: 3 },  // Left (-X) -> High-Mid
+        { normal: [0, 1, 0], uAxis: [1, 0, 0], vAxis: [0, 0, -1], bandIndex: 4 },  // Bottom (+Y) -> Presence
+        { normal: [0, 0, -1], uAxis: [-1, 0, 0], vAxis: [0, 1, 0], bandIndex: 5 }, // Back (-Z) -> Brilliance
+      ];
+
+      const subdiv = settings.barCount >= 96 ? 3 : settings.barCount >= 64 ? 2 : 1;
+
+      const projectedFaces = faceSpecs.map((spec) => {
+        const bandVal = getPerceptualBarValue(
+          frequencyData,
+          spec.bandIndex,
+          6,
+          settings.sensitivity
+        );
+        // Each face's physical size (width & height) and outward displacement scale with its band
+        const faceHalf = baseHalf * (0.72 + Math.pow(bandVal, 0.95) * 0.56);
+        const faceOffset = baseHalf * (0.98 + Math.pow(bandVal, 1.05) * 0.36);
+
+        const buildCorner = (su: number, sv: number, scaleFactor = 1) => {
+          const lx =
+            spec.normal[0] * faceOffset +
+            (spec.uAxis[0] * su + spec.vAxis[0] * sv) * faceHalf * scaleFactor;
+          const ly =
+            spec.normal[1] * faceOffset +
+            (spec.uAxis[1] * su + spec.vAxis[1] * sv) * faceHalf * scaleFactor;
+          const lz =
+            spec.normal[2] * faceOffset +
+            (spec.uAxis[2] * su + spec.vAxis[2] * sv) * faceHalf * scaleFactor;
+          return projectPoint(rotatePoint(lx, ly, lz));
+        };
+
+        const corners = [
+          buildCorner(-1, -1),
+          buildCorner(1, -1),
+          buildCorner(1, 1),
+          buildCorner(-1, 1),
+        ];
+
+        const innerFactor = 0.42 + bandVal * 0.28;
+        const innerCorners = [
+          buildCorner(-1, -1, innerFactor),
+          buildCorner(1, -1, innerFactor),
+          buildCorner(1, 1, innerFactor),
+          buildCorner(-1, 1, innerFactor),
+        ];
+
+        const gridLines: Array<[ReturnType<typeof buildCorner>, ReturnType<typeof buildCorner>]> = [];
+        if (subdiv > 1) {
+          for (let g = 1; g < subdiv; g++) {
+            const t = -1 + (2 * g) / subdiv;
+            gridLines.push([buildCorner(t, -1), buildCorner(t, 1)]);
+            gridLines.push([buildCorner(-1, t), buildCorner(1, t)]);
+          }
+        }
+
+        const rotNormal = rotatePoint(spec.normal[0], spec.normal[1], spec.normal[2]);
+        const avgZ = (corners[0].z + corners[1].z + corners[2].z + corners[3].z) * 0.25;
+        // Key-light shading dot product for 3D surface readability
+        const lightDot = Math.max(
+          0,
+          rotNormal[0] * 0.35 + rotNormal[1] * -0.58 + rotNormal[2] * 0.73
+        );
+        const isFrontFacing = rotNormal[2] > -0.15;
+
+        return {
+          spec,
+          bandVal,
+          corners,
+          innerCorners,
+          gridLines,
+          avgZ,
+          lightDot,
+          isFrontFacing,
+        };
+      });
+
+      // Painter's algorithm: sort back-to-front by view-space Z depth
+      projectedFaces.sort((a, b) => a.avgZ - b.avgZ);
+
+      for (const face of projectedFaces) {
+        const { corners, innerCorners, gridLines, bandVal, lightDot, isFrontFacing, spec } = face;
+        const usePrimary = spec.bandIndex % 2 === 0;
+        const faceColor = usePrimary ? settings.primaryColor : settings.secondaryColor;
+        const accentColor = usePrimary ? settings.secondaryColor : settings.primaryColor;
+
+        const minX = Math.min(corners[0].x, corners[1].x, corners[2].x, corners[3].x);
+        const maxX = Math.max(corners[0].x, corners[1].x, corners[2].x, corners[3].x);
+        const minY = Math.min(corners[0].y, corners[1].y, corners[2].y, corners[3].y);
+        const maxY = Math.max(corners[0].y, corners[1].y, corners[2].y, corners[3].y);
+
+        vCtx.save();
+        vCtx.beginPath();
+        vCtx.moveTo(corners[0].x, corners[0].y);
+        vCtx.lineTo(corners[1].x, corners[1].y);
+        vCtx.lineTo(corners[2].x, corners[2].y);
+        vCtx.lineTo(corners[3].x, corners[3].y);
+        vCtx.closePath();
+
+        const baseAlpha = (isFrontFacing ? 0.16 : 0.06) + bandVal * 0.24 + lightDot * 0.12;
+        const faceGrad = vCtx.createLinearGradient(minX, minY, maxX, maxY);
+        faceGrad.addColorStop(0, hexToRgba(faceColor, Math.min(0.65, baseAlpha * 1.15)));
+        faceGrad.addColorStop(1, hexToRgba(accentColor, Math.min(0.5, baseAlpha * 0.65)));
+        vCtx.fillStyle = faceGrad;
+        vCtx.fill();
+
+        // Optional mesh subdivision wireframe inside face when barCount is higher
+        if (gridLines.length > 0) {
+          vCtx.strokeStyle = hexToRgba(faceColor, isFrontFacing ? 0.26 + bandVal * 0.25 : 0.1);
+          vCtx.lineWidth = Math.max(0.8, minDim * 0.0014);
+          vCtx.beginPath();
+          for (const [p1, p2] of gridLines) {
+            vCtx.moveTo(p1.x, p1.y);
+            vCtx.lineTo(p2.x, p2.y);
+          }
+          vCtx.stroke();
+        }
+
+        // Inner reactive frequency quad outline
+        vCtx.beginPath();
+        vCtx.moveTo(innerCorners[0].x, innerCorners[0].y);
+        vCtx.lineTo(innerCorners[1].x, innerCorners[1].y);
+        vCtx.lineTo(innerCorners[2].x, innerCorners[2].y);
+        vCtx.lineTo(innerCorners[3].x, innerCorners[3].y);
+        vCtx.closePath();
+        vCtx.strokeStyle = hexToRgba(accentColor, (isFrontFacing ? 0.48 : 0.18) + bandVal * 0.35);
+        vCtx.lineWidth = Math.max(1.2, minDim * 0.0022);
+        vCtx.stroke();
+
+        // Crisp neon outer edge stroke
+        vCtx.beginPath();
+        vCtx.moveTo(corners[0].x, corners[0].y);
+        vCtx.lineTo(corners[1].x, corners[1].y);
+        vCtx.lineTo(corners[2].x, corners[2].y);
+        vCtx.lineTo(corners[3].x, corners[3].y);
+        vCtx.closePath();
+        vCtx.strokeStyle = hexToRgba(
+          faceColor,
+          (isFrontFacing ? 0.72 : 0.28) + bandVal * 0.28
+        );
+        vCtx.lineWidth = Math.max(
+          1.8,
+          minDim * (isFrontFacing ? 0.0038 + bandVal * 0.0026 : 0.002)
+        );
+        vCtx.lineJoin = 'round';
+        vCtx.shadowColor = faceColor;
+        vCtx.shadowBlur = minDim * (isFrontFacing ? 0.018 + beatBoost * 0.015 : 0.006);
+        vCtx.stroke();
+
+        // Luminous vertex nodes on front-facing panels
+        if (isFrontFacing) {
+          const nodeR = Math.max(2, minDim * (0.0034 + bandVal * 0.0032));
+          vCtx.fillStyle = '#ffffff';
+          for (const c of corners) {
+            vCtx.beginPath();
+            vCtx.arc(c.x, c.y, nodeR, 0, Math.PI * 2);
+            vCtx.fill();
+          }
+        }
+        vCtx.restore();
+      }
     } else {
       // circular-ring OR hybrid-particles
       const cx = circularCx;
@@ -585,8 +1346,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         strokeGrad.addColorStop(1, mix < 0.5 ? settings.secondaryColor : settings.primaryColor);
 
         vCtx.strokeStyle = strokeGrad;
-        vCtx.shadowColor = hexToRgba(settings.primaryColor, 0.45);
-        vCtx.shadowBlur = minDim * 0.012;
+        applyShadow(hexToRgba(settings.primaryColor, 0.45), minDim * 0.012);
         vCtx.beginPath();
         vCtx.moveTo(x1, y1);
         vCtx.lineTo(x2, y2);
@@ -609,7 +1369,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
 
   if (bloom > 0.005) {
     bloomLayerCanvas = ensureScratchCanvas(bloomLayerCanvas, width, height);
-    const layerCtx = bloomLayerCanvas.getContext('2d');
+    const layerCtx = getContext2d(bloomLayerCanvas);
     if (layerCtx) {
       layerCtx.clearRect(0, 0, width, height);
       drawVisualizerLayer(layerCtx);
@@ -617,52 +1377,59 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       // Draw crisp base visualizer layer
       ctx.drawImage(bloomLayerCanvas, 0, 0, width, height);
 
-      // Prepare multi-resolution downsampled buffers for iterative blur passes
+      // Multi-resolution downsampled buffers: blur inside downsampled canvases & bilinearly upscale
+      // (avoids expensive full-resolution ctx.filter Gaussian passes per frame)
       const halfW = Math.max(64, Math.round(width * 0.5));
       const halfH = Math.max(64, Math.round(height * 0.5));
       const quarterW = Math.max(32, Math.round(width * 0.25));
       const quarterH = Math.max(32, Math.round(height * 0.25));
+      const eighthW = Math.max(24, Math.round(width * 0.125));
+      const eighthH = Math.max(24, Math.round(height * 0.125));
 
       bloomHalfCanvas = ensureScratchCanvas(bloomHalfCanvas, halfW, halfH);
       bloomQuarterCanvas = ensureScratchCanvas(bloomQuarterCanvas, quarterW, quarterH);
-      const halfCtx = bloomHalfCanvas.getContext('2d');
-      const quarterCtx = bloomQuarterCanvas.getContext('2d');
+      bloomEighthCanvas = ensureScratchCanvas(bloomEighthCanvas, eighthW, eighthH);
+      const halfCtx = getContext2d(bloomHalfCanvas);
+      const quarterCtx = getContext2d(bloomQuarterCanvas);
+      const eighthCtx = getContext2d(bloomEighthCanvas);
 
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
 
-      // Iterative Blur Pass 1: Tight core bloom
-      const blur1 = Math.max(2, Math.round(minDim * (0.007 + bloom * 0.005)));
-      ctx.filter = `blur(${blur1}px)`;
-      ctx.globalAlpha = Math.min(0.85, bloom * 0.45);
-      ctx.drawImage(bloomLayerCanvas, 0, 0, width, height);
-
-      // Iterative Blur Pass 2: Medium neon halo via half-res pass
+      // Iterative Blur Pass 1: Tight core bloom via half-res buffer
       if (halfCtx) {
         halfCtx.clearRect(0, 0, halfW, halfH);
         halfCtx.save();
-        halfCtx.filter = `blur(${Math.max(2, Math.round(minDim * 0.008))}px)`;
+        halfCtx.filter = `blur(${Math.max(2, Math.round(minDim * (0.0045 + bloom * 0.0035)))}px)`;
         halfCtx.drawImage(bloomLayerCanvas, 0, 0, halfW, halfH);
         halfCtx.restore();
 
-        const blur2 = Math.max(4, Math.round(minDim * (0.015 + bloom * 0.01)));
-        ctx.filter = `blur(${blur2}px)`;
-        ctx.globalAlpha = Math.min(0.75, bloom * 0.36);
+        ctx.globalAlpha = Math.min(0.85, bloom * 0.48);
         ctx.drawImage(bloomHalfCanvas, 0, 0, width, height);
       }
 
-      // Iterative Blur Pass 3: Wide atmospheric bloom via quarter-res pass
+      // Iterative Blur Pass 2: Medium neon halo via quarter-res buffer
       if (quarterCtx && halfCtx) {
         quarterCtx.clearRect(0, 0, quarterW, quarterH);
         quarterCtx.save();
-        quarterCtx.filter = `blur(${Math.max(3, Math.round(minDim * 0.012))}px)`;
+        quarterCtx.filter = `blur(${Math.max(2, Math.round(minDim * (0.0065 + bloom * 0.0045)))}px)`;
         quarterCtx.drawImage(bloomHalfCanvas, 0, 0, quarterW, quarterH);
         quarterCtx.restore();
 
-        const blur3 = Math.max(8, Math.round(minDim * (0.028 + bloom * 0.018)));
-        ctx.filter = `blur(${blur3}px)`;
-        ctx.globalAlpha = Math.min(0.68, bloom * 0.28);
+        ctx.globalAlpha = Math.min(0.75, bloom * 0.36);
         ctx.drawImage(bloomQuarterCanvas, 0, 0, width, height);
+      }
+
+      // Iterative Blur Pass 3: Wide atmospheric bloom via eighth-res buffer
+      if (eighthCtx && quarterCtx) {
+        eighthCtx.clearRect(0, 0, eighthW, eighthH);
+        eighthCtx.save();
+        eighthCtx.filter = `blur(${Math.max(2, Math.round(minDim * (0.0075 + bloom * 0.005)))}px)`;
+        eighthCtx.drawImage(bloomQuarterCanvas, 0, 0, eighthW, eighthH);
+        eighthCtx.restore();
+
+        ctx.globalAlpha = Math.min(0.68, bloom * 0.28);
+        ctx.drawImage(bloomEighthCanvas, 0, 0, width, height);
       }
 
       ctx.restore();
@@ -684,14 +1451,14 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     ctx.arc(cx, cy, artRadius, 0, Math.PI * 2);
     ctx.clip();
 
-    if (albumImage && albumImage.complete && albumImage.naturalWidth > 0) {
+    const albumDims = getImageDimensions(albumImage);
+    if (albumDims && albumImage) {
       ctx.save();
       ctx.translate(cx, cy);
       if (albumRotationRef) {
         ctx.rotate(albumRotationRef.angle * 0.35);
       }
-      const imgW = albumImage.naturalWidth || albumImage.width;
-      const imgH = albumImage.naturalHeight || albumImage.height;
+      const { width: imgW, height: imgH } = albumDims;
       const scale = (artRadius * 2) / Math.min(imgW, imgH);
       ctx.drawImage(
         albumImage,
@@ -791,17 +1558,8 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   // Store current frame (before editor-only safe-zone guide) for next-frame motion blur
   if (motionBlurState) {
     if (motionBlurAlpha > 0) {
-      if (!motionBlurState.canvas) {
-        motionBlurState.canvas = document.createElement('canvas');
-      }
-      if (
-        motionBlurState.canvas.width !== width ||
-        motionBlurState.canvas.height !== height
-      ) {
-        motionBlurState.canvas.width = width;
-        motionBlurState.canvas.height = height;
-      }
-      const prevCtx = motionBlurState.canvas.getContext('2d', { alpha: false });
+      motionBlurState.canvas = ensureScratchCanvas(motionBlurState.canvas, width, height);
+      const prevCtx = getContext2d(motionBlurState.canvas, { alpha: false });
       if (prevCtx) {
         prevCtx.drawImage(ctx.canvas, 0, 0, width, height);
         motionBlurState.hasFrame = true;
@@ -820,7 +1578,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
 }
 
 function renderSafeZoneGuide(
-  ctx: CanvasRenderingContext2D,
+  ctx: RenderContext2D,
   width: number,
   height: number,
   minDim: number,
@@ -975,7 +1733,7 @@ function renderSafeZoneGuide(
 }
 
 function renderLyrics(
-  ctx: CanvasRenderingContext2D,
+  ctx: RenderContext2D,
   width: number,
   height: number,
   minDim: number,

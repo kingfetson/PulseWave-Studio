@@ -7,6 +7,11 @@ import {
   Particle,
   StudioSettings,
 } from '../types/studio';
+import type {
+  StartWorkerExportPayload,
+  WorkerFontDescriptor,
+  WorkerOutgoingMessage,
+} from '../workers/mp4ExportWorker';
 import {
   createInitialBeatState,
   OfflineAudioAnalyzer,
@@ -15,6 +20,7 @@ import {
   stepBeatDetector,
 } from './audioEngine';
 import { renderVisualizerFrame } from './canvasRenderer';
+import { resolveSupportedVideoConfig } from './videoConfig';
 
 export interface ExportMp4Options {
   audioBuffer: AudioBuffer;
@@ -46,89 +52,262 @@ export function sanitizeFileName(name: string): string {
   return cleaned || 'pulsewave-track';
 }
 
-async function resolveSupportedVideoConfig(
-  width: number,
-  height: number,
-  fps: number
-): Promise<VideoEncoderConfig> {
-  // Prefer avc1.420028 (H.264 Baseline Profile Level 4.0) as requested,
-  // with clean fallbacks for hardware/OS encoder variance.
-  const candidates = ['avc1.420028', 'avc1.4d002a', 'avc1.640028', 'avc1.42E01F'];
-  const bitrate = width * height > 1000000 ? 6_500_000 : 4_800_000;
-
-  for (const codec of candidates) {
-    const config: VideoEncoderConfig = {
-      codec,
-      width,
-      height,
-      bitrate,
-      framerate: fps,
-    };
-    try {
-      const support = await VideoEncoder.isConfigSupported(config);
-      if (support.supported) {
-        return config;
-      }
-    } catch {
-      // Try next candidate
-    }
+function yieldToEventLoop(): Promise<void> {
+  if (typeof MessageChannel !== 'undefined') {
+    return new Promise((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => resolve();
+      channel.port2.postMessage(undefined);
+    });
   }
-
-  return {
-    codec: 'avc1.420028',
-    width,
-    height,
-    bitrate,
-    framerate: fps,
-  };
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-export async function exportProjectToMp4(options: ExportMp4Options): Promise<ExportMp4Result> {
+function collectWorkerFonts(): WorkerFontDescriptor[] {
+  const collected: WorkerFontDescriptor[] = [];
+  if (typeof document === 'undefined' || !document.styleSheets) return collected;
+
+  for (const sheet of Array.from(document.styleSheets)) {
+    try {
+      const rules = sheet.cssRules;
+      if (!rules) continue;
+      for (const rule of Array.from(rules)) {
+        if (typeof CSSFontFaceRule !== 'undefined' && rule instanceof CSSFontFaceRule) {
+          const family = rule.style.getPropertyValue('font-family').replace(/['"]/g, '').trim();
+          const src = rule.style.getPropertyValue('src').trim();
+          const weight = rule.style.getPropertyValue('font-weight').trim();
+          const style = rule.style.getPropertyValue('font-style').trim();
+          if (
+            src &&
+            (family === 'Plus Jakarta Sans' || family === 'JetBrains Mono')
+          ) {
+            collected.push({
+              family,
+              source: src,
+              weight: weight || '400',
+              style: style || 'normal',
+            });
+          }
+        }
+      }
+    } catch {
+      // Cross-origin stylesheets without CORS headers are skipped safely
+    }
+  }
+  return collected;
+}
+
+function canUseWorkerPipeline(): boolean {
+  return (
+    typeof Worker !== 'undefined' &&
+    typeof OffscreenCanvas !== 'undefined' &&
+    typeof createImageBitmap !== 'undefined'
+  );
+}
+
+async function createTransferableBitmap(
+  img: HTMLImageElement | null
+): Promise<ImageBitmap | null> {
+  if (!img || !img.complete || img.naturalWidth <= 0) return null;
+  try {
+    return await createImageBitmap(img);
+  } catch {
+    return null;
+  }
+}
+
+class WorkerStartupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkerStartupError';
+  }
+}
+
+async function exportProjectViaWorker(options: {
+  slicedBuffer: AudioBuffer;
+  trimStart: number;
+  settings: StudioSettings;
+  lyrics: LyricLine[];
+  bgImage: HTMLImageElement | null;
+  albumImage: HTMLImageElement | null;
+  signal: AbortSignal;
+  onProgress: (state: ExportProgressState) => void;
+}): Promise<{ buffer: ArrayBuffer; totalFrames: number; elapsedMs: number }> {
   const {
-    audioBuffer,
+    slicedBuffer,
     trimStart,
-    trimEnd,
     settings,
     lyrics,
     bgImage,
     albumImage,
     signal,
     onProgress,
-    autoDownload = true,
-    customFileName,
   } = options;
 
-  if (
-    typeof VideoEncoder === 'undefined' ||
-    typeof AudioEncoder === 'undefined' ||
-    typeof VideoFrame === 'undefined' ||
-    typeof AudioData === 'undefined'
-  ) {
-    throw new Error(
-      'Your browser does not support WebCodecs (VideoEncoder / AudioEncoder). Please use Chrome, Edge, or Safari 16.4+.'
+  if (signal.aborted) {
+    throw new DOMException('Export cancelled', 'AbortError');
+  }
+
+  const numberOfChannels = Math.min(2, slicedBuffer.numberOfChannels);
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    // Copy slice data so underlying buffers can be zero-copy transferred to the worker
+    channels.push(new Float32Array(slicedBuffer.getChannelData(ch)));
+  }
+
+  const [bgBitmap, albumBitmap] = await Promise.all([
+    createTransferableBitmap(bgImage),
+    createTransferableBitmap(albumImage),
+  ]);
+
+  if (signal.aborted) {
+    bgBitmap?.close();
+    albumBitmap?.close();
+    throw new DOMException('Export cancelled', 'AbortError');
+  }
+
+  const fonts = collectWorkerFonts();
+  let worker: Worker;
+  try {
+    worker = new Worker(new URL('../workers/mp4ExportWorker.ts', import.meta.url), {
+      type: 'module',
+    });
+  } catch (err) {
+    bgBitmap?.close();
+    albumBitmap?.close();
+    throw new WorkerStartupError(
+      err instanceof Error ? err.message : 'Unable to initialize export worker.'
     );
   }
 
-  const startTimeMs = performance.now();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let receivedProgress = false;
+
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+    };
+
+    const onAbort = () => {
+      try {
+        worker.postMessage({ type: 'cancel' });
+      } catch {
+        // ignore postMessage errors on terminate
+      }
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new DOMException('Export cancelled', 'AbortError'));
+      }
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    worker.onmessage = (event: MessageEvent<WorkerOutgoingMessage>) => {
+      if (settled) return;
+      const msg = event.data;
+      if (msg.type === 'progress') {
+        receivedProgress = true;
+        onProgress(msg.state);
+      } else if (msg.type === 'done') {
+        settled = true;
+        cleanup();
+        resolve({
+          buffer: msg.buffer,
+          totalFrames: msg.totalFrames,
+          elapsedMs: msg.elapsedMs,
+        });
+      } else if (msg.type === 'cancelled') {
+        settled = true;
+        cleanup();
+        reject(new DOMException('Export cancelled', 'AbortError'));
+      } else if (msg.type === 'error') {
+        settled = true;
+        cleanup();
+        if (!receivedProgress && /OffscreenCanvas|Worker|WebCodecs/i.test(msg.message)) {
+          reject(new WorkerStartupError(msg.message));
+        } else {
+          reject(new Error(msg.message));
+        }
+      }
+    };
+
+    worker.onerror = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const message = err.message || 'Export worker encountered an unexpected error.';
+      if (!receivedProgress) {
+        reject(new WorkerStartupError(message));
+      } else {
+        reject(new Error(message));
+      }
+    };
+
+    const payload: StartWorkerExportPayload = {
+      type: 'start',
+      sampleRate: slicedBuffer.sampleRate,
+      length: slicedBuffer.length,
+      numberOfChannels,
+      channels,
+      trimStart,
+      settings,
+      lyrics,
+      bgBitmap,
+      albumBitmap,
+      fonts,
+    };
+
+    const transferList: Transferable[] = channels.map((c) => c.buffer);
+    if (bgBitmap) transferList.push(bgBitmap);
+    if (albumBitmap) transferList.push(albumBitmap);
+
+    try {
+      worker.postMessage(payload, transferList);
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        bgBitmap?.close();
+        albumBitmap?.close();
+        reject(
+          new WorkerStartupError(
+            err instanceof Error ? err.message : 'Failed to transfer assets to worker.'
+          )
+        );
+      }
+    }
+  });
+}
+
+async function exportProjectOnMainThread(options: {
+  slicedBuffer: AudioBuffer;
+  trimStart: number;
+  settings: StudioSettings;
+  lyrics: LyricLine[];
+  bgImage: HTMLImageElement | null;
+  albumImage: HTMLImageElement | null;
+  signal: AbortSignal;
+  onProgress: (state: ExportProgressState) => void;
+  startTimeMs: number;
+}): Promise<{ buffer: ArrayBuffer; totalFrames: number; elapsedMs: number }> {
+  const {
+    slicedBuffer,
+    trimStart,
+    settings,
+    lyrics,
+    bgImage,
+    albumImage,
+    signal,
+    onProgress,
+    startTimeMs,
+  } = options;
+
   const { width, height } = ASPECT_RATIOS[settings.aspectRatio];
   const fps = settings.exportFps;
-
-  onProgress({
-    status: 'preparing',
-    currentFrame: 0,
-    totalFrames: 1,
-    percentage: 0,
-    message: `Slicing audio clip with 0.15s ${settings.fadeType} boundary fades...`,
-  });
-
-  // 1. Slice decoded AudioBuffer cleanly with 0.15s fade-in/fade-out
-  const slicedBuffer = sliceAudioBufferWithFade(
-    audioBuffer,
-    trimStart,
-    trimEnd,
-    0.15,
-    settings.fadeType
-  );
   const clipDuration = slicedBuffer.duration;
   const totalFrames = Math.max(1, Math.ceil(clipDuration * fps));
   const numberOfChannels = Math.min(2, slicedBuffer.numberOfChannels);
@@ -147,7 +326,6 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     throw new Error('AAC audio encoding (mp4a.40.2) is not supported in this browser.');
   }
 
-  // 2. Initialize mp4-muxer with ArrayBufferTarget
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
     target,
@@ -190,7 +368,6 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
   audioEncoder.configure(audioConfig);
 
   try {
-    // 3. Encode AudioBuffer in 4096-sample planar f32 chunks
     const chunkSamples = 4096;
     const totalSamples = slicedBuffer.length;
     const ch0 = slicedBuffer.getChannelData(0);
@@ -223,7 +400,6 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       audioData.close();
     }
 
-    // 4. Prepare offscreen canvas & deterministic offline FFT analyzer
     const offscreenCanvas = document.createElement('canvas');
     offscreenCanvas.width = width;
     offscreenCanvas.height = height;
@@ -246,7 +422,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     const dt = 1 / fps;
     const frameDurationUs = Math.round(1_000_000 / fps);
 
-    // 5. Fast offline frame rendering + encoding loop
+    let lastUiYieldMs = performance.now();
     for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
       if (signal.aborted) {
         throw new DOMException('Export cancelled', 'AbortError');
@@ -306,8 +482,9 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
       videoFrame.close();
 
-      // Backpressure + UI responsiveness yield
-      if (videoEncoder.encodeQueueSize > 8 || frameIdx % 4 === 0) {
+      const nowMs = performance.now();
+      const needsBackpressure = videoEncoder.encodeQueueSize >= 24;
+      if (needsBackpressure || nowMs - lastUiYieldMs >= 75 || frameIdx === totalFrames - 1) {
         const pct = Math.min(97, Math.round(((frameIdx + 1) / totalFrames) * 96));
         onProgress({
           status: 'rendering',
@@ -317,10 +494,11 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           message: `Rendering frame ${frameIdx + 1} of ${totalFrames} — ${pct}%`,
         });
 
-        while (videoEncoder.encodeQueueSize > 10 && !signal.aborted && !encoderError) {
+        while (videoEncoder.encodeQueueSize >= 24 && !signal.aborted && !encoderError) {
           await new Promise((r) => setTimeout(r, 4));
         }
-        await new Promise((r) => setTimeout(r, 0));
+        await yieldToEventLoop();
+        lastUiYieldMs = performance.now();
       }
     }
 
@@ -341,41 +519,10 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
 
     muxer.finalize();
 
-    const mp4Blob = new Blob([target.buffer], { type: 'video/mp4' });
-    const downloadUrl = URL.createObjectURL(mp4Blob);
-    const trackSlug = sanitizeFileName(settings.trackTitle || 'pulsewave-video');
-    const ratioSlug = settings.aspectRatio.replace(':', 'x');
-    const downloadFileName = customFileName
-      ? `${sanitizeFileName(customFileName)}.mp4`
-      : `${trackSlug}-${ratioSlug}.mp4`;
-
-    // Trigger automatic download unless batch caller suppresses it
-    if (autoDownload) {
-      const anchor = document.createElement('a');
-      anchor.href = downloadUrl;
-      anchor.download = downloadFileName;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-    }
-
-    const elapsedMs = Math.round(performance.now() - startTimeMs);
-    onProgress({
-      status: 'completed',
-      currentFrame: totalFrames,
-      totalFrames,
-      percentage: 100,
-      message: `Rendered ${totalFrames} frames in ${(elapsedMs / 1000).toFixed(1)}s`,
-      downloadUrl,
-      downloadFileName,
-      elapsedMs,
-    });
-
     return {
-      downloadUrl,
-      downloadFileName,
-      elapsedMs,
+      buffer: target.buffer,
       totalFrames,
+      elapsedMs: Math.round(performance.now() - startTimeMs),
     };
   } finally {
     try {
@@ -389,4 +536,139 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       // ignore close errors
     }
   }
+}
+
+export async function exportProjectToMp4(options: ExportMp4Options): Promise<ExportMp4Result> {
+  const {
+    audioBuffer,
+    trimStart,
+    trimEnd,
+    settings,
+    lyrics,
+    bgImage,
+    albumImage,
+    signal,
+    onProgress,
+    autoDownload = true,
+    customFileName,
+  } = options;
+
+  if (
+    typeof VideoEncoder === 'undefined' ||
+    typeof AudioEncoder === 'undefined' ||
+    typeof VideoFrame === 'undefined' ||
+    typeof AudioData === 'undefined'
+  ) {
+    throw new Error(
+      'Your browser does not support WebCodecs (VideoEncoder / AudioEncoder). Please use Chrome, Edge, or Safari 16.4+.'
+    );
+  }
+
+  const startTimeMs = performance.now();
+
+  onProgress({
+    status: 'preparing',
+    currentFrame: 0,
+    totalFrames: 1,
+    percentage: 0,
+    message: `Slicing audio clip with 0.15s ${settings.fadeType} boundary fades...`,
+  });
+
+  // 1. Slice decoded AudioBuffer cleanly with 0.15s fade-in/fade-out
+  const slicedBuffer = sliceAudioBufferWithFade(
+    audioBuffer,
+    trimStart,
+    trimEnd,
+    0.15,
+    settings.fadeType
+  );
+
+  let exportResult: { buffer: ArrayBuffer; totalFrames: number; elapsedMs: number };
+
+  if (canUseWorkerPipeline()) {
+    try {
+      onProgress({
+        status: 'preparing',
+        currentFrame: 0,
+        totalFrames: 1,
+        percentage: 0,
+        message: 'Starting background render worker...',
+      });
+      exportResult = await exportProjectViaWorker({
+        slicedBuffer,
+        trimStart,
+        settings,
+        lyrics,
+        bgImage,
+        albumImage,
+        signal,
+        onProgress,
+      });
+    } catch (err) {
+      if (err instanceof WorkerStartupError) {
+        exportResult = await exportProjectOnMainThread({
+          slicedBuffer,
+          trimStart,
+          settings,
+          lyrics,
+          bgImage,
+          albumImage,
+          signal,
+          onProgress,
+          startTimeMs,
+        });
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    exportResult = await exportProjectOnMainThread({
+      slicedBuffer,
+      trimStart,
+      settings,
+      lyrics,
+      bgImage,
+      albumImage,
+      signal,
+      onProgress,
+      startTimeMs,
+    });
+  }
+
+  const mp4Blob = new Blob([exportResult.buffer], { type: 'video/mp4' });
+  const downloadUrl = URL.createObjectURL(mp4Blob);
+  const trackSlug = sanitizeFileName(settings.trackTitle || 'pulsewave-video');
+  const ratioSlug = settings.aspectRatio.replace(':', 'x');
+  const downloadFileName = customFileName
+    ? `${sanitizeFileName(customFileName)}.mp4`
+    : `${trackSlug}-${ratioSlug}.mp4`;
+
+  // Trigger automatic download unless batch caller suppresses it
+  if (autoDownload) {
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = downloadFileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  }
+
+  const elapsedMs = Math.round(performance.now() - startTimeMs);
+  onProgress({
+    status: 'completed',
+    currentFrame: exportResult.totalFrames,
+    totalFrames: exportResult.totalFrames,
+    percentage: 100,
+    message: `Rendered ${exportResult.totalFrames} frames in ${(elapsedMs / 1000).toFixed(1)}s`,
+    downloadUrl,
+    downloadFileName,
+    elapsedMs,
+  });
+
+  return {
+    downloadUrl,
+    downloadFileName,
+    elapsedMs,
+    totalFrames: exportResult.totalFrames,
+  };
 }

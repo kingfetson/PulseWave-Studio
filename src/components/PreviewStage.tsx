@@ -88,7 +88,7 @@ export function PreviewStage({
           type="button"
           onClick={onToggleSafeZone}
           aria-pressed={showSafeZone}
-          title="Toggle Safe Zone Guide & 9:16 Composition Grid (hidden on MP4 export)"
+          title="Toggle Safe Zone Guide & 9:16 Composition Grid (S)"
           className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1.5 backdrop-blur-sm cursor-pointer ${
             showSafeZone
               ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.16)]'

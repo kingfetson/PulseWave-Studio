@@ -36,7 +36,12 @@ export type VisualizerMode =
   | 'mirrored-bars'
   | 'circular-ring'
   | 'neon-wave'
-  | 'hybrid-particles';
+  | 'hybrid-particles'
+  | 'dual-ribbon'
+  | 'led-matrix'
+  | 'harmonic-orb'
+  | 'stereo-prism'
+  | 'cube-3d';
 
 export type LyricStyle = 'karaoke' | 'single-pop' | 'subtitle-bar';
 
@@ -140,7 +145,7 @@ export interface BeatState {
 }
 
 export interface MotionBlurState {
-  canvas: HTMLCanvasElement | null;
+  canvas: HTMLCanvasElement | OffscreenCanvas | null;
   hasFrame: boolean;
 }
 
@@ -190,6 +195,8 @@ export interface StudioProjectSummary {
   name: string;
   createdAt: string;
   updatedAt: string;
+  lastExportedAt?: string;
+  exportCount?: number;
   settings: StudioSettings;
   lyrics: LyricLine[];
   trimStart: number;

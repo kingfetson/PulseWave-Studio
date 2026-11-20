@@ -17,6 +17,11 @@ const VALID_VISUALIZERS: VisualizerMode[] = [
   'circular-ring',
   'neon-wave',
   'hybrid-particles',
+  'dual-ribbon',
+  'led-matrix',
+  'harmonic-orb',
+  'stereo-prism',
+  'cube-3d',
 ];
 const VALID_LYRIC_STYLES: LyricStyle[] = ['karaoke', 'single-pop', 'subtitle-bar'];
 const VALID_FADE_TYPES: FadeType[] = ['linear', 'logarithmic', 'exponential'];
@@ -265,6 +270,11 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'circular-ring': 'Circular Ring',
     'neon-wave': 'Neon Wave',
     'hybrid-particles': 'Hybrid Particles',
+    'dual-ribbon': 'Aurora Ribbons',
+    'led-matrix': 'LED Matrix',
+    'harmonic-orb': 'Harmonic Orbital',
+    'stereo-prism': 'Stereo Prism',
+    'cube-3d': '3D Cube',
   };
   return `${ratio} · ${modeLabel[settings.visualizerMode]} · ${settings.exportFps} FPS`;
 }

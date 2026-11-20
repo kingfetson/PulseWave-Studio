@@ -375,9 +375,12 @@ export function sliceAudioBufferWithFade(
   const length = Math.max(1, endSample - startSample);
   const numChannels = source.numberOfChannels;
 
-  // Create target AudioBuffer via OfflineAudioContext (works cleanly without active AudioContext hardware)
-  const ctx = new OfflineAudioContext(numChannels, length, sampleRate);
-  const sliced = ctx.createBuffer(numChannels, length, sampleRate);
+  // Allocate target AudioBuffer directly without spinning up an OfflineAudioContext
+  const sliced = new AudioBuffer({
+    numberOfChannels: numChannels,
+    length,
+    sampleRate,
+  });
 
   const actualFadeSamples = Math.min(
     Math.floor(fadeSec * sampleRate),
@@ -409,6 +412,35 @@ export function sliceAudioBufferWithFade(
   return sliced;
 }
 
+export interface PcmAudioInput {
+  sampleRate: number;
+  length: number;
+  numberOfChannels: number;
+  channels: Float32Array[];
+}
+
+function getInputChannels(buffer: AudioBuffer | PcmAudioInput): {
+  sampleRate: number;
+  length: number;
+  ch0: Float32Array;
+  ch1: Float32Array | null;
+} {
+  if ('getChannelData' in buffer) {
+    return {
+      sampleRate: buffer.sampleRate,
+      length: buffer.length,
+      ch0: buffer.getChannelData(0),
+      ch1: buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null,
+    };
+  }
+  return {
+    sampleRate: buffer.sampleRate,
+    length: buffer.length,
+    ch0: buffer.channels[0],
+    ch1: buffer.numberOfChannels > 1 ? buffer.channels[1] ?? null : null,
+  };
+}
+
 /**
  * Fast mathematical Radix-2 FFT Analyzer for deterministic offline frame-by-frame
  * frequency & waveform extraction matching Web Audio API AnalyserNode behavior.
@@ -425,18 +457,17 @@ export class OfflineAudioAnalyzer {
   private readonly minDecibels = -100;
   private readonly maxDecibels = -28;
 
-  constructor(buffer: AudioBuffer, fftSize = 2048) {
+  constructor(buffer: AudioBuffer | PcmAudioInput, fftSize = 2048) {
     this.fftSize = fftSize;
     this.binCount = fftSize / 2;
-    this.sampleRate = buffer.sampleRate;
+
+    const { sampleRate, length, ch0, ch1 } = getInputChannels(buffer);
+    this.sampleRate = sampleRate;
 
     // Mix down to mono once for rapid FFT slicing
-    const len = buffer.length;
-    this.monoSamples = new Float32Array(len);
-    const ch0 = buffer.getChannelData(0);
-    if (buffer.numberOfChannels > 1) {
-      const ch1 = buffer.getChannelData(1);
-      for (let i = 0; i < len; i++) {
+    this.monoSamples = new Float32Array(length);
+    if (ch1) {
+      for (let i = 0; i < length; i++) {
         this.monoSamples[i] = 0.5 * (ch0[i] + ch1[i]);
       }
     } else {
@@ -718,11 +749,9 @@ export class OfflineLowPassBeatTracker {
   private readonly filteredMono: Float32Array;
   private readonly sampleRate: number;
 
-  constructor(buffer: AudioBuffer, cutoffHz = 140, q = 1.2) {
-    this.sampleRate = buffer.sampleRate;
-    const len = buffer.length;
-    const ch0 = buffer.getChannelData(0);
-    const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
+  constructor(buffer: AudioBuffer | PcmAudioInput, cutoffHz = 140, q = 1.2) {
+    const { sampleRate, length: len, ch0, ch1 } = getInputChannels(buffer);
+    this.sampleRate = sampleRate;
 
     // Biquad low-pass coefficients (RBJ Audio EQ Cookbook / Web Audio spec)
     const w0 = (2 * Math.PI * cutoffHz) / this.sampleRate;

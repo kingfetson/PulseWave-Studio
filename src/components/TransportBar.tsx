@@ -22,6 +22,7 @@ interface TransportBarProps {
   loopClip: boolean;
   volume: number;
   isMuted: boolean;
+  playbackRate: number;
   isExporting: boolean;
   batchQueueCount: number;
   isGeneratingCaptions: boolean;
@@ -33,6 +34,7 @@ interface TransportBarProps {
   onToggleLoop: () => void;
   onVolumeChange: (volume: number) => void;
   onToggleMute: () => void;
+  onPlaybackRateChange: (rate: number) => void;
   onAutoCaptions: () => void;
   onOpenBatchExport: () => void;
   onExport: () => void;
@@ -50,6 +52,7 @@ export function TransportBar({
   loopClip,
   volume,
   isMuted,
+  playbackRate,
   isExporting,
   batchQueueCount,
   isGeneratingCaptions,
@@ -61,6 +64,7 @@ export function TransportBar({
   onToggleLoop,
   onVolumeChange,
   onToggleMute,
+  onPlaybackRateChange,
   onAutoCaptions,
   onOpenBatchExport,
   onExport,
@@ -295,6 +299,7 @@ export function TransportBar({
             onClick={onTogglePlay}
             disabled={!hasAudio}
             aria-label={isPlaying ? 'Pause' : 'Play'}
+            title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             className="w-9 h-9 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] text-slate-100 border border-white/[0.1] flex items-center justify-center transition-colors disabled:opacity-40 cursor-pointer"
           >
             {isPlaying ? (
@@ -348,7 +353,35 @@ export function TransportBar({
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Playback Speed Multiplier */}
+          <div
+            role="group"
+            aria-label="Playback speed"
+            className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08] shrink-0"
+          >
+            {([0.5, 1, 1.5, 2] as const).map((rate) => {
+              const active = playbackRate === rate;
+              return (
+                <button
+                  key={rate}
+                  type="button"
+                  disabled={!hasAudio}
+                  onClick={() => onPlaybackRateChange(rate)}
+                  aria-pressed={active}
+                  title={`Live preview playback speed ${rate.toFixed(1)}x`}
+                  className={`px-2 py-1 rounded-md text-[11px] font-mono tabular-nums transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                    active
+                      ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {rate.toFixed(1)}x
+                </button>
+              );
+            })}
+          </div>
+
           {/* Volume */}
           <div className="hidden sm:flex items-center gap-2 bg-[#090b10] border border-white/[0.08] rounded-lg px-2.5 py-1.5">
             <button

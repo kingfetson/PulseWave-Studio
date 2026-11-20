@@ -31,6 +31,14 @@ import {
   stepBeatDetector,
 } from './utils/audioEngine';
 import { renderVisualizerFrame } from './utils/canvasRenderer';
+import {
+  BrowserNotificationPermission,
+  getBrowserNotificationPermission,
+  loadNotifyOnBatchComplete,
+  persistNotifyOnBatchComplete,
+  requestBrowserNotificationPermission,
+  triggerBatchCompletionAlert,
+} from './utils/batchNotifications';
 import { createLyricId } from './utils/lrcParser';
 import { exportProjectToMp4, sanitizeFileName } from './utils/mp4Exporter';
 import {
@@ -49,6 +57,8 @@ import {
   getLastActiveProjectId,
   getProjectRecord,
   listProjectSummaries,
+  loadAutoSaveProjects,
+  persistAutoSaveProjects,
   renameProjectRecord,
   saveProjectRecord,
   setLastActiveProjectId,
@@ -106,6 +116,9 @@ export default function App() {
   const [projects, setProjects] = useState<StudioProjectSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeProjectName, setActiveProjectName] = useState('Untitled Project');
+  const [autoSaveProjects, setAutoSaveProjects] = useState<boolean>(() =>
+    loadAutoSaveProjects()
+  );
   const [isProjectDirty, setIsProjectDirty] = useState(false);
   const [isSavingProject, setIsSavingProject] = useState(false);
   const [isLoadingProject, setIsLoadingProject] = useState(false);
@@ -123,6 +136,7 @@ export default function App() {
   const [loopClip, setLoopClip] = useState(true);
   const [volume, setVolume] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [isGeneratingDemo, setIsGeneratingDemo] = useState(false);
   const [isGeneratingCaptions, setIsGeneratingCaptions] = useState(false);
   const [captionsNotice, setCaptionsNotice] = useState<{
@@ -142,6 +156,17 @@ export default function App() {
   const [batchJobs, setBatchJobs] = useState<BatchExportJob[]>([]);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [autoDownloadBatch, setAutoDownloadBatch] = useState(true);
+  const [notifyOnBatchComplete, setNotifyOnBatchComplete] = useState<boolean>(() =>
+    loadNotifyOnBatchComplete()
+  );
+  const [notificationPermission, setNotificationPermission] =
+    useState<BrowserNotificationPermission>(() => getBrowserNotificationPermission());
+  const [batchCompletionBanner, setBatchCompletionBanner] = useState<{
+    completedCount: number;
+    failedCount: number;
+    totalElapsedMs: number;
+    desktopSent: boolean;
+  } | null>(null);
 
   // Refs for Web Audio API, Canvas, Images, and AbortController
   const audioElRef = useRef<HTMLAudioElement | null>(null);
@@ -179,10 +204,16 @@ export default function App() {
   trimRef.current = { trimStart, trimEnd, loopClip };
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const playbackRateRef = useRef(playbackRate);
+  playbackRateRef.current = playbackRate;
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
   const autoDownloadBatchRef = useRef(autoDownloadBatch);
   autoDownloadBatchRef.current = autoDownloadBatch;
+  const notifyOnBatchCompleteRef = useRef(notifyOnBatchComplete);
+  notifyOnBatchCompleteRef.current = notifyOnBatchComplete;
   const batchIdCounterRef = useRef(0);
   const mediaMetaRef = useRef({
     duration,
@@ -198,13 +229,29 @@ export default function App() {
     bgImageName,
     albumImageName,
   };
-  const activeProjectRef = useRef({
+  const activeProjectRef = useRef<{
+    id: string | null;
+    name: string;
+    createdAt: string;
+    lastExportedAt?: string;
+    exportCount?: number;
+  }>({
     id: activeProjectId,
     name: activeProjectName,
     createdAt: new Date().toISOString(),
+    lastExportedAt: undefined,
+    exportCount: 0,
   });
   activeProjectRef.current.id = activeProjectId;
   activeProjectRef.current.name = activeProjectName;
+  const autoSaveProjectsRef = useRef(autoSaveProjects);
+  autoSaveProjectsRef.current = autoSaveProjects;
+  const isProjectDirtyRef = useRef(isProjectDirty);
+  isProjectDirtyRef.current = isProjectDirty;
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const saveCurrentProjectRef = useRef<
+    (opts?: { exported?: boolean; forceCreate?: boolean }) => Promise<void>
+  >(async () => {});
   const skipDirtyMarkRef = useRef(true);
 
   // Initialize hidden <audio> element once
@@ -255,12 +302,33 @@ export default function App() {
     }
   }, [volume, isMuted]);
 
+  // Sync live preview playback speed to <audio>
+  useEffect(() => {
+    if (audioElRef.current) {
+      audioElRef.current.defaultPlaybackRate = playbackRate;
+      audioElRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate]);
+
   // Sync smoothing to AnalyserNode
   useEffect(() => {
     if (analyserRef.current) {
       analyserRef.current.smoothingTimeConstant = settings.smoothing;
     }
   }, [settings.smoothing]);
+
+  // Keep browser notification permission synced if changed via browser site settings
+  useEffect(() => {
+    const syncPermission = () => {
+      setNotificationPermission(getBrowserNotificationPermission());
+    };
+    window.addEventListener('focus', syncPermission);
+    document.addEventListener('visibilitychange', syncPermission);
+    return () => {
+      window.removeEventListener('focus', syncPermission);
+      document.removeEventListener('visibilitychange', syncPermission);
+    };
+  }, []);
 
   const ensureAudioGraph = useCallback(async () => {
     const audio = audioElRef.current;
@@ -411,6 +479,26 @@ export default function App() {
         const arrayBuf = await file.arrayBuffer();
         const decoded = await ctx.decodeAudioData(arrayBuf.slice(0));
 
+        const previousAudioFileName = mediaMetaRef.current.audioFileName;
+        const isSwitchingTracks = Boolean(
+          previousAudioFileName && previousAudioFileName !== file.name
+        );
+
+        // Save outgoing project work before switching to a different audio file
+        if (isSwitchingTracks && autoSaveProjectsRef.current) {
+          await saveCurrentProjectRef.current();
+          activeProjectRef.current = {
+            id: null,
+            name: 'Untitled Project',
+            createdAt: new Date().toISOString(),
+            lastExportedAt: undefined,
+            exportCount: 0,
+          };
+          setActiveProjectId(null);
+          setActiveProjectName('Untitled Project');
+          setLastActiveProjectId(null);
+        }
+
         if (audioUrlRef.current) {
           URL.revokeObjectURL(audioUrlRef.current);
         }
@@ -419,6 +507,8 @@ export default function App() {
         audioUrlRef.current = blobUrl;
         audio.src = blobUrl;
         audio.currentTime = 0;
+        audio.defaultPlaybackRate = playbackRateRef.current;
+        audio.playbackRate = playbackRateRef.current;
 
         const peaks = extractWaveformPeaks(decoded, 200);
         setAudioBuffer(decoded);
@@ -434,7 +524,7 @@ export default function App() {
           ...prev,
           settings: {
             ...prev.settings,
-            trackTitle: prev.settings.trackTitle || baseTitle,
+            trackTitle: isSwitchingTracks ? baseTitle : prev.settings.trackTitle || baseTitle,
           },
         }));
       } catch (err) {
@@ -460,6 +550,23 @@ export default function App() {
       const demo = await generateDemoBeat();
       await ensureAudioGraph();
 
+      const previousAudioFileName = mediaMetaRef.current.audioFileName;
+      if (previousAudioFileName && previousAudioFileName !== demo.fileName) {
+        if (autoSaveProjectsRef.current) {
+          await saveCurrentProjectRef.current();
+        }
+        activeProjectRef.current = {
+          id: null,
+          name: 'Untitled Project',
+          createdAt: new Date().toISOString(),
+          lastExportedAt: undefined,
+          exportCount: 0,
+        };
+        setActiveProjectId(null);
+        setActiveProjectName('Untitled Project');
+        setLastActiveProjectId(null);
+      }
+
       if (audioUrlRef.current) {
         URL.revokeObjectURL(audioUrlRef.current);
       }
@@ -469,6 +576,8 @@ export default function App() {
       if (audio) {
         audio.src = demo.blobUrl;
         audio.currentTime = 0;
+        audio.defaultPlaybackRate = playbackRateRef.current;
+        audio.playbackRate = playbackRateRef.current;
       }
 
       const peaks = extractWaveformPeaks(demo.audioBuffer, 200);
@@ -584,6 +693,8 @@ export default function App() {
           if (audio) {
             audio.src = blobUrl;
             audio.currentTime = record.trimStart || 0;
+            audio.defaultPlaybackRate = playbackRateRef.current;
+            audio.playbackRate = playbackRateRef.current;
           }
           const peaks =
             record.waveformPeaks.length > 0
@@ -656,7 +767,13 @@ export default function App() {
 
         setActiveProjectId(record.id);
         setActiveProjectName(record.name);
-        activeProjectRef.current.createdAt = record.createdAt;
+        activeProjectRef.current = {
+          id: record.id,
+          name: record.name,
+          createdAt: record.createdAt,
+          lastExportedAt: record.lastExportedAt,
+          exportCount: record.exportCount ?? 0,
+        };
         setLastActiveProjectId(record.id);
         setIsProjectDirty(false);
       } catch (err) {
@@ -670,8 +787,30 @@ export default function App() {
     [resetHistory]
   );
 
+  const hasMeaningfulProjectData = useCallback(() => {
+    const meta = mediaMetaRef.current;
+    const s = settingsRef.current;
+    return Boolean(
+      audioBlobRef.current ||
+        meta.audioFileName ||
+        bgBlobRef.current ||
+        meta.bgImageName ||
+        albumBlobRef.current ||
+        meta.albumImageName ||
+        lyricsRef.current.length > 0 ||
+        s.trackTitle.trim().length > 0 ||
+        s.artistName.trim().length > 0
+    );
+  }, []);
+
   const buildCurrentProjectRecord = useCallback(
-    (id: string, name: string, createdAt: string): StudioProjectRecord => {
+    (
+      id: string,
+      name: string,
+      createdAt: string,
+      lastExportedAt?: string,
+      exportCount?: number
+    ): StudioProjectRecord => {
       const now = new Date().toISOString();
       const meta = mediaMetaRef.current;
       const trim = trimRef.current;
@@ -680,6 +819,8 @@ export default function App() {
         name,
         createdAt,
         updatedAt: now,
+        lastExportedAt,
+        exportCount,
         settings: { ...settingsRef.current },
         lyrics: lyricsRef.current.map((l) => ({ ...l })),
         trimStart: trim.trimStart,
@@ -704,76 +845,138 @@ export default function App() {
     setProjects(list);
   }, []);
 
+  const deriveProjectName = useCallback((existingName?: string) => {
+    const title = settingsRef.current.trackTitle.trim();
+    const cleanedFile = mediaMetaRef.current.audioFileName
+      ?.replace(/\.[^.]+$/, '')
+      .replace(/[_-]+/g, ' ')
+      .trim();
+    if (existingName && existingName !== 'Untitled Project') {
+      return existingName;
+    }
+    return title || cleanedFile || 'Untitled Project';
+  }, []);
+
+  const saveCurrentProject = useCallback(
+    (opts?: { exported?: boolean; forceCreate?: boolean }): Promise<void> => {
+      const task = saveChainRef.current.then(async () => {
+        if (!opts?.forceCreate && !hasMeaningfulProjectData()) {
+          return;
+        }
+        setIsSavingProject(true);
+        try {
+          const proj = activeProjectRef.current;
+          const now = new Date().toISOString();
+          const id = proj.id || createProjectId();
+          const createdAt = proj.id ? proj.createdAt : now;
+          const name = deriveProjectName(proj.id ? proj.name : undefined);
+          const lastExportedAt = opts?.exported ? now : proj.lastExportedAt;
+          const exportCount = opts?.exported
+            ? (proj.exportCount ?? 0) + 1
+            : proj.exportCount;
+
+          const record = buildCurrentProjectRecord(
+            id,
+            name,
+            createdAt,
+            lastExportedAt,
+            exportCount
+          );
+          await saveProjectRecord(record);
+
+          activeProjectRef.current = {
+            id,
+            name,
+            createdAt,
+            lastExportedAt,
+            exportCount,
+          };
+          setActiveProjectId(id);
+          setActiveProjectName(name);
+          setLastActiveProjectId(id);
+          setIsProjectDirty(false);
+          await refreshProjectsList();
+        } catch (err) {
+          setAudioError(err instanceof Error ? err.message : 'Failed to save project.');
+        } finally {
+          setIsSavingProject(false);
+        }
+      });
+
+      saveChainRef.current = task.catch(() => {});
+      return task;
+    },
+    [buildCurrentProjectRecord, deriveProjectName, hasMeaningfulProjectData, refreshProjectsList]
+  );
+
+  saveCurrentProjectRef.current = saveCurrentProject;
+
   const handleSaveAsNewProject = useCallback(
-    async (requestedName: string) => {
-      setIsSavingProject(true);
-      try {
-        const now = new Date().toISOString();
-        const id = createProjectId();
-        const finalName =
-          requestedName.trim() ||
-          settingsRef.current.trackTitle.trim() ||
-          mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
-          'Untitled Project';
-        const record = buildCurrentProjectRecord(id, finalName, now);
-        await saveProjectRecord(record);
-        setActiveProjectId(id);
-        setActiveProjectName(finalName);
-        activeProjectRef.current.createdAt = now;
-        setLastActiveProjectId(id);
-        setIsProjectDirty(false);
-        await refreshProjectsList();
-      } catch (err) {
-        setAudioError(err instanceof Error ? err.message : 'Failed to save project.');
-      } finally {
-        setIsSavingProject(false);
-      }
+    (requestedName: string): Promise<void> => {
+      const task = saveChainRef.current.then(async () => {
+        setIsSavingProject(true);
+        try {
+          const now = new Date().toISOString();
+          const id = createProjectId();
+          const finalName =
+            requestedName.trim() ||
+            settingsRef.current.trackTitle.trim() ||
+            mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
+            'Untitled Project';
+          const record = buildCurrentProjectRecord(id, finalName, now, undefined, 0);
+          await saveProjectRecord(record);
+          activeProjectRef.current = {
+            id,
+            name: finalName,
+            createdAt: now,
+            lastExportedAt: undefined,
+            exportCount: 0,
+          };
+          setActiveProjectId(id);
+          setActiveProjectName(finalName);
+          setLastActiveProjectId(id);
+          setIsProjectDirty(false);
+          await refreshProjectsList();
+        } catch (err) {
+          setAudioError(err instanceof Error ? err.message : 'Failed to save project.');
+        } finally {
+          setIsSavingProject(false);
+        }
+      });
+
+      saveChainRef.current = task.catch(() => {});
+      return task;
     },
     [buildCurrentProjectRecord, refreshProjectsList]
   );
 
   const handleSaveActiveProject = useCallback(async () => {
-    const currentId = activeProjectRef.current.id;
-    if (!currentId) {
-      const defaultName =
-        settingsRef.current.trackTitle.trim() ||
-        mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
-        'Untitled Project';
-      await handleSaveAsNewProject(defaultName);
-      return;
-    }
-
-    setIsSavingProject(true);
-    try {
-      const record = buildCurrentProjectRecord(
-        currentId,
-        activeProjectRef.current.name,
-        activeProjectRef.current.createdAt
-      );
-      await saveProjectRecord(record);
-      setIsProjectDirty(false);
-      await refreshProjectsList();
-    } catch (err) {
-      setAudioError(err instanceof Error ? err.message : 'Failed to update project.');
-    } finally {
-      setIsSavingProject(false);
-    }
-  }, [buildCurrentProjectRecord, handleSaveAsNewProject, refreshProjectsList]);
+    await saveCurrentProject({ forceCreate: true });
+  }, [saveCurrentProject]);
 
   const handleOpenProject = useCallback(
     async (id: string) => {
+      if (
+        autoSaveProjectsRef.current &&
+        isProjectDirtyRef.current &&
+        hasMeaningfulProjectData() &&
+        activeProjectRef.current.id !== id
+      ) {
+        await saveCurrentProject();
+      }
       const record = await getProjectRecord(id);
       if (!record) return;
       await loadProjectIntoStudio(record);
       setIsProjectsModalOpen(false);
     },
-    [loadProjectIntoStudio]
+    [hasMeaningfulProjectData, loadProjectIntoStudio, saveCurrentProject]
   );
 
   const handleRenameProject = useCallback(
     async (id: string, name: string) => {
       await renameProjectRecord(id, name);
       if (activeProjectRef.current.id === id) {
+        activeProjectRef.current.name = name;
         setActiveProjectName(name);
       }
       await refreshProjectsList();
@@ -793,6 +996,13 @@ export default function App() {
     async (id: string) => {
       await deleteProjectRecord(id);
       if (activeProjectRef.current.id === id) {
+        activeProjectRef.current = {
+          id: null,
+          name: 'Untitled Project',
+          createdAt: new Date().toISOString(),
+          lastExportedAt: undefined,
+          exportCount: 0,
+        };
         setActiveProjectId(null);
         setActiveProjectName('Untitled Project');
         setLastActiveProjectId(null);
@@ -803,52 +1013,80 @@ export default function App() {
     [refreshProjectsList]
   );
 
+  const handleToggleAutoSaveProjects = useCallback(
+    (enabled: boolean) => {
+      setAutoSaveProjects(enabled);
+      persistAutoSaveProjects(enabled);
+      if (enabled && isProjectDirtyRef.current && hasMeaningfulProjectData()) {
+        void saveCurrentProject();
+      }
+    },
+    [hasMeaningfulProjectData, saveCurrentProject]
+  );
+
   const handleNewBlankProject = useCallback(() => {
-    const audio = audioElRef.current;
-    if (audio) {
-      audio.pause();
-      audio.removeAttribute('src');
-      audio.load();
-    }
-    setIsPlaying(false);
+    void (async () => {
+      if (
+        autoSaveProjectsRef.current &&
+        isProjectDirtyRef.current &&
+        hasMeaningfulProjectData()
+      ) {
+        await saveCurrentProject();
+      }
 
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
-    if (bgUrlRef.current) {
-      URL.revokeObjectURL(bgUrlRef.current);
-      bgUrlRef.current = null;
-    }
-    if (albumUrlRef.current) {
-      URL.revokeObjectURL(albumUrlRef.current);
-      albumUrlRef.current = null;
-    }
+      const audio = audioElRef.current;
+      if (audio) {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+      }
+      setIsPlaying(false);
 
-    audioBlobRef.current = null;
-    bgBlobRef.current = null;
-    albumBlobRef.current = null;
-    bgImageRef.current = null;
-    albumImageRef.current = null;
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      if (bgUrlRef.current) {
+        URL.revokeObjectURL(bgUrlRef.current);
+        bgUrlRef.current = null;
+      }
+      if (albumUrlRef.current) {
+        URL.revokeObjectURL(albumUrlRef.current);
+        albumUrlRef.current = null;
+      }
 
-    setAudioBuffer(null);
-    setWaveformPeaks([]);
-    setAudioFileName(null);
-    setBgImageName(null);
-    setAlbumImageName(null);
-    setDuration(0);
-    setTrimStart(0);
-    setTrimEnd(0);
-    setCurrentTime(0);
+      audioBlobRef.current = null;
+      bgBlobRef.current = null;
+      albumBlobRef.current = null;
+      bgImageRef.current = null;
+      albumImageRef.current = null;
 
-    skipDirtyMarkRef.current = true;
-    resetHistory({ settings: DEFAULT_SETTINGS, lyrics: [] });
-    setActiveProjectId(null);
-    setActiveProjectName('Untitled Project');
-    setLastActiveProjectId(null);
-    setIsProjectDirty(false);
-    setIsProjectsModalOpen(false);
-  }, [resetHistory]);
+      setAudioBuffer(null);
+      setWaveformPeaks([]);
+      setAudioFileName(null);
+      setBgImageName(null);
+      setAlbumImageName(null);
+      setDuration(0);
+      setTrimStart(0);
+      setTrimEnd(0);
+      setCurrentTime(0);
+
+      skipDirtyMarkRef.current = true;
+      resetHistory({ settings: DEFAULT_SETTINGS, lyrics: [] });
+      activeProjectRef.current = {
+        id: null,
+        name: 'Untitled Project',
+        createdAt: new Date().toISOString(),
+        lastExportedAt: undefined,
+        exportCount: 0,
+      };
+      setActiveProjectId(null);
+      setActiveProjectName('Untitled Project');
+      setLastActiveProjectId(null);
+      setIsProjectDirty(false);
+      setIsProjectsModalOpen(false);
+    })();
+  }, [hasMeaningfulProjectData, resetHistory, saveCurrentProject]);
 
   // Restore saved project library & last active project on startup
   useEffect(() => {
@@ -871,7 +1109,7 @@ export default function App() {
     };
   }, [loadProjectIntoStudio]);
 
-  // Track edits & debounced auto-save when an active saved project is open
+  // Track edits & automatically store projects with meaningful work
   useEffect(() => {
     if (skipDirtyMarkRef.current) {
       skipDirtyMarkRef.current = false;
@@ -879,11 +1117,11 @@ export default function App() {
     }
 
     setIsProjectDirty(true);
-    if (!activeProjectId) return;
+    if (!autoSaveProjects || !hasMeaningfulProjectData()) return;
 
     const timer = setTimeout(() => {
-      void handleSaveActiveProject();
-    }, 1600);
+      void saveCurrentProject();
+    }, 1400);
     return () => clearTimeout(timer);
   }, [
     settings,
@@ -893,9 +1131,34 @@ export default function App() {
     audioFileName,
     bgImageName,
     albumImageName,
-    activeProjectId,
-    handleSaveActiveProject,
+    autoSaveProjects,
+    hasMeaningfulProjectData,
+    saveCurrentProject,
   ]);
+
+  // Flush pending auto-save when switching tabs or closing the page
+  useEffect(() => {
+    const flushIfDirty = () => {
+      if (
+        autoSaveProjectsRef.current &&
+        isProjectDirtyRef.current &&
+        hasMeaningfulProjectData()
+      ) {
+        void saveCurrentProjectRef.current();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushIfDirty();
+      }
+    };
+    window.addEventListener('pagehide', flushIfDirty);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushIfDirty);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [hasMeaningfulProjectData]);
 
   const handleTogglePlay = useCallback(async () => {
     const audio = audioElRef.current;
@@ -908,6 +1171,7 @@ export default function App() {
 
     try {
       await ensureAudioGraph();
+      audio.playbackRate = playbackRateRef.current;
       const { trimStart: start, trimEnd: end, loopClip: shouldLoop } = trimRef.current;
       if (shouldLoop && (audio.currentTime < start || audio.currentTime >= end - 0.05)) {
         audio.currentTime = start;
@@ -931,6 +1195,72 @@ export default function App() {
     setTrimStart(start);
     setTrimEnd(end);
   }, []);
+
+  // Global keyboard shortcuts: Spacebar (Play/Pause), Left/Right Arrows (Seek), S (Safe Zone grid)
+  useEffect(() => {
+    const isModalOpen =
+      isExportModalOpen || exportState.status !== 'idle' || isProjectsModalOpen;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || isModalOpen) return;
+
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          target.isContentEditable ||
+          Boolean(target.closest('[role="slider"]'))
+        ) {
+          return;
+        }
+      }
+
+      if (e.code === 'Space' || e.key === ' ') {
+        if (document.querySelector('[data-tap-sync="true"]')) {
+          return;
+        }
+        e.preventDefault();
+        if (!e.repeat && audioBuffer) {
+          void handleTogglePlay();
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        if (!audioBuffer || duration <= 0) return;
+        e.preventDefault();
+        const stepSec = e.shiftKey ? 1 : 5;
+        const delta = e.key === 'ArrowLeft' ? -stepSec : stepSec;
+        const audio = audioElRef.current;
+        const baseTime =
+          audio && audio.src ? audio.currentTime : currentTimeRef.current;
+        handleSeek(Math.max(0, Math.min(duration, baseTime + delta)));
+        return;
+      }
+
+      if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (!e.repeat) {
+          updateSettings({ showSafeZone: !settingsRef.current.showSafeZone });
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    audioBuffer,
+    duration,
+    exportState.status,
+    handleSeek,
+    handleTogglePlay,
+    isExportModalOpen,
+    isProjectsModalOpen,
+    updateSettings,
+  ]);
 
   // Live 60 FPS Visualizer Render Loop
   useEffect(() => {
@@ -1091,6 +1421,9 @@ export default function App() {
         signal: controller.signal,
         onProgress: (next) => setExportState(next),
       });
+      if (autoSaveProjectsRef.current) {
+        void saveCurrentProject({ exported: true, forceCreate: true });
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         setExportState({
@@ -1109,7 +1442,16 @@ export default function App() {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [audioBuffer, isBatchRunning, trimStart, trimEnd, settings, lyrics, exportState.downloadUrl]);
+  }, [
+    audioBuffer,
+    isBatchRunning,
+    trimStart,
+    trimEnd,
+    settings,
+    lyrics,
+    exportState.downloadUrl,
+    saveCurrentProject,
+  ]);
 
   const handleOpenBatchExport = useCallback(() => {
     if (!audioBuffer) return;
@@ -1223,6 +1565,9 @@ export default function App() {
   }, []);
 
   const handleClearBatchJobs = useCallback((scope: 'completed' | 'all') => {
+    if (scope === 'all') {
+      setBatchCompletionBanner(null);
+    }
     setBatchJobs((prev) => {
       if (scope === 'completed') {
         prev.forEach((j) => {
@@ -1237,6 +1582,24 @@ export default function App() {
       });
       return [];
     });
+  }, []);
+
+  const handleRequestNotificationPermission = useCallback(async () => {
+    const perm = await requestBrowserNotificationPermission();
+    setNotificationPermission(perm);
+    if (perm === 'granted') {
+      setNotifyOnBatchComplete(true);
+      persistNotifyOnBatchComplete(true);
+    }
+  }, []);
+
+  const handleToggleNotifyOnBatchComplete = useCallback(async (enabled: boolean) => {
+    setNotifyOnBatchComplete(enabled);
+    persistNotifyOnBatchComplete(enabled);
+    if (enabled && getBrowserNotificationPermission() === 'default') {
+      const perm = await requestBrowserNotificationPermission();
+      setNotificationPermission(perm);
+    }
   }, []);
 
   const handleDownloadAllBatch = useCallback(() => {
@@ -1268,6 +1631,15 @@ export default function App() {
 
     if (pendingSnapshot.length === 0) return;
 
+    // Request browser notification permission inside this user click gesture if not yet decided
+    if (notifyOnBatchCompleteRef.current && getBrowserNotificationPermission() === 'default') {
+      void requestBrowserNotificationPermission().then((perm) => {
+        setNotificationPermission(perm);
+      });
+    }
+
+    setBatchCompletionBanner(null);
+
     if (audioElRef.current && !audioElRef.current.paused) {
       audioElRef.current.pause();
     }
@@ -1296,9 +1668,17 @@ export default function App() {
     exportAbortRef.current = controller;
     setIsBatchRunning(true);
 
+    const batchStartMs = performance.now();
+    let completedCount = 0;
+    let failedCount = 0;
+    let wasCancelled = false;
+
     try {
       for (const { job, idx } of pendingSnapshot) {
-        if (controller.signal.aborted) break;
+        if (controller.signal.aborted) {
+          wasCancelled = true;
+          break;
+        }
 
         setBatchJobs((prev) =>
           prev.map((j) =>
@@ -1348,6 +1728,7 @@ export default function App() {
             },
           });
 
+          completedCount += 1;
           setBatchJobs((prev) =>
             prev.map((j) =>
               j.id === job.id
@@ -1369,6 +1750,7 @@ export default function App() {
           );
         } catch (err) {
           if (err instanceof DOMException && err.name === 'AbortError') {
+            wasCancelled = true;
             setBatchJobs((prev) =>
               prev.map((j) =>
                 j.id === job.id
@@ -1383,6 +1765,7 @@ export default function App() {
             break;
           }
 
+          failedCount += 1;
           setBatchJobs((prev) =>
             prev.map((j) =>
               j.id === job.id
@@ -1397,10 +1780,36 @@ export default function App() {
           );
         }
       }
+
+      if (completedCount > 0 && autoSaveProjectsRef.current) {
+        void saveCurrentProject({ exported: true, forceCreate: true });
+      }
+
+      if (!wasCancelled && (completedCount > 0 || failedCount > 0)) {
+        const totalElapsedMs = Math.round(performance.now() - batchStartMs);
+        const alertResult = triggerBatchCompletionAlert(
+          {
+            completedCount,
+            failedCount,
+            totalElapsedMs,
+            cancelled: false,
+          },
+          {
+            enableDesktop: notifyOnBatchCompleteRef.current,
+            enableSound: notifyOnBatchCompleteRef.current,
+          }
+        );
+        setBatchCompletionBanner({
+          completedCount,
+          failedCount,
+          totalElapsedMs,
+          desktopSent: alertResult.desktopSent,
+        });
+      }
     } finally {
       setIsBatchRunning(false);
     }
-  }, [audioBuffer, isBatchRunning]);
+  }, [audioBuffer, isBatchRunning, saveCurrentProject]);
 
   const handleCancelExport = useCallback(() => {
     exportAbortRef.current?.abort();
@@ -1413,6 +1822,34 @@ export default function App() {
     setExportState(INITIAL_EXPORT_STATE);
     setIsExportModalOpen(false);
   }, [exportState.downloadUrl]);
+
+  const handlePreviewBatchJob = useCallback(
+    (job: BatchExportJob) => {
+      if (isBatchRunning) return;
+      const safeDur = duration > 0 ? duration : job.trimEnd;
+      const clampedStart = Number(
+        Math.max(0, Math.min(job.trimStart, Math.max(0, safeDur - 0.5))).toFixed(2)
+      );
+      const clampedEnd = Number(
+        Math.max(clampedStart + 0.5, Math.min(job.trimEnd, safeDur || job.trimEnd)).toFixed(2)
+      );
+
+      commitHistory((prev) => ({
+        ...prev,
+        settings: { ...job.settings },
+      }));
+      setTrimStart(clampedStart);
+      setTrimEnd(clampedEnd);
+      setCurrentTime(clampedStart);
+      if (audioElRef.current && audioElRef.current.src) {
+        audioElRef.current.currentTime = clampedStart;
+      }
+      particlesRef.current.length = 0;
+      motionBlurStateRef.current.hasFrame = false;
+      handleCloseExportModal();
+    },
+    [isBatchRunning, duration, commitHistory, handleCloseExportModal]
+  );
 
   const handleSavePreset = useCallback(
     (name: string) => {
@@ -1654,6 +2091,7 @@ export default function App() {
         activeProjectId={activeProjectId}
         activeProjectName={activeProjectName}
         projectCount={projects.length}
+        autoSaveProjects={autoSaveProjects}
         isProjectDirty={isProjectDirty}
         isSavingProject={isSavingProject}
         canUndo={canUndo}
@@ -1747,6 +2185,7 @@ export default function App() {
             loopClip={loopClip}
             volume={volume}
             isMuted={isMuted}
+            playbackRate={playbackRate}
             isExporting={isExporting}
             batchQueueCount={pendingBatchCount}
             isGeneratingCaptions={isGeneratingCaptions}
@@ -1761,6 +2200,7 @@ export default function App() {
               if (v > 0 && isMuted) setIsMuted(false);
             }}
             onToggleMute={() => setIsMuted((m) => !m)}
+            onPlaybackRateChange={setPlaybackRate}
             onAutoCaptions={() => void handleAutoGenerateCaptions()}
             onOpenBatchExport={handleOpenBatchExport}
             onExport={() => void handleStartExport()}
@@ -1784,11 +2224,18 @@ export default function App() {
         isBatchRunning={isBatchRunning}
         autoDownloadBatch={autoDownloadBatch}
         onToggleAutoDownloadBatch={setAutoDownloadBatch}
+        notifyOnBatchComplete={notifyOnBatchComplete}
+        notificationPermission={notificationPermission}
+        batchCompletionBanner={batchCompletionBanner}
+        onToggleNotifyOnBatchComplete={(val) => void handleToggleNotifyOnBatchComplete(val)}
+        onRequestNotificationPermission={() => void handleRequestNotificationPermission()}
+        onDismissBatchCompletionBanner={() => setBatchCompletionBanner(null)}
         onAddBatchJobs={handleAddBatchJobs}
         onUpdateBatchJob={handleUpdateBatchJob}
         onMoveBatchJob={handleMoveBatchJob}
         onDuplicateBatchJob={handleDuplicateBatchJob}
         onRemoveBatchJob={handleRemoveBatchJob}
+        onPreviewBatchJob={handlePreviewBatchJob}
         onClearBatchJobs={handleClearBatchJobs}
         onStartBatchExport={() => void handleStartBatchExport()}
         onDownloadAllBatch={handleDownloadAllBatch}
@@ -1800,6 +2247,7 @@ export default function App() {
         projects={projects}
         activeProjectId={activeProjectId}
         activeProjectName={activeProjectName}
+        autoSaveProjects={autoSaveProjects}
         isProjectDirty={isProjectDirty}
         isSavingProject={isSavingProject}
         isLoadingProject={isLoadingProject}
@@ -1809,6 +2257,7 @@ export default function App() {
           'My PulseWave Project'
         }
         onClose={() => setIsProjectsModalOpen(false)}
+        onToggleAutoSaveProjects={handleToggleAutoSaveProjects}
         onSaveAsNewProject={handleSaveAsNewProject}
         onSaveActiveProject={handleSaveActiveProject}
         onOpenProject={handleOpenProject}

@@ -23,6 +23,7 @@ interface TopBarProps {
   activeProjectId: string | null;
   activeProjectName: string;
   projectCount: number;
+  autoSaveProjects: boolean;
   isProjectDirty: boolean;
   isSavingProject: boolean;
   canUndo: boolean;
@@ -47,6 +48,7 @@ export function TopBar({
   activeProjectId,
   activeProjectName,
   projectCount,
+  autoSaveProjects,
   isProjectDirty,
   isSavingProject,
   canUndo,
@@ -93,7 +95,13 @@ export function TopBar({
             type="button"
             onClick={onQuickSaveProject}
             disabled={isSavingProject || isExporting}
-            title={activeProjectId ? 'Save changes to current project' : 'Save project locally'}
+            title={
+              autoSaveProjects
+                ? 'Projects auto-save locally (click to save immediately)'
+                : activeProjectId
+                ? 'Save changes to current project'
+                : 'Save project locally'
+            }
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 ${
               activeProjectId && !isProjectDirty
                 ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
@@ -111,7 +119,9 @@ export function TopBar({
               {isSavingProject
                 ? 'Saving...'
                 : activeProjectId && !isProjectDirty
-                ? 'Saved'
+                ? autoSaveProjects
+                  ? 'Auto-saved'
+                  : 'Saved'
                 : 'Save'}
             </span>
           </button>

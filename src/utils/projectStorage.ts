@@ -4,9 +4,28 @@ const DB_NAME = 'pulsewave_studio_projects_v1';
 const DB_VERSION = 1;
 const STORE_NAME = 'projects';
 const ACTIVE_PROJECT_KEY = 'pulsewave_active_project_id_v1';
+const AUTO_SAVE_PROJECTS_KEY = 'pulsewave_auto_save_projects_v1';
 
 export function createProjectId(): string {
   return `proj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function loadAutoSaveProjects(): boolean {
+  try {
+    const raw = localStorage.getItem(AUTO_SAVE_PROJECTS_KEY);
+    if (raw === null) return true;
+    return raw !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export function persistAutoSaveProjects(enabled: boolean): void {
+  try {
+    localStorage.setItem(AUTO_SAVE_PROJECTS_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // Ignore localStorage quota/access errors
+  }
 }
 
 export function getLastActiveProjectId(): string | null {
@@ -55,6 +74,8 @@ function toSummary(rec: StudioProjectRecord): StudioProjectSummary {
     name: rec.name,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
+    lastExportedAt: rec.lastExportedAt,
+    exportCount: rec.exportCount,
     settings: rec.settings,
     lyrics: rec.lyrics,
     trimStart: rec.trimStart,

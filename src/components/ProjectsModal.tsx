@@ -21,11 +21,13 @@ interface ProjectsModalProps {
   projects: StudioProjectSummary[];
   activeProjectId: string | null;
   activeProjectName: string;
+  autoSaveProjects: boolean;
   isProjectDirty: boolean;
   isSavingProject: boolean;
   isLoadingProject: boolean;
   defaultProjectName: string;
   onClose: () => void;
+  onToggleAutoSaveProjects: (enabled: boolean) => void;
   onSaveAsNewProject: (name: string) => Promise<void>;
   onSaveActiveProject: () => Promise<void>;
   onOpenProject: (id: string) => Promise<void>;
@@ -52,11 +54,13 @@ export function ProjectsModal({
   projects,
   activeProjectId,
   activeProjectName,
+  autoSaveProjects,
   isProjectDirty,
   isSavingProject,
   isLoadingProject,
   defaultProjectName,
   onClose,
+  onToggleAutoSaveProjects,
   onSaveAsNewProject,
   onSaveActiveProject,
   onOpenProject,
@@ -129,7 +133,7 @@ export function ProjectsModal({
                 Studio Projects
               </h3>
               <p className="text-xs text-slate-400 mt-0.5 truncate">
-                {projects.length} kept locally · Audio, images, trim points, lyrics &amp; settings
+                {projects.length} kept locally · Auto-save {autoSaveProjects ? 'on' : 'off'} (edits &amp; exports)
               </p>
             </div>
           </div>
@@ -137,9 +141,29 @@ export function ProjectsModal({
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
+              role="switch"
+              aria-checked={autoSaveProjects}
+              onClick={() => onToggleAutoSaveProjects(!autoSaveProjects)}
+              title="Automatically save projects as you edit and export"
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+                autoSaveProjects
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                  : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  autoSaveProjects ? 'bg-emerald-400' : 'bg-slate-500'
+                }`}
+              />
+              <span>Auto-save {autoSaveProjects ? 'On' : 'Off'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={onNewBlankProject}
               disabled={isLoadingProject || isSavingProject}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40"
             >
               <FilePlus2 className="w-3.5 h-3.5 text-cyan-400" />
               <span>New Blank</span>
@@ -223,7 +247,7 @@ export function ProjectsModal({
               </p>
               <p className="text-[11px] text-slate-400 mt-1 max-w-md mx-auto leading-relaxed">
                 {projects.length === 0
-                  ? 'Save your current track, lyrics, cover art, trim range, and visualizer settings above to keep projects across sessions.'
+                  ? 'Projects you load, edit, or export are stored automatically in your browser library so you can reopen them across sessions.'
                   : 'Try clearing the search query to see all kept projects.'}
               </p>
             </div>
@@ -313,6 +337,14 @@ export function ProjectsModal({
                             <Clock className="w-2.5 h-2.5" />
                             {formatUpdatedTime(project.updatedAt)}
                           </span>
+                          {project.lastExportedAt && (
+                            <span className="text-emerald-400/90">
+                              Exported
+                              {project.exportCount && project.exportCount > 1
+                                ? ` ×${project.exportCount}`
+                                : ''}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>

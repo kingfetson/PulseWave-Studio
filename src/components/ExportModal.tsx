@@ -3,9 +3,13 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Bell,
+  BellOff,
+  BellRing,
   CheckCircle2,
   Copy,
   Download,
+  Eye,
   Film,
   Layers,
   Loader2,
@@ -28,6 +32,7 @@ import {
   StudioSettings,
   VisualizerMode,
 } from '../types/studio';
+import type { BrowserNotificationPermission } from '../utils/batchNotifications';
 import { formatShortTime, parseTimeInput } from '../utils/lrcParser';
 import { sanitizeFileName } from '../utils/mp4Exporter';
 
@@ -49,6 +54,17 @@ interface ExportModalProps {
   isBatchRunning: boolean;
   autoDownloadBatch: boolean;
   onToggleAutoDownloadBatch: (value: boolean) => void;
+  notifyOnBatchComplete: boolean;
+  notificationPermission: BrowserNotificationPermission;
+  batchCompletionBanner: {
+    completedCount: number;
+    failedCount: number;
+    totalElapsedMs: number;
+    desktopSent: boolean;
+  } | null;
+  onToggleNotifyOnBatchComplete: (value: boolean) => void;
+  onRequestNotificationPermission: () => void;
+  onDismissBatchCompletionBanner: () => void;
   onAddBatchJobs: (
     jobs: Array<{
       label: string;
@@ -66,6 +82,7 @@ interface ExportModalProps {
   onMoveBatchJob: (id: string, direction: 'up' | 'down') => void;
   onDuplicateBatchJob: (id: string) => void;
   onRemoveBatchJob: (id: string) => void;
+  onPreviewBatchJob: (job: BatchExportJob) => void;
   onClearBatchJobs: (scope: 'completed' | 'all') => void;
   onStartBatchExport: () => void;
   onDownloadAllBatch: () => void;
@@ -77,6 +94,11 @@ const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'circular-ring', label: 'Circular Ring' },
   { id: 'neon-wave', label: 'Neon Wave' },
   { id: 'hybrid-particles', label: 'Hybrid + Particles' },
+  { id: 'dual-ribbon', label: 'Aurora Ribbons' },
+  { id: 'led-matrix', label: 'LED Matrix' },
+  { id: 'harmonic-orb', label: 'Harmonic Orbital' },
+  { id: 'stereo-prism', label: 'Stereo Prism' },
+  { id: 'cube-3d', label: '3D Cube' },
 ];
 
 const LYRIC_STYLE_OPTIONS: Array<{ id: LyricStyle; label: string }> = [
@@ -102,6 +124,7 @@ interface BatchJobRowProps {
   index: number;
   total: number;
   duration: number;
+  globalSettings: StudioSettings;
   isBatchRunning: boolean;
   savedPresets: SavedPreset[];
   onUpdate: (
@@ -112,6 +135,7 @@ interface BatchJobRowProps {
   onMove: (direction: 'up' | 'down') => void;
   onDuplicate: () => void;
   onRemove: () => void;
+  onPreview: () => void;
 }
 
 function BatchJobRow({
@@ -119,12 +143,14 @@ function BatchJobRow({
   index,
   total,
   duration,
+  globalSettings,
   isBatchRunning,
   savedPresets,
   onUpdate,
   onMove,
   onDuplicate,
   onRemove,
+  onPreview,
 }: BatchJobRowProps) {
   const [startText, setStartText] = useState(formatShortTime(job.trimStart));
   const [endText, setEndText] = useState(formatShortTime(job.trimEnd));
@@ -250,6 +276,15 @@ function BatchJobRow({
 
           {!isBatchRunning && (
             <>
+              <button
+                type="button"
+                onClick={onPreview}
+                title="Apply this job's trim and settings to the main canvas"
+                className="px-2 py-1 rounded-md text-[11px] font-medium bg-cyan-500/12 hover:bg-cyan-500/22 text-cyan-300 border border-cyan-400/30 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer"
+              >
+                <Eye className="w-3 h-3" />
+                <span>Preview Job</span>
+              </button>
               <button
                 type="button"
                 onClick={() => onMove('up')}
@@ -459,7 +494,13 @@ function BatchJobRow({
                   const found = savedPresets.find((p) => p.id === e.target.value);
                   if (found) {
                     onUpdate({
-                      settings: { ...found.settings },
+                      settings: {
+                        ...found.settings,
+                        trackTitle:
+                          job.settings.trackTitle || found.settings.trackTitle,
+                        artistName:
+                          job.settings.artistName || found.settings.artistName,
+                      },
                     });
                   }
                 }}
@@ -474,6 +515,119 @@ function BatchJobRow({
               </select>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Per-Job Track Metadata Override Row */}
+      <div className="mt-2 pt-2 border-t border-white/[0.06] grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+        <div className="sm:col-span-5 flex flex-col gap-0.5">
+          <div className="flex items-center justify-between gap-2">
+            <label
+              htmlFor={`batch-title-${job.id}`}
+              className="text-[10px] text-slate-500"
+            >
+              Track Title Override
+            </label>
+            {job.settings.trackTitle !== globalSettings.trackTitle && !isLocked && (
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdate({
+                    settings: {
+                      ...job.settings,
+                      trackTitle: globalSettings.trackTitle,
+                    },
+                  })
+                }
+                className="text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <input
+            id={`batch-title-${job.id}`}
+            type="text"
+            value={job.settings.trackTitle}
+            disabled={isLocked}
+            onChange={(e) =>
+              onUpdate({
+                settings: {
+                  ...job.settings,
+                  trackTitle: e.target.value,
+                },
+              })
+            }
+            placeholder={globalSettings.trackTitle || 'Override track title...'}
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-2 py-1 text-[11px] text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          />
+        </div>
+
+        <div className="sm:col-span-5 flex flex-col gap-0.5">
+          <div className="flex items-center justify-between gap-2">
+            <label
+              htmlFor={`batch-artist-${job.id}`}
+              className="text-[10px] text-slate-500"
+            >
+              Artist Name Override
+            </label>
+            {job.settings.artistName !== globalSettings.artistName && !isLocked && (
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdate({
+                    settings: {
+                      ...job.settings,
+                      artistName: globalSettings.artistName,
+                    },
+                  })
+                }
+                className="text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          <input
+            id={`batch-artist-${job.id}`}
+            type="text"
+            value={job.settings.artistName}
+            disabled={isLocked}
+            onChange={(e) =>
+              onUpdate({
+                settings: {
+                  ...job.settings,
+                  artistName: e.target.value,
+                },
+              })
+            }
+            placeholder={globalSettings.artistName || 'Override artist name...'}
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-2 py-1 text-[11px] text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          />
+        </div>
+
+        <div className="sm:col-span-2 flex flex-col gap-0.5">
+          <span className="text-[10px] text-slate-500">Text Overlay</span>
+          <button
+            type="button"
+            disabled={isLocked}
+            onClick={() =>
+              onUpdate({
+                settings: {
+                  ...job.settings,
+                  showTrackOverlay: !job.settings.showTrackOverlay,
+                },
+              })
+            }
+            title="Show or hide track title and artist overlay for this export"
+            className={`w-full px-2 py-1 rounded border text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-55 ${
+              job.settings.showTrackOverlay
+                ? 'bg-cyan-500/15 border-cyan-400/40 text-cyan-300'
+                : 'bg-[#121620] border-white/[0.08] text-slate-400'
+            }`}
+          >
+            {job.settings.showTrackOverlay ? 'Shown' : 'Hidden'}
+          </button>
         </div>
       </div>
 
@@ -533,11 +687,18 @@ export function ExportModal({
   isBatchRunning,
   autoDownloadBatch,
   onToggleAutoDownloadBatch,
+  notifyOnBatchComplete,
+  notificationPermission,
+  batchCompletionBanner,
+  onToggleNotifyOnBatchComplete,
+  onRequestNotificationPermission,
+  onDismissBatchCompletionBanner,
   onAddBatchJobs,
   onUpdateBatchJob,
   onMoveBatchJob,
   onDuplicateBatchJob,
   onRemoveBatchJob,
+  onPreviewBatchJob,
   onClearBatchJobs,
   onStartBatchExport,
   onDownloadAllBatch,
@@ -878,7 +1039,7 @@ export function ExportModal({
                 className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 disabled:opacity-40 cursor-pointer"
               >
                 <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                <span>+ 4 Visualizers</span>
+                <span>+ {VISUALIZER_OPTIONS.length} Visualizers</span>
               </button>
 
               <button
@@ -922,7 +1083,13 @@ export function ExportModal({
                           label: found.name,
                           trimStart: currentTrimStart,
                           trimEnd: currentTrimEnd,
-                          settings: { ...found.settings },
+                          settings: {
+                            ...found.settings,
+                            trackTitle:
+                              found.settings.trackTitle || currentSettings.trackTitle,
+                            artistName:
+                              found.settings.artistName || currentSettings.artistName,
+                          },
                         },
                       ]);
                     }
@@ -941,6 +1108,56 @@ export function ExportModal({
 
             {/* Scrollable Queue List */}
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2.5">
+              {batchCompletionBanner && !isBatchRunning && (
+                <div
+                  role="status"
+                  className={`rounded-lg border px-3.5 py-2.5 flex items-center justify-between gap-3 ${
+                    batchCompletionBanner.completedCount > 0
+                      ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-200'
+                      : 'bg-rose-500/10 border-rose-500/35 text-rose-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <BellRing className="w-4 h-4 shrink-0 text-emerald-400" />
+                    <div className="min-w-0 text-xs">
+                      <span className="font-semibold">
+                        {batchCompletionBanner.completedCount > 0
+                          ? `Batch Export Ready: ${batchCompletionBanner.completedCount} MP4 ${
+                              batchCompletionBanner.completedCount === 1 ? 'file' : 'files'
+                            } rendered`
+                          : 'Batch Export Finished'}
+                      </span>
+                      <span className="text-slate-300 ml-1.5">
+                        ({(batchCompletionBanner.totalElapsedMs / 1000).toFixed(1)}s
+                        {batchCompletionBanner.failedCount > 0
+                          ? ` · ${batchCompletionBanner.failedCount} failed`
+                          : ''}
+                        {batchCompletionBanner.desktopSent ? ' · Desktop alert sent' : ''})
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {batchCompletionBanner.completedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={onDownloadAllBatch}
+                        className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        Download All
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={onDismissBatchCompletionBanner}
+                      aria-label="Dismiss batch notification banner"
+                      className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/[0.08] transition-colors cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {batchJobs.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-white/[0.1] bg-[#090b10]/60 p-8 text-center">
                   <Layers className="w-7 h-7 text-cyan-400/70 mx-auto mb-2.5" />
@@ -948,7 +1165,7 @@ export function ExportModal({
                     No renders queued yet
                   </p>
                   <p className="text-[11px] text-slate-400 mt-1 max-w-md mx-auto leading-relaxed">
-                    Queue multiple trim segments (e.g. 15s / 30s splits), all 4 visualizer modes,
+                    Queue multiple trim segments (e.g. 15s / 30s splits), all {VISUALIZER_OPTIONS.length} visualizer modes,
                     or multi-platform aspect ratios to render MP4 files sequentially.
                   </p>
                 </div>
@@ -960,12 +1177,14 @@ export function ExportModal({
                     index={idx}
                     total={batchJobs.length}
                     duration={duration}
+                    globalSettings={currentSettings}
                     isBatchRunning={isBatchRunning}
                     savedPresets={savedPresets}
                     onUpdate={(patch) => onUpdateBatchJob(job.id, patch)}
                     onMove={(dir) => onMoveBatchJob(job.id, dir)}
                     onDuplicate={() => onDuplicateBatchJob(job.id)}
                     onRemove={() => onRemoveBatchJob(job.id)}
+                    onPreview={() => onPreviewBatchJob(job)}
                   />
                 ))
               )}
@@ -995,7 +1214,7 @@ export function ExportModal({
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-wrap items-center gap-x-3.5 gap-y-2">
                   <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -1006,6 +1225,44 @@ export function ExportModal({
                     />
                     <span>Auto-download each MP4</span>
                   </label>
+
+                  <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={notifyOnBatchComplete}
+                      onChange={(e) => onToggleNotifyOnBatchComplete(e.target.checked)}
+                      className="accent-cyan-400 rounded cursor-pointer"
+                    />
+                    <span>Notify when ready</span>
+                  </label>
+
+                  {notifyOnBatchComplete && notificationPermission === 'default' && (
+                    <button
+                      type="button"
+                      onClick={onRequestNotificationPermission}
+                      className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-400/30 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                    >
+                      <Bell className="w-3 h-3" />
+                      <span>Enable Desktop Alerts</span>
+                    </button>
+                  )}
+
+                  {notifyOnBatchComplete && notificationPermission === 'granted' && (
+                    <span className="text-[10px] text-emerald-400/90 flex items-center gap-1 whitespace-nowrap">
+                      <BellRing className="w-3 h-3" />
+                      <span>Desktop alerts on</span>
+                    </span>
+                  )}
+
+                  {notifyOnBatchComplete && notificationPermission === 'denied' && (
+                    <span
+                      className="text-[10px] text-amber-300/80 flex items-center gap-1 whitespace-nowrap"
+                      title="Browser desktop notifications are blocked in site settings; sound chime and tab alert will still trigger."
+                    >
+                      <BellOff className="w-3 h-3" />
+                      <span>Alerts blocked (chime active)</span>
+                    </span>
+                  )}
 
                   {!isBatchRunning && completedBatchJobs.length > 0 && (
                     <button

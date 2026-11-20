@@ -117,6 +117,31 @@ const VISUALIZER_MODES: Array<{
     name: 'Hybrid Ring + Particles',
     desc: 'Circular spectrum with bass-triggered particles',
   },
+  {
+    id: 'dual-ribbon',
+    name: 'Aurora Frequency Ribbons',
+    desc: 'Layered spline terrain waves with glowing crests',
+  },
+  {
+    id: 'led-matrix',
+    name: 'Segmented LED Matrix',
+    desc: 'Studio rack brick meters with peak-hold caps',
+  },
+  {
+    id: 'harmonic-orb',
+    name: 'Harmonic Orbital Mandala',
+    desc: 'Concentric geometric rings, splines & orbiting nodes',
+  },
+  {
+    id: 'stereo-prism',
+    name: 'Perspective Stereo Prism',
+    desc: 'Horizon grid with mirrored diamond spectrum blades',
+  },
+  {
+    id: 'cube-3d',
+    name: '3D Cube Mesh',
+    desc: 'Rotating 3D cube with frequency-reactive faces',
+  },
 ];
 
 const LYRIC_STYLES: Array<{
@@ -638,7 +663,7 @@ export function ControlSidebar({
                 <span className="text-[11px] text-cyan-400 shrink-0 ml-2">Browse</span>
               </button>
               <p className="text-[11px] text-slate-500">
-                Displayed inside Circular Ring & Hybrid Particle visualizers.
+                Displayed inside Circular Ring, Hybrid Particle &amp; Harmonic Orbital visualizers.
               </p>
             </section>
           </>
@@ -734,8 +759,13 @@ export function ControlSidebar({
         {activeTab === 'visualizer' && (
           <>
             <section className="space-y-2.5">
-              <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
-              <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
+                <span className="text-[11px] font-mono text-slate-400">
+                  {VISUALIZER_MODES.length} styles
+                </span>
+              </div>
+              <div className="space-y-1.5">
                 {VISUALIZER_MODES.map((mode) => {
                   const active = settings.visualizerMode === mode.id;
                   return (
@@ -743,7 +773,7 @@ export function ControlSidebar({
                       key={mode.id}
                       type="button"
                       onClick={() => onUpdateSettings({ visualizerMode: mode.id })}
-                      className={`w-full p-3 rounded-lg border text-left transition-colors cursor-pointer ${
+                      className={`w-full px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
                         active
                           ? 'bg-cyan-500/12 border-cyan-400/45 text-slate-100'
                           : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
@@ -1059,7 +1089,10 @@ export function ControlSidebar({
                   </button>
                 </div>
               ) : (
-                <div className="p-3 rounded-lg bg-[#090b10] border border-cyan-400/40 space-y-3">
+                <div
+                  data-tap-sync="true"
+                  className="p-3 rounded-lg bg-[#090b10] border border-cyan-400/40 space-y-3"
+                >
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="text-cyan-300 font-semibold">
                       Tap-to-Sync ({tapIndex + 1} / {tapLines.length})
