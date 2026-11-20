@@ -1,5 +1,6 @@
 import {
   AudioWaveform,
+  Cable,
   Check,
   Download,
   FolderOpen,
@@ -7,19 +8,26 @@ import {
   Loader2,
   Redo2,
   Save,
+  Share2,
   Sparkles,
   Undo2,
 } from 'lucide-react';
-import { ASPECT_RATIOS, AspectRatioKey } from '../types/studio';
+import {
+  AspectRatioKey,
+  ExportResolution,
+  resolveExportDimensions,
+} from '../types/studio';
 
 interface TopBarProps {
   audioFileName: string | null;
   aspectRatio: AspectRatioKey;
+  exportResolution: ExportResolution;
   clipDuration: number;
   hasAudio: boolean;
   isGeneratingDemo: boolean;
   isExporting: boolean;
   batchQueueCount: number;
+  shareableCount: number;
   activeProjectId: string | null;
   activeProjectName: string;
   projectCount: number;
@@ -28,23 +36,30 @@ interface TopBarProps {
   isSavingProject: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  midiActiveCount: number;
+  midiConnectedCount: number;
+  midiEnabled: boolean;
   onUndo: () => void;
   onRedo: () => void;
   onOpenProjects: () => void;
   onQuickSaveProject: () => void;
   onLoadDemo: () => void;
+  onOpenMidi: () => void;
   onOpenBatchExport: () => void;
+  onOpenShare: () => void;
   onExport: () => void;
 }
 
 export function TopBar({
   audioFileName,
   aspectRatio,
+  exportResolution,
   clipDuration,
   hasAudio,
   isGeneratingDemo,
   isExporting,
   batchQueueCount,
+  shareableCount,
   activeProjectId,
   activeProjectName,
   projectCount,
@@ -53,15 +68,20 @@ export function TopBar({
   isSavingProject,
   canUndo,
   canRedo,
+  midiActiveCount,
+  midiConnectedCount,
+  midiEnabled,
   onUndo,
   onRedo,
   onOpenProjects,
   onQuickSaveProject,
   onLoadDemo,
+  onOpenMidi,
   onOpenBatchExport,
+  onOpenShare,
   onExport,
 }: TopBarProps) {
-  const ratioInfo = ASPECT_RATIOS[aspectRatio];
+  const ratioInfo = resolveExportDimensions(aspectRatio, exportResolution);
 
   return (
     <header className="h-14 shrink-0 border-b border-white/[0.08] bg-[#121620] px-4 lg:px-5 flex items-center justify-between gap-3">
@@ -186,12 +206,50 @@ export function TopBar({
 
         <button
           type="button"
+          onClick={onOpenMidi}
+          disabled={isExporting}
+          title={
+            midiConnectedCount > 0
+              ? `MIDI Mapping (${midiConnectedCount} controller connected · ${midiActiveCount} active bindings)`
+              : 'Configure physical MIDI controller fader & knob mappings'
+          }
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer ${
+            midiEnabled && midiActiveCount > 0
+              ? 'bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-200 border-cyan-400/35'
+              : 'bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border-white/[0.08]'
+          }`}
+        >
+          <Cable className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="hidden md:inline">
+            {midiActiveCount > 0 ? `MIDI (${midiActiveCount})` : 'MIDI'}
+          </span>
+        </button>
+
+        <button
+          type="button"
           onClick={onOpenBatchExport}
           disabled={!hasAudio || isExporting}
           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
           <Layers className="w-3.5 h-3.5 text-cyan-400" />
           <span>{batchQueueCount > 0 ? `Batch (${batchQueueCount})` : 'Batch Export'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenShare}
+          disabled={(!hasAudio && shareableCount === 0) || isExporting}
+          title="Share finished MP4 to YouTube, TikTok, Facebook, Instagram, X, and LinkedIn"
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer ${
+            shareableCount > 0
+              ? 'bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-200 border-cyan-400/35'
+              : 'bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border-white/[0.08]'
+          }`}
+        >
+          <Share2 className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="hidden sm:inline">
+            {shareableCount > 0 ? `Share (${shareableCount})` : 'Share'}
+          </span>
         </button>
 
         <button

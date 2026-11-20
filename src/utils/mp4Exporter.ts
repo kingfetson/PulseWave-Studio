@@ -1,10 +1,10 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 import {
-  ASPECT_RATIOS,
   ExportProgressState,
   LyricLine,
   MotionBlurState,
   Particle,
+  resolveExportDimensions,
   StudioSettings,
 } from '../types/studio';
 import type {
@@ -39,6 +39,7 @@ export interface ExportMp4Options {
 export interface ExportMp4Result {
   downloadUrl: string;
   downloadFileName: string;
+  fileSizeBytes: number;
   elapsedMs: number;
   totalFrames: number;
 }
@@ -306,19 +307,24 @@ async function exportProjectOnMainThread(options: {
     startTimeMs,
   } = options;
 
-  const { width, height } = ASPECT_RATIOS[settings.aspectRatio];
+  const { width, height } = resolveExportDimensions(
+    settings.aspectRatio,
+    settings.exportResolution
+  );
   const fps = settings.exportFps;
   const clipDuration = slicedBuffer.duration;
   const totalFrames = Math.max(1, Math.ceil(clipDuration * fps));
   const numberOfChannels = Math.min(2, slicedBuffer.numberOfChannels);
   const sampleRate = slicedBuffer.sampleRate;
+  const videoBitrateBps = Math.round((settings.videoBitrateMbps || 8) * 1_000_000);
+  const audioBitrateBps = (settings.audioBitrateKbps || 192) * 1000;
 
-  const videoConfig = await resolveSupportedVideoConfig(width, height, fps);
+  const videoConfig = await resolveSupportedVideoConfig(width, height, fps, videoBitrateBps);
   const audioConfig: AudioEncoderConfig = {
     codec: 'mp4a.40.2',
     numberOfChannels,
     sampleRate,
-    bitrate: 192_000,
+    bitrate: audioBitrateBps,
   };
 
   const audioSupport = await AudioEncoder.isConfigSupported(audioConfig);
@@ -654,6 +660,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
   }
 
   const elapsedMs = Math.round(performance.now() - startTimeMs);
+  const fileSizeBytes = mp4Blob.size;
   onProgress({
     status: 'completed',
     currentFrame: exportResult.totalFrames,
@@ -662,12 +669,14 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     message: `Rendered ${exportResult.totalFrames} frames in ${(elapsedMs / 1000).toFixed(1)}s`,
     downloadUrl,
     downloadFileName,
+    fileSizeBytes,
     elapsedMs,
   });
 
   return {
     downloadUrl,
     downloadFileName,
+    fileSizeBytes,
     elapsedMs,
     totalFrames: exportResult.totalFrames,
   };

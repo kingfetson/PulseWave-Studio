@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Grid3x3, Music2, Play, Sparkles, Upload } from 'lucide-react';
+import { Check, Grid3x3, Music2, Play, Scan, Sparkles, Upload } from 'lucide-react';
 import { ASPECT_RATIOS, AspectRatioKey } from '../types/studio';
 
 interface PreviewStageProps {
@@ -10,6 +10,8 @@ interface PreviewStageProps {
   isGeneratingDemo: boolean;
   showSafeZone: boolean;
   onToggleSafeZone: () => void;
+  onAutoArrange: () => void;
+  autoArrangeNotice: string | null;
   onTogglePlay: () => void;
   onUploadAudioClick: () => void;
   onLoadDemo: () => void;
@@ -23,6 +25,8 @@ export function PreviewStage({
   isGeneratingDemo,
   showSafeZone,
   onToggleSafeZone,
+  onAutoArrange,
+  autoArrangeNotice,
   onTogglePlay,
   onUploadAudioClick,
   onLoadDemo,
@@ -82,14 +86,34 @@ export function PreviewStage({
         }}
       />
 
-      {/* Safe Zone Guide Overlay Toggle */}
-      <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+      {/* Stage Framing & Safe Zone Controls */}
+      <div className="absolute top-3 right-3 z-20 flex flex-wrap items-center justify-end gap-2 max-w-[calc(100%-1.5rem)]">
+        {autoArrangeNotice && (
+          <div
+            role="status"
+            className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium font-mono tabular-nums bg-emerald-500/15 border border-emerald-400/40 text-emerald-200 backdrop-blur-sm flex items-center gap-1.5 whitespace-nowrap"
+          >
+            <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span>{autoArrangeNotice}</span>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onAutoArrange}
+          title="Auto-Arrange visualizer scale, lyric position & bloom for this aspect ratio"
+          className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium border bg-[#121620]/85 border-white/[0.1] text-slate-200 hover:text-cyan-200 hover:border-cyan-400/45 hover:bg-cyan-500/15 transition-colors flex items-center gap-1.5 backdrop-blur-sm cursor-pointer whitespace-nowrap shrink-0"
+        >
+          <Scan className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+          <span>Auto-Arrange</span>
+        </button>
+
         <button
           type="button"
           onClick={onToggleSafeZone}
           aria-pressed={showSafeZone}
           title="Toggle Safe Zone Guide & 9:16 Composition Grid (S)"
-          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1.5 backdrop-blur-sm cursor-pointer ${
+          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1.5 backdrop-blur-sm cursor-pointer whitespace-nowrap shrink-0 ${
             showSafeZone
               ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.16)]'
               : 'bg-[#121620]/85 border-white/[0.1] text-slate-300 hover:text-white hover:border-white/[0.2]'

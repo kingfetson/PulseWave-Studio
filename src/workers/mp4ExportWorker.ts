@@ -1,10 +1,10 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 import {
-  ASPECT_RATIOS,
   ExportProgressState,
   LyricLine,
   MotionBlurState,
   Particle,
+  resolveExportDimensions,
   StudioSettings,
 } from '../types/studio';
 import {
@@ -119,17 +119,22 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
       return;
     }
 
-    const { width, height } = ASPECT_RATIOS[settings.aspectRatio];
+    const { width, height } = resolveExportDimensions(
+      settings.aspectRatio,
+      settings.exportResolution
+    );
     const fps = settings.exportFps;
     const clipDuration = length / sampleRate;
     const totalFrames = Math.max(1, Math.ceil(clipDuration * fps));
+    const videoBitrateBps = Math.round((settings.videoBitrateMbps || 8) * 1_000_000);
+    const audioBitrateBps = (settings.audioBitrateKbps || 192) * 1000;
 
-    const videoConfig = await resolveSupportedVideoConfig(width, height, fps);
+    const videoConfig = await resolveSupportedVideoConfig(width, height, fps, videoBitrateBps);
     const audioConfig: AudioEncoderConfig = {
       codec: 'mp4a.40.2',
       numberOfChannels,
       sampleRate,
-      bitrate: 192_000,
+      bitrate: audioBitrateBps,
     };
 
     const audioSupport = await AudioEncoder.isConfigSupported(audioConfig);

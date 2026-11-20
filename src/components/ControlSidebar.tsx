@@ -3,6 +3,7 @@ import {
   Activity,
   AudioWaveform,
   Bookmark,
+  Cable,
   Camera,
   Captions,
   Check,
@@ -16,17 +17,21 @@ import {
   Palette,
   Plus,
   RotateCcw,
+  Scan,
   Sliders,
   Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react';
+import type { MidiMappableParamKey } from '../types/midi';
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  ExportResolution,
   FadeType,
   LyricLine,
   LyricStyle,
+  resolveExportDimensions,
   SavedPreset,
   SidebarTab,
   StudioSettings,
@@ -80,7 +85,11 @@ interface ControlSidebarProps {
   captionsNotice: { type: 'success' | 'error'; text: string } | null;
   onDismissCaptionsNotice: () => void;
   onAutoGenerateCaptions: () => void;
+  onAutoArrange: () => void;
+  autoArrangeNotice: string | null;
   beatMeterBarRef: React.RefObject<HTMLDivElement | null>;
+  midiMappingBadges?: Partial<Record<MidiMappableParamKey, string>>;
+  onOpenMidiMapping?: () => void;
 }
 
 const TABS: Array<{ id: SidebarTab; label: string; icon: typeof Sliders }> = [
@@ -141,6 +150,21 @@ const VISUALIZER_MODES: Array<{
     id: 'cube-3d',
     name: '3D Cube Mesh',
     desc: 'Rotating 3D cube with frequency-reactive faces',
+  },
+  {
+    id: 'galaxy-spiral',
+    name: 'Galaxy Vortex Spiral',
+    desc: 'Rotating spiral arms & pulsing cosmic starfield',
+  },
+  {
+    id: 'cyber-tunnel',
+    name: '3D Warp Tunnel',
+    desc: 'Infinite perspective rings & laser rails synced to bass',
+  },
+  {
+    id: 'seismic-ridges',
+    name: 'Seismic Ridge Stack',
+    desc: 'Stacked 3D topographic spectrum waves with depth occlusion',
   },
 ];
 
@@ -225,7 +249,11 @@ export function ControlSidebar({
   captionsNotice,
   onDismissCaptionsNotice,
   onAutoGenerateCaptions,
+  onAutoArrange,
+  autoArrangeNotice,
   beatMeterBarRef,
+  midiMappingBadges,
+  onOpenMidiMapping,
 }: ControlSidebarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
   const albumInputRef = useRef<HTMLInputElement>(null);
@@ -591,7 +619,14 @@ export function ControlSidebar({
               <div className="space-y-2.5 pt-1">
                 <div>
                   <div className="flex justify-between text-[11px] mb-1">
-                    <span className="text-slate-400">Backdrop Blur</span>
+                    <span className="text-slate-400">
+                      Backdrop Blur
+                      {midiMappingBadges?.bgBlur && (
+                        <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                          · {midiMappingBadges.bgBlur}
+                        </span>
+                      )}
+                    </span>
                     <span className="font-mono tabular-nums text-slate-300">{settings.bgBlur}px</span>
                   </div>
                   <input
@@ -607,7 +642,14 @@ export function ControlSidebar({
 
                 <div>
                   <div className="flex justify-between text-[11px] mb-1">
-                    <span className="text-slate-400">Backdrop Dimness</span>
+                    <span className="text-slate-400">
+                      Backdrop Dimness
+                      {midiMappingBadges?.bgDim && (
+                        <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                          · {midiMappingBadges.bgDim}
+                        </span>
+                      )}
+                    </span>
                     <span className="font-mono tabular-nums text-slate-300">
                       {Math.round(settings.bgDim * 100)}%
                     </span>
@@ -677,6 +719,7 @@ export function ControlSidebar({
               <div className="space-y-2">
                 {(['16:9', '9:16', '1:1'] as AspectRatioKey[]).map((key) => {
                   const cfg = ASPECT_RATIOS[key];
+                  const dims = resolveExportDimensions(key, settings.exportResolution);
                   const active = settings.aspectRatio === key;
                   return (
                     <button
@@ -694,7 +737,7 @@ export function ControlSidebar({
                         <div className="text-[11px] text-slate-400 mt-0.5">{cfg.platformHint}</div>
                       </div>
                       <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                        {cfg.width}×{cfg.height}
+                        {dims.width}×{dims.height}
                       </span>
                     </button>
                   );
@@ -705,7 +748,66 @@ export function ControlSidebar({
             <hr className="border-white/[0.07]" />
 
             <section className="space-y-2.5">
-              <h2 className="text-xs font-semibold text-slate-200">Export Frame Rate</h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-200">Smart Framing</h2>
+                <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                  {settings.aspectRatio}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onAutoArrange}
+                className="w-full py-2.5 px-3 rounded-lg text-xs font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <Scan className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>Auto-Arrange for {settings.aspectRatio}</span>
+              </button>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Optimizes visualizer scale, lyric vertical position, and bloom intensity for{' '}
+                {settings.aspectRatio} framing.
+              </p>
+              {autoArrangeNotice && (
+                <div
+                  role="status"
+                  className="px-2.5 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[11px] font-mono tabular-nums text-emerald-200 flex items-center gap-1.5"
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">{autoArrangeNotice}</span>
+                </div>
+              )}
+            </section>
+
+            <hr className="border-white/[0.07]" />
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-200">Export Resolution &amp; FPS</h2>
+                <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                  {(() => {
+                    const d = resolveExportDimensions(
+                      settings.aspectRatio,
+                      settings.exportResolution
+                    );
+                    return `${d.width}×${d.height}`;
+                  })()}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                {(['720p', '1080p', '1440p'] as ExportResolution[]).map((res) => (
+                  <button
+                    key={res}
+                    type="button"
+                    onClick={() => onUpdateSettings({ exportResolution: res })}
+                    className={`py-1.5 rounded-md text-xs font-mono tabular-nums transition-colors cursor-pointer ${
+                      settings.exportResolution === res
+                        ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {res}
+                  </button>
+                ))}
+              </div>
               <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
                 {([30, 60] as const).map((fps) => (
                   <button
@@ -723,7 +825,7 @@ export function ControlSidebar({
                 ))}
               </div>
               <p className="text-[11px] text-slate-500">
-                30 FPS exports 2× faster; 60 FPS produces ultra-smooth motion.
+                30 FPS exports 2× faster; save full resolution &amp; bitrate combos as Export Profiles in the Export modal.
               </p>
             </section>
 
@@ -790,11 +892,58 @@ export function ControlSidebar({
             <hr className="border-white/[0.07]" />
 
             <section className="space-y-4">
-              <h2 className="text-xs font-semibold text-slate-200">Audio Reactivity</h2>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold text-slate-200">Audio Reactivity</h2>
+                {onOpenMidiMapping && (
+                  <button
+                    type="button"
+                    onClick={onOpenMidiMapping}
+                    title="Bind physical MIDI controller faders and knobs"
+                    className="px-2 py-1 rounded-md text-[10.5px] font-medium bg-[#090b10] hover:bg-white/[0.06] text-cyan-300 border border-white/[0.08] hover:border-cyan-400/35 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Cable className="w-3 h-3 text-cyan-400" />
+                    <span>MIDI Map</span>
+                  </button>
+                )}
+              </div>
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">Sensitivity / Gain</span>
+                  <span className="text-slate-400">
+                    Visualizer Scale
+                    {midiMappingBadges?.visualizerScale && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.visualizerScale}
+                      </span>
+                    )}
+                  </span>
+                  <span className="font-mono tabular-nums text-cyan-400">
+                    {Math.round(settings.visualizerScale * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.55}
+                  max={1.5}
+                  step={0.05}
+                  value={settings.visualizerScale}
+                  onChange={(e) =>
+                    onUpdateSettings({ visualizerScale: parseFloat(e.target.value) })
+                  }
+                  className="studio-range w-full"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[11px] mb-1">
+                  <span className="text-slate-400">
+                    Sensitivity / Gain
+                    {midiMappingBadges?.sensitivity && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.sensitivity}
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono tabular-nums text-cyan-400">
                     {settings.sensitivity.toFixed(2)}×
                   </span>
@@ -812,7 +961,14 @@ export function ControlSidebar({
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">Bar Count</span>
+                  <span className="text-slate-400">
+                    Bar Count
+                    {midiMappingBadges?.barCount && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.barCount}
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono tabular-nums text-cyan-400">{settings.barCount}</span>
                 </div>
                 <input
@@ -828,7 +984,14 @@ export function ControlSidebar({
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">Smoothing</span>
+                  <span className="text-slate-400">
+                    Smoothing
+                    {midiMappingBadges?.smoothing && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.smoothing}
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono tabular-nums text-cyan-400">
                     {settings.smoothing.toFixed(2)}
                   </span>
@@ -846,7 +1009,14 @@ export function ControlSidebar({
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">Motion Blur</span>
+                  <span className="text-slate-400">
+                    Motion Blur
+                    {midiMappingBadges?.motionBlur && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.motionBlur}
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono tabular-nums text-cyan-400">
                     {settings.motionBlur === 0
                       ? 'Off'
@@ -869,7 +1039,14 @@ export function ControlSidebar({
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">Bloom Intensity</span>
+                  <span className="text-slate-400">
+                    Bloom Intensity
+                    {midiMappingBadges?.bloomIntensity && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.bloomIntensity}
+                      </span>
+                    )}
+                  </span>
                   <span className="font-mono tabular-nums text-cyan-400">
                     {settings.bloomIntensity === 0
                       ? 'Off'
@@ -924,7 +1101,14 @@ export function ControlSidebar({
                 <div className="space-y-3 pt-0.5">
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
-                      <span className="text-slate-400">Burst Sensitivity</span>
+                      <span className="text-slate-400">
+                        Burst Sensitivity
+                        {midiMappingBadges?.beatSensitivity && (
+                          <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                            · {midiMappingBadges.beatSensitivity}
+                          </span>
+                        )}
+                      </span>
                       <span className="font-mono tabular-nums text-cyan-400">
                         {settings.beatSensitivity.toFixed(2)}×
                       </span>
@@ -995,6 +1179,56 @@ export function ControlSidebar({
                     </button>
                   );
                 })}
+              </div>
+            </section>
+
+            <section className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-200">
+                  Vertical Position
+                  {midiMappingBadges?.lyricPosition && (
+                    <span className="ml-1.5 font-mono text-[10px] font-normal text-cyan-400/85">
+                      · {midiMappingBadges.lyricPosition}
+                    </span>
+                  )}
+                </span>
+                <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                  {settings.lyricPosition}% from top
+                </span>
+              </div>
+              <input
+                type="range"
+                min={15}
+                max={92}
+                step={1}
+                value={settings.lyricPosition}
+                onChange={(e) =>
+                  onUpdateSettings({ lyricPosition: parseInt(e.target.value, 10) })
+                }
+                className="studio-range w-full"
+              />
+              <div className="grid grid-cols-4 gap-1.5">
+                {(
+                  [
+                    { label: 'Top', val: 22 },
+                    { label: 'Mid', val: 50 },
+                    { label: '9:16 Safe', val: 74 },
+                    { label: 'Bottom', val: 84 },
+                  ] as const
+                ).map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => onUpdateSettings({ lyricPosition: preset.val })}
+                    className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                      settings.lyricPosition === preset.val
+                        ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                        : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
             </section>
 

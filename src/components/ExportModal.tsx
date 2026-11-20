@@ -6,6 +6,8 @@ import {
   Bell,
   BellOff,
   BellRing,
+  Bookmark,
+  Check,
   CheckCircle2,
   Copy,
   Download,
@@ -17,6 +19,8 @@ import {
   Plus,
   RotateCcw,
   Scissors,
+  Share2,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   X,
@@ -24,15 +28,27 @@ import {
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  AudioBitrateKbps,
   BatchExportJob,
+  EXPORT_BITRATE_PRESETS,
+  ExportProfile,
   ExportProgressState,
+  ExportResolution,
   FadeType,
   LyricStyle,
+  resolveExportDimensions,
   SavedPreset,
   StudioSettings,
   VisualizerMode,
 } from '../types/studio';
+import { computeAutoArrangeFraming } from '../utils/autoArrange';
 import type { BrowserNotificationPermission } from '../utils/batchNotifications';
+import {
+  estimateMp4SizeMb,
+  exportProfileToSettingsPatch,
+  findMatchingExportProfile,
+  formatExportProfileMeta,
+} from '../utils/exportProfiles';
 import { formatShortTime, parseTimeInput } from '../utils/lrcParser';
 import { sanitizeFileName } from '../utils/mp4Exporter';
 
@@ -50,6 +66,14 @@ interface ExportModalProps {
   currentTrimEnd: number;
   currentSettings: StudioSettings;
   savedPresets: SavedPreset[];
+  exportProfiles: ExportProfile[];
+  onUpdateSettings: (patch: Partial<StudioSettings>) => void;
+  onApplyExportProfile: (
+    profile: ExportProfile,
+    autoArrangeOnRatioChange?: boolean
+  ) => void;
+  onSaveExportProfile: (name: string, targetSettings: StudioSettings) => ExportProfile;
+  onDeleteExportProfile: (id: string) => void;
   batchJobs: BatchExportJob[];
   isBatchRunning: boolean;
   autoDownloadBatch: boolean;
@@ -87,6 +111,8 @@ interface ExportModalProps {
   onStartBatchExport: () => void;
   onDownloadAllBatch: () => void;
   onStartSingleExport: () => void;
+  onShareSingle: () => void;
+  onShareBatchJob: (job: BatchExportJob) => void;
 }
 
 const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
@@ -99,6 +125,9 @@ const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'harmonic-orb', label: 'Harmonic Orbital' },
   { id: 'stereo-prism', label: 'Stereo Prism' },
   { id: 'cube-3d', label: '3D Cube' },
+  { id: 'galaxy-spiral', label: 'Galaxy Vortex' },
+  { id: 'cyber-tunnel', label: 'Warp Tunnel' },
+  { id: 'seismic-ridges', label: 'Seismic Ridges' },
 ];
 
 const LYRIC_STYLE_OPTIONS: Array<{ id: LyricStyle; label: string }> = [
@@ -127,6 +156,7 @@ interface BatchJobRowProps {
   globalSettings: StudioSettings;
   isBatchRunning: boolean;
   savedPresets: SavedPreset[];
+  exportProfiles: ExportProfile[];
   onUpdate: (
     patch: Partial<
       Pick<BatchExportJob, 'label' | 'trimStart' | 'trimEnd' | 'settings' | 'status'>
@@ -136,6 +166,7 @@ interface BatchJobRowProps {
   onDuplicate: () => void;
   onRemove: () => void;
   onPreview: () => void;
+  onShare: () => void;
 }
 
 function BatchJobRow({
@@ -146,11 +177,13 @@ function BatchJobRow({
   globalSettings,
   isBatchRunning,
   savedPresets,
+  exportProfiles,
   onUpdate,
   onMove,
   onDuplicate,
   onRemove,
   onPreview,
+  onShare,
 }: BatchJobRowProps) {
   const [startText, setStartText] = useState(formatShortTime(job.trimStart));
   const [endText, setEndText] = useState(formatShortTime(job.trimEnd));
@@ -165,7 +198,11 @@ function BatchJobRow({
 
   const isLocked = isBatchRunning || job.status === 'rendering' || job.status === 'completed';
   const clipLen = Math.max(0, job.trimEnd - job.trimStart);
-  const ratioMeta = ASPECT_RATIOS[job.settings.aspectRatio];
+  const ratioDims = resolveExportDimensions(
+    job.settings.aspectRatio,
+    job.settings.exportResolution
+  );
+  const matchedProfile = findMatchingExportProfile(job.settings, exportProfiles);
 
   const commitStart = () => {
     const parsed = parseTimeInput(startText);
@@ -252,14 +289,25 @@ function BatchJobRow({
           </span>
 
           {job.status === 'completed' && job.downloadUrl && job.downloadFileName && (
-            <a
-              href={job.downloadUrl}
-              download={job.downloadFileName}
-              className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors flex items-center gap-1"
-            >
-              <Download className="w-3 h-3" />
-              <span>MP4</span>
-            </a>
+            <>
+              <button
+                type="button"
+                onClick={onShare}
+                title="Share to YouTube, TikTok, Facebook, Instagram, X"
+                className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/35 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer"
+              >
+                <Share2 className="w-3 h-3" />
+                <span>Share</span>
+              </button>
+              <a
+                href={job.downloadUrl}
+                download={job.downloadFileName}
+                className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>MP4</span>
+              </a>
+            </>
           )}
 
           {(job.status === 'error' || job.status === 'cancelled') && !isBatchRunning && (
@@ -375,9 +423,9 @@ function BatchJobRow({
             }
             className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
           >
-            <option value="16:9">16:9 (1280×720)</option>
-            <option value="9:16">9:16 (720×1280)</option>
-            <option value="1:1">1:1 (1080×1080)</option>
+            <option value="16:9">16:9</option>
+            <option value="9:16">9:16</option>
+            <option value="1:1">1:1</option>
           </select>
         </label>
 
@@ -473,7 +521,7 @@ function BatchJobRow({
 
             <div
               className="flex items-center gap-0.5 px-1.5 py-1 rounded bg-[#121620] border border-white/[0.08]"
-              title={`${ratioMeta.width}×${ratioMeta.height} · ${job.settings.exportFps}fps`}
+              title={`${ratioDims.width}×${ratioDims.height} · ${job.settings.exportFps}fps · ${job.settings.videoBitrateMbps} Mbps`}
             >
               <span
                 className="w-2.5 h-2.5 rounded-sm border border-white/15"
@@ -506,7 +554,7 @@ function BatchJobRow({
                 }}
                 className="w-full min-w-0 rounded bg-[#121620] border border-white/[0.08] px-1 py-1 text-[10px] text-slate-300 focus:border-cyan-400/60 outline-none disabled:opacity-55"
               >
-                <option value="">Preset…</option>
+                <option value="">Visual…</option>
                 {savedPresets.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -516,6 +564,112 @@ function BatchJobRow({
             )}
           </div>
         </div>
+      </div>
+
+      {/* Encoding Profile / Resolution / FPS / Bitrate Row */}
+      <div className="mt-2 pt-2 border-t border-white/[0.06] grid grid-cols-2 sm:grid-cols-12 gap-2 items-center">
+        <div className="col-span-2 sm:col-span-5 flex flex-col gap-0.5">
+          <span className="text-[10px] text-slate-500">Export Profile</span>
+          <select
+            value={matchedProfile?.id ?? ''}
+            disabled={isLocked}
+            aria-label={`Job ${index + 1} export profile`}
+            onChange={(e) => {
+              const found = exportProfiles.find((p) => p.id === e.target.value);
+              if (found) {
+                onUpdate({
+                  settings: {
+                    ...job.settings,
+                    ...exportProfileToSettingsPatch(found),
+                  },
+                });
+              }
+            }}
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          >
+            <option value="">Custom ({ratioDims.width}×{ratioDims.height})</option>
+            {exportProfiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <label className="sm:col-span-2 flex flex-col gap-0.5">
+          <span className="text-[10px] text-slate-500">Resolution</span>
+          <select
+            value={job.settings.exportResolution}
+            disabled={isLocked}
+            onChange={(e) =>
+              onUpdate({
+                settings: {
+                  ...job.settings,
+                  exportResolution: e.target.value as ExportResolution,
+                },
+              })
+            }
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] font-mono tabular-nums text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          >
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+            <option value="1440p">1440p</option>
+          </select>
+        </label>
+
+        <label className="sm:col-span-2 flex flex-col gap-0.5">
+          <span className="text-[10px] text-slate-500">Frame Rate</span>
+          <select
+            value={job.settings.exportFps}
+            disabled={isLocked}
+            onChange={(e) =>
+              onUpdate({
+                settings: {
+                  ...job.settings,
+                  exportFps: Number(e.target.value) === 60 ? 60 : 30,
+                },
+              })
+            }
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] font-mono tabular-nums text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          >
+            <option value={30}>30 FPS</option>
+            <option value={60}>60 FPS</option>
+          </select>
+        </label>
+
+        <label className="col-span-2 sm:col-span-3 flex flex-col gap-0.5">
+          <span className="text-[10px] text-slate-500">
+            Bitrate ({ratioDims.width}×{ratioDims.height})
+          </span>
+          <select
+            value={job.settings.bitratePreset}
+            disabled={isLocked}
+            onChange={(e) => {
+              const presetId = e.target.value as Exclude<StudioSettings['bitratePreset'], 'custom'>;
+              const found = EXPORT_BITRATE_PRESETS.find((b) => b.id === presetId);
+              if (found) {
+                onUpdate({
+                  settings: {
+                    ...job.settings,
+                    bitratePreset: found.id,
+                    videoBitrateMbps: found.videoBitrateMbps,
+                    audioBitrateKbps: found.audioBitrateKbps,
+                  },
+                });
+              }
+            }}
+            className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] font-mono tabular-nums text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
+          >
+            {EXPORT_BITRATE_PRESETS.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.label} ({b.videoBitrateMbps}M)
+              </option>
+            ))}
+            {job.settings.bitratePreset === 'custom' && (
+              <option value="custom">Custom ({job.settings.videoBitrateMbps}M)</option>
+            )}
+          </select>
+        </label>
       </div>
 
       {/* Per-Job Track Metadata Override Row */}
@@ -683,6 +837,11 @@ export function ExportModal({
   currentTrimEnd,
   currentSettings,
   savedPresets,
+  exportProfiles,
+  onUpdateSettings,
+  onApplyExportProfile,
+  onSaveExportProfile,
+  onDeleteExportProfile,
   batchJobs,
   isBatchRunning,
   autoDownloadBatch,
@@ -703,7 +862,19 @@ export function ExportModal({
   onStartBatchExport,
   onDownloadAllBatch,
   onStartSingleExport,
+  onShareSingle,
+  onShareBatchJob,
 }: ExportModalProps) {
+  const [profileNameInput, setProfileNameInput] = useState('');
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
+  const [autoArrangeOnProfileRatio, setAutoArrangeOnProfileRatio] = useState(true);
+
+  useEffect(() => {
+    if (!profileNotice) return;
+    const t = window.setTimeout(() => setProfileNotice(null), 2600);
+    return () => window.clearTimeout(t);
+  }, [profileNotice]);
+
   if (!isOpen) return null;
 
   const isSingleRunning =
@@ -711,6 +882,17 @@ export function ExportModal({
     state.status === 'rendering' ||
     state.status === 'muxing';
   const isAnyRunning = isSingleRunning || isBatchRunning;
+  const matchedActiveProfile = findMatchingExportProfile(currentSettings, exportProfiles);
+  const resolvedSingleDims = resolveExportDimensions(
+    currentSettings.aspectRatio,
+    currentSettings.exportResolution
+  );
+  const clipDurationSec = Math.max(0, currentTrimEnd - currentTrimStart);
+  const estimatedSizeMb = estimateMp4SizeMb(
+    clipDurationSec,
+    currentSettings.videoBitrateMbps,
+    currentSettings.audioBitrateKbps
+  );
 
   const pendingBatchJobs = batchJobs.filter(
     (j) => j.status === 'queued' || j.status === 'error' || j.status === 'cancelled'
@@ -805,6 +987,35 @@ export function ExportModal({
     }
   };
 
+  const handleSaveCurrentProfile = () => {
+    const created = onSaveExportProfile(profileNameInput, currentSettings);
+    setProfileNameInput('');
+    setProfileNotice(`Saved profile "${created.name}"`);
+  };
+
+  const handleQueueWithProfile = (profile: ExportProfile) => {
+    const ratioChanged = profile.aspectRatio !== currentSettings.aspectRatio;
+    const baseSettings: StudioSettings = {
+      ...currentSettings,
+      ...exportProfileToSettingsPatch(profile),
+    };
+    const finalSettings =
+      ratioChanged && autoArrangeOnProfileRatio
+        ? {
+            ...baseSettings,
+            ...computeAutoArrangeFraming(baseSettings, false).patch,
+          }
+        : baseSettings;
+    onAddBatchJobs([
+      {
+        label: profile.name,
+        trimStart: currentTrimStart,
+        trimEnd: currentTrimEnd,
+        settings: finalSettings,
+      },
+    ]);
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
@@ -814,7 +1025,7 @@ export function ExportModal({
     >
       <div
         className={`w-full rounded-xl bg-[#121620] border border-white/[0.1] shadow-2xl flex flex-col max-h-[90vh] transition-[max-width] duration-150 ${
-          view === 'batch' ? 'max-w-3xl' : 'max-w-md'
+          view === 'batch' ? 'max-w-4xl' : 'max-w-xl'
         }`}
       >
         {/* Header */}
@@ -914,67 +1125,369 @@ export function ExportModal({
 
         {/* Body */}
         {view === 'single' ? (
-          <div className="p-6">
-            {state.status === 'idle' && (
-              <div className="mb-5 p-3.5 rounded-lg bg-[#090b10] border border-white/[0.08] space-y-1.5">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Active Clip</span>
-                  <span className="font-mono tabular-nums text-slate-200">
-                    {formatShortTime(currentTrimStart)} → {formatShortTime(currentTrimEnd)} (
-                    {Math.max(0, currentTrimEnd - currentTrimStart).toFixed(1)}s)
-                  </span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Format &amp; FPS</span>
-                  <span className="font-mono tabular-nums text-slate-200">
-                    {ASPECT_RATIOS[currentSettings.aspectRatio].width}×
-                    {ASPECT_RATIOS[currentSettings.aspectRatio].height} ·{' '}
-                    {currentSettings.exportFps}fps
-                  </span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Boundary Fade</span>
-                  <span className="font-mono tabular-nums text-slate-200">
-                    0.15s · {FADE_TYPE_LABELS[currentSettings.fadeType]}
-                  </span>
-                </div>
-              </div>
-            )}
+          <div className="flex flex-col min-h-0 flex-1">
+            <div className="flex-1 min-h-0 overflow-y-auto studio-scroll p-5 space-y-4">
+              {state.status === 'idle' && (
+                <>
+                  {/* Export Profiles Picker & Save */}
+                  <section className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <Bookmark className="w-3.5 h-3.5 text-cyan-400" />
+                        <h4 className="text-xs font-semibold text-slate-200">
+                          Export Profiles
+                        </h4>
+                      </div>
+                      <span className="text-[11px] font-mono tabular-nums text-slate-400 truncate">
+                        {matchedActiveProfile
+                          ? matchedActiveProfile.name
+                          : 'Custom Configuration'}
+                      </span>
+                    </div>
 
-            {(isSingleRunning || state.status === 'completed') && (
-              <div className="mb-4">
-                <div className="flex items-center justify-between text-xs mb-2">
-                  <span className="text-slate-300 font-medium">{state.message}</span>
-                  <span className="font-mono tabular-nums text-cyan-400 font-semibold">
-                    {state.percentage}%
-                  </span>
-                </div>
-                <div className="h-2 w-full rounded-full bg-white/[0.07] overflow-hidden">
-                  <div
-                    className={`h-full transition-[width] duration-150 ${
-                      state.status === 'completed' ? 'bg-emerald-400' : 'bg-cyan-400'
-                    }`}
-                    style={{ width: `${state.percentage}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono tabular-nums mt-2">
-                  <span>
-                    Frame {state.currentFrame} / {state.totalFrames}
-                  </span>
-                  {state.elapsedMs !== undefined && (
-                    <span>Elapsed {(state.elapsedMs / 1000).toFixed(1)}s</span>
-                  )}
-                </div>
-              </div>
-            )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-[168px] overflow-y-auto studio-scroll pr-0.5">
+                      {exportProfiles.map((profile) => {
+                        const isActive = matchedActiveProfile?.id === profile.id;
+                        return (
+                          <div
+                            key={profile.id}
+                            className={`rounded-lg border transition-colors flex items-stretch ${
+                              isActive
+                                ? 'bg-cyan-500/12 border-cyan-400/45 text-slate-100'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onApplyExportProfile(profile, autoArrangeOnProfileRatio);
+                                setProfileNotice(`Applied "${profile.name}"`);
+                              }}
+                              className="flex-1 min-w-0 px-2.5 py-2 text-left cursor-pointer"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-semibold truncate">
+                                  {profile.name}
+                                </span>
+                                <span className="text-[10px] text-slate-500 shrink-0">
+                                  {profile.isBuiltIn ? 'Preset' : 'Saved'}
+                                </span>
+                              </div>
+                              <div className="text-[10.5px] font-mono tabular-nums text-slate-400 mt-0.5 truncate">
+                                {formatExportProfileMeta(profile)}
+                              </div>
+                            </button>
 
-            {state.status === 'error' && (
-              <div className="mb-5 p-3 rounded-lg bg-rose-500/10 border border-rose-500/25 text-xs text-rose-200 leading-relaxed">
-                {state.error || 'An unexpected error occurred during WebCodecs encoding.'}
-              </div>
-            )}
+                            {!profile.isBuiltIn && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onDeleteExportProfile(profile.id);
+                                  setProfileNotice(`Removed "${profile.name}"`);
+                                }}
+                                title={`Delete profile ${profile.name}`}
+                                aria-label={`Delete export profile ${profile.name}`}
+                                className="px-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 border-l border-white/[0.06] transition-colors cursor-pointer shrink-0"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
 
-            <div className="flex items-center justify-end gap-2.5 pt-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                      <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={autoArrangeOnProfileRatio}
+                          onChange={(e) => setAutoArrangeOnProfileRatio(e.target.checked)}
+                          className="accent-cyan-400 rounded cursor-pointer"
+                        />
+                        <span>Auto-arrange framing when aspect ratio changes</span>
+                      </label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={profileNameInput}
+                        onChange={(e) => setProfileNameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveCurrentProfile();
+                        }}
+                        placeholder="New profile name (e.g. TikTok 1080p 60fps)..."
+                        className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/60"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSaveCurrentProfile}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.07] hover:bg-white/[0.12] text-slate-100 border border-white/[0.1] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Save Profile</span>
+                      </button>
+                    </div>
+
+                    {profileNotice && (
+                      <div
+                        role="status"
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-200 flex items-center gap-1.5"
+                      >
+                        <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="truncate">{profileNotice}</span>
+                      </div>
+                    )}
+                  </section>
+
+                  <hr className="border-white/[0.07]" />
+
+                  {/* Resolution, FPS, Bitrate & Fade Controls */}
+                  <section className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
+                        <h4 className="text-xs font-semibold text-slate-200">
+                          Resolution &amp; Bitrate Settings
+                        </h4>
+                      </div>
+                      <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                        {resolvedSingleDims.width}×{resolvedSingleDims.height}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div className="space-y-1">
+                        <span className="text-[10.5px] text-slate-400">Aspect Ratio</span>
+                        <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                          {(['16:9', '9:16', '1:1'] as AspectRatioKey[]).map((ratio) => (
+                            <button
+                              key={ratio}
+                              type="button"
+                              onClick={() => onUpdateSettings({ aspectRatio: ratio })}
+                              className={`py-1 rounded text-[11px] font-mono tabular-nums transition-colors cursor-pointer whitespace-nowrap ${
+                                currentSettings.aspectRatio === ratio
+                                  ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {ratio}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <span className="text-[10.5px] text-slate-400">Resolution</span>
+                        <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                          {(['720p', '1080p', '1440p'] as ExportResolution[]).map((res) => (
+                            <button
+                              key={res}
+                              type="button"
+                              onClick={() => onUpdateSettings({ exportResolution: res })}
+                              className={`py-1 rounded text-[11px] font-mono tabular-nums transition-colors cursor-pointer whitespace-nowrap ${
+                                currentSettings.exportResolution === res
+                                  ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {res}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <span className="text-[10.5px] text-slate-400">Frame Rate</span>
+                        <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                          {([30, 60] as const).map((fps) => (
+                            <button
+                              key={fps}
+                              type="button"
+                              onClick={() => onUpdateSettings({ exportFps: fps })}
+                              className={`py-1 rounded text-[11px] font-mono tabular-nums transition-colors cursor-pointer whitespace-nowrap ${
+                                currentSettings.exportFps === fps
+                                  ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {fps}fps
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400">Video Bitrate Preset</span>
+                        <span className="font-mono tabular-nums text-cyan-400">
+                          {currentSettings.videoBitrateMbps} Mbps H.264
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                        {EXPORT_BITRATE_PRESETS.map((preset) => {
+                          const active =
+                            currentSettings.bitratePreset === preset.id &&
+                            currentSettings.videoBitrateMbps === preset.videoBitrateMbps;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              onClick={() =>
+                                onUpdateSettings({
+                                  bitratePreset: preset.id,
+                                  videoBitrateMbps: preset.videoBitrateMbps,
+                                  audioBitrateKbps: preset.audioBitrateKbps,
+                                })
+                              }
+                              className={`px-2 py-1.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-cyan-500/15 border-cyan-400/45 text-slate-100'
+                                  : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                              }`}
+                            >
+                              <div className="text-[11px] font-semibold whitespace-nowrap">
+                                {preset.label}
+                              </div>
+                              <div className="text-[10px] font-mono tabular-nums text-slate-400 whitespace-nowrap">
+                                {preset.videoBitrateMbps}M / {preset.audioBitrateKbps}k
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <input
+                        type="range"
+                        min={2}
+                        max={35}
+                        step={1}
+                        aria-label="Video bitrate in Mbps"
+                        value={currentSettings.videoBitrateMbps}
+                        onChange={(e) => {
+                          const mbps = parseInt(e.target.value, 10);
+                          const matchedPreset = EXPORT_BITRATE_PRESETS.find(
+                            (b) => b.videoBitrateMbps === mbps
+                          );
+                          onUpdateSettings({
+                            videoBitrateMbps: mbps,
+                            bitratePreset: matchedPreset ? matchedPreset.id : 'custom',
+                          });
+                        }}
+                        className="studio-range w-full"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="space-y-1">
+                        <span className="text-[10.5px] text-slate-400">Audio AAC Bitrate</span>
+                        <div className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                          {([128, 192, 256, 320] as AudioBitrateKbps[]).map((kbps) => (
+                            <button
+                              key={kbps}
+                              type="button"
+                              onClick={() => onUpdateSettings({ audioBitrateKbps: kbps })}
+                              className={`py-1 rounded text-[11px] font-mono tabular-nums transition-colors cursor-pointer whitespace-nowrap ${
+                                currentSettings.audioBitrateKbps === kbps
+                                  ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {kbps}k
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <span className="text-[10.5px] text-slate-400">0.15s Boundary Fade</span>
+                        <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                          {(['linear', 'logarithmic', 'exponential'] as FadeType[]).map((ft) => (
+                            <button
+                              key={ft}
+                              type="button"
+                              onClick={() => onUpdateSettings({ fadeType: ft })}
+                              className={`py-1 rounded text-[11px] transition-colors cursor-pointer whitespace-nowrap ${
+                                currentSettings.fadeType === ft
+                                  ? 'bg-cyan-400 text-[#090b10] font-semibold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {ft === 'logarithmic'
+                                ? 'Log'
+                                : ft === 'exponential'
+                                ? 'Exp'
+                                : 'Linear'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Output Summary */}
+                  <div className="p-3.5 rounded-lg bg-[#090b10] border border-white/[0.08] space-y-1.5">
+                    <div className="flex justify-between text-xs gap-2">
+                      <span className="text-slate-400">Active Clip</span>
+                      <span className="font-mono tabular-nums text-slate-200">
+                        {formatShortTime(currentTrimStart)} → {formatShortTime(currentTrimEnd)} (
+                        {clipDurationSec.toFixed(1)}s)
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-xs gap-2">
+                      <span className="text-slate-400">Output Stream</span>
+                      <span className="font-mono tabular-nums text-slate-200 text-right">
+                        {resolvedSingleDims.width}×{resolvedSingleDims.height} ·{' '}
+                        {currentSettings.exportFps}fps · {currentSettings.videoBitrateMbps} Mbps H.264 ·{' '}
+                        {currentSettings.audioBitrateKbps}k AAC
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-xs gap-2">
+                      <span className="text-slate-400">Estimated Size &amp; Fade</span>
+                      <span className="font-mono tabular-nums text-slate-200">
+                        ~{estimatedSizeMb.toFixed(1)} MB · {FADE_TYPE_LABELS[currentSettings.fadeType]}
+                      </span>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {(isSingleRunning || state.status === 'completed') && (
+                <div>
+                  <div className="flex items-center justify-between text-xs mb-2">
+                    <span className="text-slate-300 font-medium">{state.message}</span>
+                    <span className="font-mono tabular-nums text-cyan-400 font-semibold">
+                      {state.percentage}%
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-white/[0.07] overflow-hidden">
+                    <div
+                      className={`h-full transition-[width] duration-150 ${
+                        state.status === 'completed' ? 'bg-emerald-400' : 'bg-cyan-400'
+                      }`}
+                      style={{ width: `${state.percentage}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono tabular-nums mt-2">
+                    <span>
+                      Frame {state.currentFrame} / {state.totalFrames}
+                    </span>
+                    {state.elapsedMs !== undefined && (
+                      <span>Elapsed {(state.elapsedMs / 1000).toFixed(1)}s</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {state.status === 'error' && (
+                <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/25 text-xs text-rose-200 leading-relaxed">
+                  {state.error || 'An unexpected error occurred during WebCodecs encoding.'}
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-white/[0.08] bg-[#0d1118] shrink-0 flex items-center justify-end gap-2.5">
               {isSingleRunning ? (
                 <button
                   type="button"
@@ -989,7 +1502,7 @@ export function ExportModal({
                     <button
                       type="button"
                       onClick={onStartSingleExport}
-                      className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>Render MP4</span>
@@ -998,14 +1511,24 @@ export function ExportModal({
                   {state.status === 'completed' &&
                     state.downloadUrl &&
                     state.downloadFileName && (
-                      <a
-                        href={state.downloadUrl}
-                        download={state.downloadFileName}
-                        className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>Download MP4</span>
-                      </a>
+                      <>
+                        <button
+                          type="button"
+                          onClick={onShareSingle}
+                          className="px-4 py-2 rounded-lg text-xs font-semibold bg-white/[0.08] hover:bg-white/[0.14] text-cyan-200 border border-cyan-400/35 transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                        >
+                          <Share2 className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>Share to Socials</span>
+                        </button>
+                        <a
+                          href={state.downloadUrl}
+                          download={state.downloadFileName}
+                          className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 whitespace-nowrap"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Download MP4</span>
+                        </a>
+                      </>
                     )}
                   <button
                     type="button"
@@ -1070,11 +1593,31 @@ export function ExportModal({
                 ))}
               </div>
 
+              <select
+                value=""
+                disabled={isBatchRunning}
+                aria-label="Queue with Export Profile"
+                onChange={(e) => {
+                  const found = exportProfiles.find((p) => p.id === e.target.value);
+                  if (found) {
+                    handleQueueWithProfile(found);
+                  }
+                }}
+                className="rounded-lg bg-[#121620] border border-cyan-400/30 px-2.5 py-1.5 text-[11px] text-cyan-200 outline-none focus:border-cyan-400/60 disabled:opacity-40 cursor-pointer"
+              >
+                <option value="">+ Export Profile…</option>
+                {exportProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name} ({profile.resolution} · {profile.fps}fps · {profile.videoBitrateMbps}M)
+                  </option>
+                ))}
+              </select>
+
               {savedPresets.length > 0 && (
                 <select
                   value=""
                   disabled={isBatchRunning}
-                  aria-label="Queue from saved preset"
+                  aria-label="Queue from saved visual preset"
                   onChange={(e) => {
                     const found = savedPresets.find((p) => p.id === e.target.value);
                     if (found) {
@@ -1096,7 +1639,7 @@ export function ExportModal({
                   }}
                   className="rounded-lg bg-[#121620] border border-white/[0.08] px-2.5 py-1.5 text-[11px] text-slate-200 outline-none focus:border-cyan-400/50 disabled:opacity-40 cursor-pointer"
                 >
-                  <option value="">+ From Saved Preset…</option>
+                  <option value="">+ Visual Preset…</option>
                   {savedPresets.map((preset) => (
                     <option key={preset.id} value={preset.id}>
                       {preset.name}
@@ -1138,13 +1681,25 @@ export function ExportModal({
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {batchCompletionBanner.completedCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={onDownloadAllBatch}
-                        className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors whitespace-nowrap cursor-pointer"
-                      >
-                        Download All
-                      </button>
+                      <>
+                        {completedBatchJobs[0] && (
+                          <button
+                            type="button"
+                            onClick={() => onShareBatchJob(completedBatchJobs[0])}
+                            className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                          >
+                            <Share2 className="w-3 h-3" />
+                            <span>Share</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={onDownloadAllBatch}
+                          className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors whitespace-nowrap cursor-pointer"
+                        >
+                          Download All
+                        </button>
+                      </>
                     )}
                     <button
                       type="button"
@@ -1180,11 +1735,13 @@ export function ExportModal({
                     globalSettings={currentSettings}
                     isBatchRunning={isBatchRunning}
                     savedPresets={savedPresets}
+                    exportProfiles={exportProfiles}
                     onUpdate={(patch) => onUpdateBatchJob(job.id, patch)}
                     onMove={(dir) => onMoveBatchJob(job.id, dir)}
                     onDuplicate={() => onDuplicateBatchJob(job.id)}
                     onRemove={() => onRemoveBatchJob(job.id)}
                     onPreview={() => onPreviewBatchJob(job)}
+                    onShare={() => onShareBatchJob(job)}
                   />
                 ))
               )}

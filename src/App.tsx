@@ -1,21 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
 import { ExportModal, ExportModalView } from './components/ExportModal';
+import { MidiMappingModal } from './components/MidiMappingModal';
 import { PreviewStage } from './components/PreviewStage';
 import { buildSyntheticAudioFrame } from './components/PresetThumbnail';
 import { ProjectsModal } from './components/ProjectsModal';
+import { ShareModal } from './components/ShareModal';
 import { TopBar } from './components/TopBar';
 import { TransportBar } from './components/TransportBar';
+import { useMidiController } from './hooks/useMidiController';
 import { useStudioHistory } from './hooks/useStudioHistory';
+import type {
+  MidiMappableParamKey,
+  MidiMapping,
+  MidiSignalEvent,
+} from './types/midi';
 import {
   ASPECT_RATIOS,
+  AspectRatioKey,
   BatchExportJob,
   BeatState,
+  ExportProfile,
   ExportProgressState,
   LyricLine,
   MotionBlurState,
   Particle,
   SavedPreset,
+  ShareableVideoAsset,
   SidebarTab,
   StudioProjectRecord,
   StudioProjectSummary,
@@ -30,6 +41,7 @@ import {
   generateDemoBeat,
   stepBeatDetector,
 } from './utils/audioEngine';
+import { computeAutoArrangeFraming } from './utils/autoArrange';
 import { renderVisualizerFrame } from './utils/canvasRenderer';
 import {
   BrowserNotificationPermission,
@@ -39,7 +51,26 @@ import {
   requestBrowserNotificationPermission,
   triggerBatchCompletionAlert,
 } from './utils/batchNotifications';
+import {
+  BUILT_IN_EXPORT_PROFILES,
+  buildExportProfileFromSettings,
+  exportProfileToSettingsPatch,
+  loadCustomExportProfiles,
+  persistCustomExportProfiles,
+} from './utils/exportProfiles';
 import { createLyricId } from './utils/lrcParser';
+import {
+  applyMidiSignalToMappings,
+  createMappingFromSignal,
+  createStarterMidiMappings,
+  formatMidiShortTag,
+  formatMidiSourceLabel,
+  getMidiParamSpec,
+  loadMidiEnabled,
+  loadMidiMappings,
+  persistMidiEnabled,
+  persistMidiMappings,
+} from './utils/midiMapping';
 import { exportProjectToMp4, sanitizeFileName } from './utils/mp4Exporter';
 import {
   captureCanvasSnapshotPng,
@@ -77,12 +108,18 @@ const DEFAULT_SETTINGS: StudioSettings = {
   smoothing: 0.78,
   motionBlur: 0,
   bloomIntensity: 0,
+  visualizerScale: 1,
+  lyricPosition: 80,
   trackTitle: '',
   artistName: '',
   showTrackOverlay: true,
   bgBlur: 8,
   bgDim: 0.45,
   exportFps: 30,
+  exportResolution: '720p',
+  bitratePreset: 'balanced',
+  videoBitrateMbps: 8,
+  audioBitrateKbps: 192,
   fadeType: 'linear',
   showSafeZone: false,
   beatDetection: false,
@@ -113,6 +150,9 @@ export default function App() {
     lyrics: [],
   });
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(() => loadSavedPresets());
+  const [customExportProfiles, setCustomExportProfiles] = useState<ExportProfile[]>(() =>
+    loadCustomExportProfiles()
+  );
   const [projects, setProjects] = useState<StudioProjectSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeProjectName, setActiveProjectName] = useState('Untitled Project');
@@ -153,6 +193,10 @@ export default function App() {
   const [exportState, setExportState] = useState<ExportProgressState>(INITIAL_EXPORT_STATE);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportModalView, setExportModalView] = useState<ExportModalView>('single');
+  const [lastSingleExportAsset, setLastSingleExportAsset] =
+    useState<ShareableVideoAsset | null>(null);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [shareModalInitialAssetId, setShareModalInitialAssetId] = useState<string | null>(null);
   const [batchJobs, setBatchJobs] = useState<BatchExportJob[]>([]);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [autoDownloadBatch, setAutoDownloadBatch] = useState(true);
@@ -167,6 +211,14 @@ export default function App() {
     totalElapsedMs: number;
     desktopSent: boolean;
   } | null>(null);
+  const [autoArrangeNotice, setAutoArrangeNotice] = useState<string | null>(null);
+  const [midiMappings, setMidiMappings] = useState<MidiMapping[]>(() =>
+    loadMidiMappings()
+  );
+  const [midiEnabled, setMidiEnabled] = useState<boolean>(() => loadMidiEnabled());
+  const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
+  const [learningParam, setLearningParam] = useState<MidiMappableParamKey | null>(null);
+  const [midiNotice, setMidiNotice] = useState<string | null>(null);
 
   // Refs for Web Audio API, Canvas, Images, and AbortController
   const audioElRef = useRef<HTMLAudioElement | null>(null);
@@ -194,6 +246,7 @@ export default function App() {
   const beatMeterBarRef = useRef<HTMLDivElement | null>(null);
   const albumRotationRef = useRef<{ angle: number }>({ angle: 0 });
   const exportAbortRef = useRef<AbortController | null>(null);
+  const lastSingleExportUrlRef = useRef<string | null>(null);
 
   // Keep latest state accessible inside RAF loop & project autosave without stale closures
   const settingsRef = useRef(settings);
@@ -214,6 +267,12 @@ export default function App() {
   autoDownloadBatchRef.current = autoDownloadBatch;
   const notifyOnBatchCompleteRef = useRef(notifyOnBatchComplete);
   notifyOnBatchCompleteRef.current = notifyOnBatchComplete;
+  const midiMappingsRef = useRef(midiMappings);
+  midiMappingsRef.current = midiMappings;
+  const midiEnabledRef = useRef(midiEnabled);
+  midiEnabledRef.current = midiEnabled;
+  const learningParamRef = useRef(learningParam);
+  learningParamRef.current = learningParam;
   const batchIdCounterRef = useRef(0);
   const mediaMetaRef = useRef({
     duration,
@@ -426,6 +485,9 @@ export default function App() {
         'smoothing',
         'motionBlur',
         'bloomIntensity',
+        'visualizerScale',
+        'lyricPosition',
+        'videoBitrateMbps',
         'bgBlur',
         'bgDim',
         'primaryColor',
@@ -449,6 +511,137 @@ export default function App() {
     },
     [commitHistory]
   );
+
+  useEffect(() => {
+    if (!autoArrangeNotice) return;
+    const timer = window.setTimeout(() => {
+      setAutoArrangeNotice(null);
+    }, 2800);
+    return () => window.clearTimeout(timer);
+  }, [autoArrangeNotice]);
+
+  const handleAutoArrange = useCallback(() => {
+    const result = computeAutoArrangeFraming(
+      settingsRef.current,
+      lyricsRef.current.length > 0
+    );
+    updateSettings(result.patch);
+    setAutoArrangeNotice(result.summary);
+  }, [updateSettings]);
+
+  const midiUpdateSettings = useCallback(
+    (patch: Partial<StudioSettings>) => {
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          settings: { ...prev.settings, ...patch },
+        }),
+        'midi:performance'
+      );
+    },
+    [commitHistory]
+  );
+
+  useEffect(() => {
+    if (!midiNotice) return;
+    const timer = window.setTimeout(() => setMidiNotice(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [midiNotice]);
+
+  const handleMidiSignal = useCallback(
+    (signal: MidiSignalEvent) => {
+      const targetLearn = learningParamRef.current;
+      if (targetLearn) {
+        setMidiMappings((prev) => {
+          const existing = prev.find((m) => m.targetParam === targetLearn);
+          const nextMapping = createMappingFromSignal(targetLearn, signal, existing);
+          const next = existing
+            ? prev.map((m) => (m.targetParam === targetLearn ? nextMapping : m))
+            : [...prev, nextMapping];
+          persistMidiMappings(next);
+          return next;
+        });
+        setLearningParam(null);
+        setMidiNotice(
+          `Bound ${formatMidiSourceLabel(signal)} → ${getMidiParamSpec(targetLearn).label}`
+        );
+        return;
+      }
+
+      if (!midiEnabledRef.current) return;
+      const patch = applyMidiSignalToMappings(signal, midiMappingsRef.current);
+      if (patch) {
+        midiUpdateSettings(patch);
+      }
+    },
+    [midiUpdateSettings]
+  );
+
+  const midiController = useMidiController({
+    active: isMidiModalOpen || (midiEnabled && midiMappings.length > 0),
+    onSignal: handleMidiSignal,
+  });
+
+  const handleToggleMidiEnabled = useCallback((enabled: boolean) => {
+    setMidiEnabled(enabled);
+    persistMidiEnabled(enabled);
+  }, []);
+
+  const handleUpdateMidiMapping = useCallback(
+    (id: string, patch: Partial<MidiMapping>) => {
+      setMidiMappings((prev) => {
+        const next = prev.map((m) => (m.id === id ? { ...m, ...patch } : m));
+        persistMidiMappings(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleAddManualMidiMapping = useCallback((mapping: MidiMapping) => {
+    setMidiMappings((prev) => {
+      const withoutTarget = prev.filter((m) => m.targetParam !== mapping.targetParam);
+      const next = [...withoutTarget, mapping];
+      persistMidiMappings(next);
+      return next;
+    });
+    setMidiNotice(
+      `Assigned ${formatMidiSourceLabel(mapping)} → ${getMidiParamSpec(mapping.targetParam).label}`
+    );
+  }, []);
+
+  const handleRemoveMidiMapping = useCallback((id: string) => {
+    setMidiMappings((prev) => {
+      const next = prev.filter((m) => m.id !== id);
+      persistMidiMappings(next);
+      return next;
+    });
+  }, []);
+
+  const handleLoadStarterMidiMappings = useCallback(() => {
+    const starter = createStarterMidiMappings();
+    setMidiMappings(starter);
+    persistMidiMappings(starter);
+    setMidiNotice('Loaded CC 1–4 performance starter pack');
+  }, []);
+
+  const handleClearAllMidiMappings = useCallback(() => {
+    setMidiMappings([]);
+    persistMidiMappings([]);
+    setLearningParam(null);
+    setMidiNotice('Cleared all MIDI bindings');
+  }, []);
+
+  const midiMappingBadges = useMemo(() => {
+    const map: Partial<Record<MidiMappableParamKey, string>> = {};
+    if (!midiEnabled) return map;
+    for (const m of midiMappings) {
+      if (m.enabled) {
+        map[m.targetParam] = formatMidiShortTag(m);
+      }
+    }
+    return map;
+  }, [midiMappings, midiEnabled]);
 
   const handleLyricsChange = useCallback(
     (nextLyrics: LyricLine[]) => {
@@ -1199,7 +1392,10 @@ export default function App() {
   // Global keyboard shortcuts: Spacebar (Play/Pause), Left/Right Arrows (Seek), S (Safe Zone grid)
   useEffect(() => {
     const isModalOpen =
-      isExportModalOpen || exportState.status !== 'idle' || isProjectsModalOpen;
+      isExportModalOpen ||
+      exportState.status !== 'idle' ||
+      isProjectsModalOpen ||
+      isMidiModalOpen;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || isModalOpen) return;
@@ -1258,6 +1454,7 @@ export default function App() {
     handleSeek,
     handleTogglePlay,
     isExportModalOpen,
+    isMidiModalOpen,
     isProjectsModalOpen,
     updateSettings,
   ]);
@@ -1383,75 +1580,111 @@ export default function App() {
     return () => cancelAnimationFrame(rafId);
   }, []);
 
+  // Clean up retained single export URL on unmount
+  useEffect(() => {
+    return () => {
+      if (lastSingleExportUrlRef.current) {
+        URL.revokeObjectURL(lastSingleExportUrlRef.current);
+        lastSingleExportUrlRef.current = null;
+      }
+    };
+  }, []);
+
   // Offline MP4 Export Trigger
-  const handleStartExport = useCallback(async () => {
+  const handleStartExport = useCallback(
+    async (overrideSettings?: StudioSettings) => {
+      if (!audioBuffer || isBatchRunning) return;
+
+      const activeSettings = overrideSettings ?? settings;
+
+      // Pause live playback cleanly during offline render
+      if (audioElRef.current && !audioElRef.current.paused) {
+        audioElRef.current.pause();
+      }
+
+      const controller = new AbortController();
+      exportAbortRef.current = controller;
+
+      setExportModalView('single');
+      setIsExportModalOpen(true);
+      setExportState({
+        status: 'preparing',
+        currentFrame: 0,
+        totalFrames: 1,
+        percentage: 0,
+        message: 'Initializing H.264 & AAC encoders...',
+      });
+
+      try {
+        const result = await exportProjectToMp4({
+          audioBuffer,
+          trimStart,
+          trimEnd,
+          settings: activeSettings,
+          lyrics,
+          bgImage: bgImageRef.current,
+          albumImage: albumImageRef.current,
+          signal: controller.signal,
+          onProgress: (next) => setExportState(next),
+        });
+
+        if (
+          lastSingleExportUrlRef.current &&
+          lastSingleExportUrlRef.current !== result.downloadUrl
+        ) {
+          URL.revokeObjectURL(lastSingleExportUrlRef.current);
+        }
+        lastSingleExportUrlRef.current = result.downloadUrl;
+
+        setLastSingleExportAsset({
+          id: 'latest-single-export',
+          label:
+            activeSettings.trackTitle.trim() ||
+            mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
+            'Latest Export',
+          downloadUrl: result.downloadUrl,
+          downloadFileName: result.downloadFileName,
+          fileSizeBytes: result.fileSizeBytes,
+          aspectRatio: activeSettings.aspectRatio,
+          exportResolution: activeSettings.exportResolution,
+          durationSec: Math.max(0.5, trimEnd - trimStart),
+          trackTitle: activeSettings.trackTitle,
+          artistName: activeSettings.artistName,
+          visualizerMode: activeSettings.visualizerMode,
+          createdAt: new Date().toISOString(),
+        });
+
+        if (autoSaveProjectsRef.current) {
+          void saveCurrentProject({ exported: true, forceCreate: true });
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          setExportState({
+            ...INITIAL_EXPORT_STATE,
+            status: 'cancelled',
+            message: 'Export cancelled.',
+          });
+          return;
+        }
+        setExportState({
+          status: 'error',
+          currentFrame: 0,
+          totalFrames: 0,
+          percentage: 0,
+          message: 'Export failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [audioBuffer, isBatchRunning, trimStart, trimEnd, settings, lyrics, saveCurrentProject]
+  );
+
+  const handleOpenSingleExport = useCallback(() => {
     if (!audioBuffer || isBatchRunning) return;
-
-    // Pause live playback cleanly during offline render
-    if (audioElRef.current && !audioElRef.current.paused) {
-      audioElRef.current.pause();
-    }
-
-    if (exportState.downloadUrl) {
-      URL.revokeObjectURL(exportState.downloadUrl);
-    }
-
-    const controller = new AbortController();
-    exportAbortRef.current = controller;
-
+    setExportState(INITIAL_EXPORT_STATE);
     setExportModalView('single');
     setIsExportModalOpen(true);
-    setExportState({
-      status: 'preparing',
-      currentFrame: 0,
-      totalFrames: 1,
-      percentage: 0,
-      message: 'Initializing H.264 & AAC encoders...',
-    });
-
-    try {
-      await exportProjectToMp4({
-        audioBuffer,
-        trimStart,
-        trimEnd,
-        settings,
-        lyrics,
-        bgImage: bgImageRef.current,
-        albumImage: albumImageRef.current,
-        signal: controller.signal,
-        onProgress: (next) => setExportState(next),
-      });
-      if (autoSaveProjectsRef.current) {
-        void saveCurrentProject({ exported: true, forceCreate: true });
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setExportState({
-          ...INITIAL_EXPORT_STATE,
-          status: 'cancelled',
-          message: 'Export cancelled.',
-        });
-        return;
-      }
-      setExportState({
-        status: 'error',
-        currentFrame: 0,
-        totalFrames: 0,
-        percentage: 0,
-        message: 'Export failed',
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, [
-    audioBuffer,
-    isBatchRunning,
-    trimStart,
-    trimEnd,
-    settings,
-    lyrics,
-    exportState.downloadUrl,
-    saveCurrentProject,
-  ]);
+  }, [audioBuffer, isBatchRunning]);
 
   const handleOpenBatchExport = useCallback(() => {
     if (!audioBuffer) return;
@@ -1744,6 +1977,7 @@ export default function App() {
                     elapsedMs: result.elapsedMs,
                     downloadUrl: result.downloadUrl,
                     downloadFileName: result.downloadFileName,
+                    fileSizeBytes: result.fileSizeBytes,
                   }
                 : j
             )
@@ -1816,12 +2050,39 @@ export default function App() {
   }, []);
 
   const handleCloseExportModal = useCallback(() => {
-    if (exportState.downloadUrl) {
+    if (
+      exportState.downloadUrl &&
+      exportState.downloadUrl !== lastSingleExportUrlRef.current
+    ) {
       URL.revokeObjectURL(exportState.downloadUrl);
     }
     setExportState(INITIAL_EXPORT_STATE);
     setIsExportModalOpen(false);
   }, [exportState.downloadUrl]);
+
+  const handleOpenShareModal = useCallback(
+    (assetId?: string) => {
+      if (isExportModalOpen || exportState.status !== 'idle') {
+        setExportState(INITIAL_EXPORT_STATE);
+        setIsExportModalOpen(false);
+      }
+      setShareModalInitialAssetId(assetId ?? null);
+      setIsShareModalOpen(true);
+    },
+    [isExportModalOpen, exportState.status]
+  );
+
+  const handleRenderForRatio = useCallback(
+    (targetRatio: AspectRatioKey) => {
+      const nextSettings: StudioSettings = {
+        ...settingsRef.current,
+        aspectRatio: targetRatio,
+      };
+      updateSettings({ aspectRatio: targetRatio });
+      void handleStartExport(nextSettings);
+    },
+    [updateSettings, handleStartExport]
+  );
 
   const handlePreviewBatchJob = useCallback(
     (job: BatchExportJob) => {
@@ -1885,6 +2146,48 @@ export default function App() {
     setSavedPresets((prev) => {
       const next = prev.filter((p) => p.id !== id);
       persistSavedPresets(next);
+      return next;
+    });
+  }, []);
+
+  const handleApplyExportProfile = useCallback(
+    (profile: ExportProfile, autoArrangeOnRatioChange = true) => {
+      const ratioChanged = profile.aspectRatio !== settingsRef.current.aspectRatio;
+      const basePatch = exportProfileToSettingsPatch(profile);
+      if (ratioChanged && autoArrangeOnRatioChange) {
+        const nextCandidate: StudioSettings = {
+          ...settingsRef.current,
+          ...basePatch,
+        };
+        const framing = computeAutoArrangeFraming(
+          nextCandidate,
+          lyricsRef.current.length > 0
+        );
+        updateSettings({ ...basePatch, ...framing.patch });
+      } else {
+        updateSettings(basePatch);
+      }
+    },
+    [updateSettings]
+  );
+
+  const handleSaveExportProfile = useCallback(
+    (name: string, targetSettings: StudioSettings): ExportProfile => {
+      const newProfile = buildExportProfileFromSettings(name, targetSettings);
+      setCustomExportProfiles((prev) => {
+        const next = [newProfile, ...prev];
+        persistCustomExportProfiles(next);
+        return next;
+      });
+      return newProfile;
+    },
+    []
+  );
+
+  const handleDeleteExportProfile = useCallback((id: string) => {
+    setCustomExportProfiles((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      persistCustomExportProfiles(next);
       return next;
     });
   }, []);
@@ -2076,6 +2379,26 @@ export default function App() {
     (j) => j.status === 'queued' || j.status === 'error' || j.status === 'cancelled'
   ).length;
 
+  const shareableAssets: ShareableVideoAsset[] = [
+    ...(lastSingleExportAsset ? [lastSingleExportAsset] : []),
+    ...batchJobs
+      .filter((j) => j.status === 'completed' && j.downloadUrl && j.downloadFileName)
+      .map((j) => ({
+        id: j.id,
+        label: j.label || j.settings.trackTitle || 'Batch Clip',
+        downloadUrl: j.downloadUrl!,
+        downloadFileName: j.downloadFileName!,
+        fileSizeBytes: j.fileSizeBytes,
+        aspectRatio: j.settings.aspectRatio,
+        exportResolution: j.settings.exportResolution,
+        durationSec: Math.max(0.5, j.trimEnd - j.trimStart),
+        trackTitle: j.settings.trackTitle,
+        artistName: j.settings.artistName,
+        visualizerMode: j.settings.visualizerMode,
+        createdAt: new Date().toISOString(),
+      })),
+  ];
+
   const clipDuration = Math.max(0, trimEnd - trimStart);
 
   return (
@@ -2083,11 +2406,13 @@ export default function App() {
       <TopBar
         audioFileName={audioFileName}
         aspectRatio={settings.aspectRatio}
+        exportResolution={settings.exportResolution}
         clipDuration={clipDuration}
         hasAudio={Boolean(audioBuffer)}
         isGeneratingDemo={isGeneratingDemo}
         isExporting={isExporting}
         batchQueueCount={pendingBatchCount}
+        shareableCount={shareableAssets.length}
         activeProjectId={activeProjectId}
         activeProjectName={activeProjectName}
         projectCount={projects.length}
@@ -2096,13 +2421,20 @@ export default function App() {
         isSavingProject={isSavingProject}
         canUndo={canUndo}
         canRedo={canRedo}
+        midiActiveCount={midiMappings.filter((m) => m.enabled).length}
+        midiConnectedCount={
+          midiController.devices.filter((d) => d.state === 'connected').length
+        }
+        midiEnabled={midiEnabled}
         onUndo={undo}
         onRedo={redo}
         onOpenProjects={() => setIsProjectsModalOpen(true)}
         onQuickSaveProject={() => void handleSaveActiveProject()}
         onLoadDemo={() => void handleLoadDemo()}
+        onOpenMidi={() => setIsMidiModalOpen(true)}
         onOpenBatchExport={handleOpenBatchExport}
-        onExport={() => void handleStartExport()}
+        onOpenShare={() => handleOpenShareModal()}
+        onExport={handleOpenSingleExport}
       />
 
       {audioError && (
@@ -2153,7 +2485,11 @@ export default function App() {
           captionsNotice={captionsNotice}
           onDismissCaptionsNotice={() => setCaptionsNotice(null)}
           onAutoGenerateCaptions={() => void handleAutoGenerateCaptions()}
+          onAutoArrange={handleAutoArrange}
+          autoArrangeNotice={autoArrangeNotice}
           beatMeterBarRef={beatMeterBarRef}
+          midiMappingBadges={midiMappingBadges}
+          onOpenMidiMapping={() => setIsMidiModalOpen(true)}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -2167,6 +2503,8 @@ export default function App() {
             onToggleSafeZone={() =>
               updateSettings({ showSafeZone: !settings.showSafeZone })
             }
+            onAutoArrange={handleAutoArrange}
+            autoArrangeNotice={autoArrangeNotice}
             onTogglePlay={() => void handleTogglePlay()}
             onUploadAudioClick={() => {
               setActiveTab('media');
@@ -2203,7 +2541,7 @@ export default function App() {
             onPlaybackRateChange={setPlaybackRate}
             onAutoCaptions={() => void handleAutoGenerateCaptions()}
             onOpenBatchExport={handleOpenBatchExport}
-            onExport={() => void handleStartExport()}
+            onExport={handleOpenSingleExport}
           />
         </main>
       </div>
@@ -2220,6 +2558,11 @@ export default function App() {
         currentTrimEnd={trimEnd}
         currentSettings={settings}
         savedPresets={savedPresets}
+        exportProfiles={[...customExportProfiles, ...BUILT_IN_EXPORT_PROFILES]}
+        onUpdateSettings={updateSettings}
+        onApplyExportProfile={handleApplyExportProfile}
+        onSaveExportProfile={handleSaveExportProfile}
+        onDeleteExportProfile={handleDeleteExportProfile}
         batchJobs={batchJobs}
         isBatchRunning={isBatchRunning}
         autoDownloadBatch={autoDownloadBatch}
@@ -2240,6 +2583,27 @@ export default function App() {
         onStartBatchExport={() => void handleStartBatchExport()}
         onDownloadAllBatch={handleDownloadAllBatch}
         onStartSingleExport={() => void handleStartExport()}
+        onShareSingle={() => handleOpenShareModal('latest-single-export')}
+        onShareBatchJob={(job) => handleOpenShareModal(job.id)}
+      />
+
+      <ShareModal
+        isOpen={isShareModalOpen}
+        assets={shareableAssets}
+        initialAssetId={shareModalInitialAssetId}
+        lyrics={lyrics}
+        hasAudio={Boolean(audioBuffer)}
+        isExporting={isExporting}
+        onClose={() => setIsShareModalOpen(false)}
+        onRenderCurrentClip={() => {
+          setIsShareModalOpen(false);
+          void handleStartExport();
+        }}
+        onRenderForRatio={handleRenderForRatio}
+        onOpenBatchExport={() => {
+          setIsShareModalOpen(false);
+          handleOpenBatchExport();
+        }}
       />
 
       <ProjectsModal
@@ -2265,6 +2629,31 @@ export default function App() {
         onDuplicateProject={handleDuplicateProject}
         onDeleteProject={handleDeleteProject}
         onNewBlankProject={handleNewBlankProject}
+      />
+
+      <MidiMappingModal
+        isOpen={isMidiModalOpen}
+        status={midiController.status}
+        errorMessage={midiController.errorMessage}
+        devices={midiController.devices}
+        lastSignal={midiController.lastSignal}
+        midiEnabled={midiEnabled}
+        mappings={midiMappings}
+        learningParam={learningParam}
+        settings={settings}
+        notice={midiNotice}
+        onClose={() => {
+          setLearningParam(null);
+          setIsMidiModalOpen(false);
+        }}
+        onConnectMidi={() => void midiController.connectMidi()}
+        onToggleMidiEnabled={handleToggleMidiEnabled}
+        onSetLearningParam={setLearningParam}
+        onUpdateMapping={handleUpdateMidiMapping}
+        onAddManualMapping={handleAddManualMidiMapping}
+        onRemoveMapping={handleRemoveMidiMapping}
+        onLoadStarterMappings={handleLoadStarterMidiMappings}
+        onClearAllMappings={handleClearAllMidiMappings}
       />
     </div>
   );

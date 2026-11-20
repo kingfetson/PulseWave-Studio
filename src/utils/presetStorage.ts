@@ -1,6 +1,9 @@
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  AudioBitrateKbps,
+  ExportBitratePreset,
+  ExportResolution,
   FadeType,
   LyricStyle,
   SavedPreset,
@@ -22,9 +25,21 @@ const VALID_VISUALIZERS: VisualizerMode[] = [
   'harmonic-orb',
   'stereo-prism',
   'cube-3d',
+  'galaxy-spiral',
+  'cyber-tunnel',
+  'seismic-ridges',
 ];
 const VALID_LYRIC_STYLES: LyricStyle[] = ['karaoke', 'single-pop', 'subtitle-bar'];
 const VALID_FADE_TYPES: FadeType[] = ['linear', 'logarithmic', 'exponential'];
+const VALID_EXPORT_RESOLUTIONS: ExportResolution[] = ['720p', '1080p', '1440p'];
+const VALID_BITRATE_PRESETS: ExportBitratePreset[] = [
+  'compact',
+  'balanced',
+  'high',
+  'master',
+  'custom',
+];
+const VALID_AUDIO_BITRATES: AudioBitrateKbps[] = [128, 192, 256, 320];
 const VALID_THEME_PRESETS: Array<ThemePresetKey | 'custom'> = [
   'cyberpunk',
   'sunset',
@@ -136,6 +151,9 @@ export function validateAndNormalizeSettings(
     sensitivity: Number(clampNumber(obj.sensitivity, 0.5, 2.5, fallback.sensitivity).toFixed(2)),
     barCount,
     smoothing: Number(clampNumber(obj.smoothing, 0.1, 0.95, fallback.smoothing).toFixed(2)),
+    visualizerScale: Number(
+      clampNumber(obj.visualizerScale, 0.55, 1.5, fallback.visualizerScale).toFixed(2)
+    ),
     motionBlur: Number(clampNumber(obj.motionBlur, 0, 0.85, fallback.motionBlur).toFixed(2)),
     bloomIntensity: Number(
       clampNumber(obj.bloomIntensity, 0, 1.5, fallback.bloomIntensity).toFixed(2)
@@ -151,9 +169,22 @@ export function validateAndNormalizeSettings(
       typeof obj.showTrackOverlay === 'boolean'
         ? obj.showTrackOverlay
         : fallback.showTrackOverlay,
+    lyricPosition: Math.round(clampNumber(obj.lyricPosition, 15, 92, fallback.lyricPosition)),
     bgBlur: Math.round(clampNumber(obj.bgBlur, 0, 30, fallback.bgBlur)),
     bgDim: Number(clampNumber(obj.bgDim, 0, 0.9, fallback.bgDim).toFixed(2)),
     exportFps: obj.exportFps === 60 ? 60 : obj.exportFps === 30 ? 30 : fallback.exportFps,
+    exportResolution: VALID_EXPORT_RESOLUTIONS.includes(obj.exportResolution as ExportResolution)
+      ? (obj.exportResolution as ExportResolution)
+      : fallback.exportResolution,
+    bitratePreset: VALID_BITRATE_PRESETS.includes(obj.bitratePreset as ExportBitratePreset)
+      ? (obj.bitratePreset as ExportBitratePreset)
+      : fallback.bitratePreset,
+    videoBitrateMbps: Math.round(
+      clampNumber(obj.videoBitrateMbps, 2, 35, fallback.videoBitrateMbps)
+    ),
+    audioBitrateKbps: VALID_AUDIO_BITRATES.includes(obj.audioBitrateKbps as AudioBitrateKbps)
+      ? (obj.audioBitrateKbps as AudioBitrateKbps)
+      : fallback.audioBitrateKbps,
     fadeType,
     showSafeZone:
       typeof obj.showSafeZone === 'boolean' ? obj.showSafeZone : fallback.showSafeZone,
@@ -275,6 +306,9 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'harmonic-orb': 'Harmonic Orbital',
     'stereo-prism': 'Stereo Prism',
     'cube-3d': '3D Cube',
+    'galaxy-spiral': 'Galaxy Vortex',
+    'cyber-tunnel': 'Warp Tunnel',
+    'seismic-ridges': 'Seismic Ridges',
   };
   return `${ratio} · ${modeLabel[settings.visualizerMode]} · ${settings.exportFps} FPS`;
 }
