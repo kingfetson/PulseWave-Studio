@@ -1,7 +1,7 @@
 import { StudioSettings, VisualizerMode } from '../types/studio';
 
 export interface AutoArrangeResult {
-  patch: Pick<StudioSettings, 'visualizerScale' | 'lyricPosition' | 'bloomIntensity'>;
+  patch: Pick<StudioSettings, 'visualizerScale' | 'lyricPosition' | 'bloomIntensity' | 'bloomPreset'>;
   summary: string;
 }
 
@@ -12,6 +12,13 @@ const RADIAL_OR_3D_MODES = new Set<VisualizerMode>([
   'cube-3d',
   'galaxy-spiral',
   'cyber-tunnel',
+  'radar-sonar',
+  'lissajous-scope',
+  'flower-mandala',
+  'vortex-rings',
+  'isometric-city',
+  'kaleido-shards',
+  'flame-corona',
 ]);
 
 const HIGH_GLOW_MODES = new Set<VisualizerMode>([
@@ -23,6 +30,13 @@ const HIGH_GLOW_MODES = new Set<VisualizerMode>([
   'galaxy-spiral',
   'cyber-tunnel',
   'seismic-ridges',
+  'dna-helix',
+  'lissajous-scope',
+  'rain-matrix',
+  'flower-mandala',
+  'vortex-rings',
+  'kaleido-shards',
+  'flame-corona',
 ]);
 
 export function computeAutoArrangeFraming(
@@ -89,6 +103,7 @@ export function computeAutoArrangeFraming(
     visualizerScale: Number(visualizerScale.toFixed(2)),
     lyricPosition: Math.round(lyricPosition),
     bloomIntensity: Number(bloomIntensity.toFixed(2)),
+    bloomPreset: 'custom' as const,
   };
 
   return {

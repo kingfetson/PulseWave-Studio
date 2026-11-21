@@ -2,11 +2,14 @@ import {
   ASPECT_RATIOS,
   AspectRatioKey,
   AudioBitrateKbps,
+  BloomPresetKey,
   ExportBitratePreset,
   ExportResolution,
   FadeType,
   LyricStyle,
   SavedPreset,
+  SceneTransitionTarget,
+  SceneTransitionType,
   StudioSettings,
   ThemePresetKey,
   VisualizerMode,
@@ -28,6 +31,16 @@ const VALID_VISUALIZERS: VisualizerMode[] = [
   'galaxy-spiral',
   'cyber-tunnel',
   'seismic-ridges',
+  'dna-helix',
+  'radar-sonar',
+  'lissajous-scope',
+  'rain-matrix',
+  'flower-mandala',
+  'vortex-rings',
+  'isometric-city',
+  'analog-vu',
+  'kaleido-shards',
+  'flame-corona',
 ];
 const VALID_LYRIC_STYLES: LyricStyle[] = ['karaoke', 'single-pop', 'subtitle-bar'];
 const VALID_FADE_TYPES: FadeType[] = ['linear', 'logarithmic', 'exponential'];
@@ -46,6 +59,27 @@ const VALID_THEME_PRESETS: Array<ThemePresetKey | 'custom'> = [
   'emerald',
   'minimal',
   'custom',
+];
+const VALID_BLOOM_PRESETS: BloomPresetKey[] = [
+  'off',
+  'subtle-glow',
+  'dreamy-haze',
+  'neon-bloom',
+  'aggressive-flare',
+  'custom',
+];
+const VALID_SCENE_TRANSITION_TYPES: SceneTransitionType[] = [
+  'none',
+  'crossfade',
+  'wipe-left',
+  'wipe-right',
+  'wipe-up',
+  'wipe-down',
+];
+const VALID_SCENE_TRANSITION_TARGETS: SceneTransitionTarget[] = [
+  'both',
+  'lyrics',
+  'visualizer',
 ];
 
 function clampNumber(val: unknown, min: number, max: number, fallback: number): number {
@@ -158,6 +192,24 @@ export function validateAndNormalizeSettings(
     bloomIntensity: Number(
       clampNumber(obj.bloomIntensity, 0, 1.5, fallback.bloomIntensity).toFixed(2)
     ),
+    bloomPreset: VALID_BLOOM_PRESETS.includes(obj.bloomPreset as BloomPresetKey)
+      ? (obj.bloomPreset as BloomPresetKey)
+      : fallback.bloomPreset ?? 'custom',
+    bloomRadius: Number(
+      clampNumber(obj.bloomRadius, 0.5, 2.2, fallback.bloomRadius ?? 1.0).toFixed(2)
+    ),
+    bloomSpread: Number(
+      clampNumber(obj.bloomSpread, 0, 1, fallback.bloomSpread ?? 0.5).toFixed(2)
+    ),
+    bloomSaturation: Number(
+      clampNumber(obj.bloomSaturation, 0.7, 1.8, fallback.bloomSaturation ?? 1.05).toFixed(2)
+    ),
+    glitchIntensity: Number(
+      clampNumber(obj.glitchIntensity, 0, 1, fallback.glitchIntensity).toFixed(2)
+    ),
+    bassShake: Number(
+      clampNumber(obj.bassShake, 0, 1, fallback.bassShake ?? 0).toFixed(2)
+    ),
     beatDetection:
       typeof obj.beatDetection === 'boolean' ? obj.beatDetection : fallback.beatDetection,
     beatSensitivity: Number(
@@ -188,6 +240,24 @@ export function validateAndNormalizeSettings(
     fadeType,
     showSafeZone:
       typeof obj.showSafeZone === 'boolean' ? obj.showSafeZone : fallback.showSafeZone,
+    sceneTransitionType: VALID_SCENE_TRANSITION_TYPES.includes(
+      obj.sceneTransitionType as SceneTransitionType
+    )
+      ? (obj.sceneTransitionType as SceneTransitionType)
+      : fallback.sceneTransitionType,
+    sceneTransitionDuration: Number(
+      clampNumber(
+        obj.sceneTransitionDuration,
+        0.15,
+        1.5,
+        fallback.sceneTransitionDuration
+      ).toFixed(2)
+    ),
+    sceneTransitionTarget: VALID_SCENE_TRANSITION_TARGETS.includes(
+      obj.sceneTransitionTarget as SceneTransitionTarget
+    )
+      ? (obj.sceneTransitionTarget as SceneTransitionTarget)
+      : fallback.sceneTransitionTarget,
   };
 }
 
@@ -309,6 +379,16 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'galaxy-spiral': 'Galaxy Vortex',
     'cyber-tunnel': 'Warp Tunnel',
     'seismic-ridges': 'Seismic Ridges',
+    'dna-helix': 'DNA Helix',
+    'radar-sonar': 'Sonar Radar',
+    'lissajous-scope': 'Lissajous Scope',
+    'rain-matrix': 'Digital Rain',
+    'flower-mandala': 'Lotus Mandala',
+    'vortex-rings': '3D Gyroscope',
+    'isometric-city': 'Iso Equalizer',
+    'analog-vu': 'Dual VU Meters',
+    'kaleido-shards': 'Kaleidoscope',
+    'flame-corona': 'Solar Corona',
   };
   return `${ratio} · ${modeLabel[settings.visualizerMode]} · ${settings.exportFps} FPS`;
 }

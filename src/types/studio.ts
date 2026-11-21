@@ -44,11 +44,39 @@ export type VisualizerMode =
   | 'cube-3d'
   | 'galaxy-spiral'
   | 'cyber-tunnel'
-  | 'seismic-ridges';
+  | 'seismic-ridges'
+  | 'dna-helix'
+  | 'radar-sonar'
+  | 'lissajous-scope'
+  | 'rain-matrix'
+  | 'flower-mandala'
+  | 'vortex-rings'
+  | 'isometric-city'
+  | 'analog-vu'
+  | 'kaleido-shards'
+  | 'flame-corona';
 
 export type LyricStyle = 'karaoke' | 'single-pop' | 'subtitle-bar';
 
 export type FadeType = 'linear' | 'logarithmic' | 'exponential';
+
+export type SceneTransitionType =
+  | 'none'
+  | 'crossfade'
+  | 'wipe-left'
+  | 'wipe-right'
+  | 'wipe-up'
+  | 'wipe-down';
+
+export type SceneTransitionTarget = 'both' | 'lyrics' | 'visualizer';
+
+export type BloomPresetKey =
+  | 'off'
+  | 'subtle-glow'
+  | 'dreamy-haze'
+  | 'neon-bloom'
+  | 'aggressive-flare'
+  | 'custom';
 
 export type ExportResolution = '720p' | '1080p' | '1440p';
 
@@ -210,6 +238,12 @@ export interface StudioSettings {
   visualizerScale: number; // 0.55 - 1.5
   motionBlur: number; // 0 - 0.85 (previous frame trail opacity)
   bloomIntensity: number; // 0 - 1.5 (additive lighter blur bloom)
+  bloomPreset?: BloomPresetKey;
+  bloomRadius?: number; // 0.5 - 2.2 (multi-pass blur kernel multiplier)
+  bloomSpread?: number; // 0 - 1 (core vs atmospheric haze balance)
+  bloomSaturation?: number; // 0.7 - 1.8 (bloom extraction color saturation & brightness)
+  glitchIntensity: number; // 0 - 1 (beat-triggered frame drop & chromatic aberration)
+  bassShake: number; // 0 - 1 (beat-triggered camera oscillation on bass hits)
   beatDetection: boolean;
   beatSensitivity: number; // 0.8 - 2.0
   trackTitle: string;
@@ -225,6 +259,9 @@ export interface StudioSettings {
   audioBitrateKbps: AudioBitrateKbps;
   fadeType: FadeType;
   showSafeZone: boolean;
+  sceneTransitionType: SceneTransitionType;
+  sceneTransitionDuration: number; // 0.15 - 1.5 seconds
+  sceneTransitionTarget: SceneTransitionTarget;
 }
 
 export interface BeatShockwave {
@@ -245,6 +282,13 @@ export interface BeatState {
 export interface MotionBlurState {
   canvas: HTMLCanvasElement | OffscreenCanvas | null;
   hasFrame: boolean;
+}
+
+export interface SceneTransitionState {
+  activeMode: VisualizerMode | null;
+  fromMode: VisualizerMode | null;
+  elapsed: number;
+  duration: number;
 }
 
 export interface Particle {
@@ -288,6 +332,16 @@ export interface BatchExportJob {
   downloadFileName?: string;
   fileSizeBytes?: number;
   error?: string;
+}
+
+export interface BatchCompletionSummary {
+  completedCount: number;
+  failedCount: number;
+  totalElapsedMs: number;
+  totalClipDurationMs: number;
+  totalOutputBytes: number;
+  totalFramesRendered: number;
+  desktopSent: boolean;
 }
 
 export interface ShareableVideoAsset {

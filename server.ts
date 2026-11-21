@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import http from 'node:http';
 import path from 'node:path';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
@@ -298,6 +299,7 @@ async function generateTimedCaptions(params: {
 
 async function startServer(): Promise<void> {
   const app = express();
+  const httpServer = http.createServer(app);
   app.use(express.json({ limit: '25mb' }));
 
   app.post('/api/captions/generate', async (req, res) => {
@@ -338,13 +340,16 @@ async function startServer(): Promise<void> {
   } else {
     const { createServer } = await import('vite');
     const vite = await createServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`PulseWave Studio server listening on http://0.0.0.0:${PORT}`);
   });
 }

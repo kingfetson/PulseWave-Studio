@@ -1,4 +1,5 @@
-import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
+import { ArrayBufferTarget, Muxer as Mp4Muxer } from 'mp4-muxer';
+import { ArrayBufferTarget as WebmArrayBufferTarget, Muxer as WebmMuxer } from 'webm-muxer';
 import {
   ExportProgressState,
   LyricLine,
@@ -13,6 +14,10 @@ import type {
   WorkerOutgoingMessage,
 } from '../workers/mp4ExportWorker';
 import {
+  preparePcmChannelsForEncoder,
+  resolveSupportedAudioConfig,
+} from './audioCodecConfig';
+import {
   createInitialBeatState,
   OfflineAudioAnalyzer,
   OfflineLowPassBeatTracker,
@@ -20,7 +25,11 @@ import {
   stepBeatDetector,
 } from './audioEngine';
 import { renderVisualizerFrame } from './canvasRenderer';
-import { resolveSupportedVideoConfig } from './videoConfig';
+import {
+  ResolvedVideoConfig,
+  resolveSupportedVideoConfigForContainer,
+} from './videoConfig';
+import { selectBestMediaRecorderMime } from './videoMimeSupport';
 
 export interface ExportMp4Options {
   audioBuffer: AudioBuffer;
@@ -124,6 +133,22 @@ class WorkerStartupError extends Error {
   }
 }
 
+class WebCodecsUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebCodecsUnsupportedError';
+  }
+}
+
+function isWebCodecsUnavailable(): boolean {
+  return (
+    typeof VideoEncoder === 'undefined' ||
+    typeof AudioEncoder === 'undefined' ||
+    typeof VideoFrame === 'undefined' ||
+    typeof AudioData === 'undefined'
+  );
+}
+
 async function exportProjectViaWorker(options: {
   slicedBuffer: AudioBuffer;
   trimStart: number;
@@ -133,7 +158,13 @@ async function exportProjectViaWorker(options: {
   albumImage: HTMLImageElement | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
-}): Promise<{ buffer: ArrayBuffer; totalFrames: number; elapsedMs: number }> {
+}): Promise<{
+  buffer: ArrayBuffer;
+  totalFrames: number;
+  elapsedMs: number;
+  mimeType: string;
+  fileExtension: 'mp4' | 'webm';
+}> {
   const {
     slicedBuffer,
     trimStart,
@@ -220,6 +251,8 @@ async function exportProjectViaWorker(options: {
           buffer: msg.buffer,
           totalFrames: msg.totalFrames,
           elapsedMs: msg.elapsedMs,
+          mimeType: msg.mimeType,
+          fileExtension: msg.fileExtension,
         });
       } else if (msg.type === 'cancelled') {
         settled = true;
@@ -228,7 +261,13 @@ async function exportProjectViaWorker(options: {
       } else if (msg.type === 'error') {
         settled = true;
         cleanup();
-        if (!receivedProgress && /OffscreenCanvas|Worker|WebCodecs/i.test(msg.message)) {
+        if (msg.message.startsWith('WEBCODECS_UNSUPPORTED:')) {
+          reject(
+            new WebCodecsUnsupportedError(
+              msg.message.replace(/^WEBCODECS_UNSUPPORTED:\s*/, '')
+            )
+          );
+        } else if (!receivedProgress && /OffscreenCanvas|Worker|WebCodecs/i.test(msg.message)) {
           reject(new WorkerStartupError(msg.message));
         } else {
           reject(new Error(msg.message));
@@ -294,7 +333,13 @@ async function exportProjectOnMainThread(options: {
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   startTimeMs: number;
-}): Promise<{ buffer: ArrayBuffer; totalFrames: number; elapsedMs: number }> {
+}): Promise<{
+  buffer: ArrayBuffer;
+  totalFrames: number;
+  elapsedMs: number;
+  mimeType: string;
+  fileExtension: 'mp4' | 'webm';
+}> {
   const {
     slicedBuffer,
     trimStart,
@@ -319,42 +364,127 @@ async function exportProjectOnMainThread(options: {
   const videoBitrateBps = Math.round((settings.videoBitrateMbps || 8) * 1_000_000);
   const audioBitrateBps = (settings.audioBitrateKbps || 192) * 1000;
 
-  const videoConfig = await resolveSupportedVideoConfig(width, height, fps, videoBitrateBps);
-  const audioConfig: AudioEncoderConfig = {
-    codec: 'mp4a.40.2',
+  const audioSelection = await resolveSupportedAudioConfig(
     numberOfChannels,
     sampleRate,
-    bitrate: audioBitrateBps,
-  };
-
-  const audioSupport = await AudioEncoder.isConfigSupported(audioConfig);
-  if (!audioSupport.supported) {
-    throw new Error('AAC audio encoding (mp4a.40.2) is not supported in this browser.');
+    audioBitrateBps
+  );
+  if (!audioSelection) {
+    throw new WebCodecsUnsupportedError(
+      'Neither AAC nor Opus audio encoding is supported by WebCodecs in this browser.'
+    );
   }
 
-  const target = new ArrayBufferTarget();
-  const muxer = new Muxer({
-    target,
-    video: {
-      codec: 'avc',
+  let containerFormat: 'mp4' | 'webm' =
+    audioSelection.muxerCodec === 'aac' ? 'mp4' : 'webm';
+
+  let videoSelection: ResolvedVideoConfig | null =
+    await resolveSupportedVideoConfigForContainer(
+      containerFormat,
       width,
       height,
-      frameRate: fps,
-    },
-    audio: {
-      codec: 'aac',
-      numberOfChannels,
-      sampleRate,
-    },
-    fastStart: 'in-memory',
-    firstTimestampBehavior: 'offset',
-  });
+      fps,
+      videoBitrateBps
+    );
+
+  if (!videoSelection && containerFormat === 'webm') {
+    containerFormat = 'mp4';
+    videoSelection = await resolveSupportedVideoConfigForContainer(
+      'mp4',
+      width,
+      height,
+      fps,
+      videoBitrateBps
+    );
+  }
+
+  if (!videoSelection) {
+    throw new WebCodecsUnsupportedError(
+      'No supported video encoder codec found for MP4 or WebM in this browser.'
+    );
+  }
+
+  const rawChannels: Float32Array[] = [];
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    rawChannels.push(slicedBuffer.getChannelData(ch));
+  }
+  const preparedAudio = preparePcmChannelsForEncoder(
+    rawChannels,
+    slicedBuffer.length,
+    sampleRate,
+    audioSelection.targetSampleRate,
+    audioSelection.targetChannels
+  );
+
+  const mp4Target = containerFormat === 'mp4' ? new ArrayBufferTarget() : null;
+  const webmTarget = containerFormat === 'webm' ? new WebmArrayBufferTarget() : null;
+
+  const mp4Muxer =
+    containerFormat === 'mp4' && mp4Target
+      ? new Mp4Muxer({
+          target: mp4Target,
+          video: {
+            codec: videoSelection.muxerCodec,
+            width,
+            height,
+            frameRate: fps,
+          },
+          audio: {
+            codec: audioSelection.muxerCodec,
+            numberOfChannels: preparedAudio.numberOfChannels,
+            sampleRate: preparedAudio.sampleRate,
+          },
+          fastStart: 'in-memory',
+          firstTimestampBehavior: 'offset',
+        })
+      : null;
+
+  const webmMuxer =
+    containerFormat === 'webm' && webmTarget
+      ? new WebmMuxer({
+          target: webmTarget,
+          video: {
+            codec: videoSelection.webmMuxerCodec || 'V_VP9',
+            width,
+            height,
+            frameRate: fps,
+          },
+          audio: {
+            codec: 'A_OPUS',
+            numberOfChannels: preparedAudio.numberOfChannels,
+            sampleRate: preparedAudio.sampleRate,
+          },
+          firstTimestampBehavior: 'offset',
+        })
+      : null;
 
   let encoderError: Error | null = null;
 
   const videoEncoder = new VideoEncoder({
     output: (chunk, meta) => {
-      muxer.addVideoChunk(chunk, meta);
+      if (webmMuxer) {
+        webmMuxer.addVideoChunk(chunk, meta);
+        return;
+      }
+      if (
+        videoSelection?.muxerCodec === 'vp9' &&
+        meta?.decoderConfig &&
+        !meta.decoderConfig.colorSpace
+      ) {
+        meta = {
+          ...meta,
+          decoderConfig: {
+            ...meta.decoderConfig,
+            colorSpace: {
+              fullRange: false,
+              matrix: 'bt709',
+              primaries: 'bt709',
+              transfer: 'bt709',
+            },
+          },
+        };
+      }
+      mp4Muxer?.addVideoChunk(chunk, meta);
     },
     error: (err) => {
       encoderError = err instanceof Error ? err : new Error(String(err));
@@ -363,21 +493,27 @@ async function exportProjectOnMainThread(options: {
 
   const audioEncoder = new AudioEncoder({
     output: (chunk, meta) => {
-      muxer.addAudioChunk(chunk, meta);
+      if (webmMuxer) {
+        webmMuxer.addAudioChunk(chunk, meta);
+      } else {
+        mp4Muxer?.addAudioChunk(chunk, meta);
+      }
     },
     error: (err) => {
       encoderError = err instanceof Error ? err : new Error(String(err));
     },
   });
 
-  videoEncoder.configure(videoConfig);
-  audioEncoder.configure(audioConfig);
+  videoEncoder.configure(videoSelection.encoderConfig);
+  audioEncoder.configure(audioSelection.encoderConfig);
 
   try {
     const chunkSamples = 4096;
-    const totalSamples = slicedBuffer.length;
-    const ch0 = slicedBuffer.getChannelData(0);
-    const ch1 = numberOfChannels > 1 ? slicedBuffer.getChannelData(1) : null;
+    const totalSamples = preparedAudio.length;
+    const encSampleRate = preparedAudio.sampleRate;
+    const encNumChannels = preparedAudio.numberOfChannels;
+    const ch0 = preparedAudio.channels[0];
+    const ch1 = encNumChannels > 1 ? preparedAudio.channels[1] : null;
 
     for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
       if (signal.aborted) {
@@ -386,18 +522,18 @@ async function exportProjectOnMainThread(options: {
       if (encoderError) throw encoderError;
 
       const framesInChunk = Math.min(chunkSamples, totalSamples - offset);
-      const planar = new Float32Array(framesInChunk * numberOfChannels);
+      const planar = new Float32Array(framesInChunk * encNumChannels);
       planar.set(ch0.subarray(offset, offset + framesInChunk), 0);
-      if (numberOfChannels > 1 && ch1) {
+      if (encNumChannels > 1 && ch1) {
         planar.set(ch1.subarray(offset, offset + framesInChunk), framesInChunk);
       }
 
-      const timestampUs = Math.round((offset / sampleRate) * 1_000_000);
+      const timestampUs = Math.round((offset / encSampleRate) * 1_000_000);
       const audioData = new AudioData({
         format: 'f32-planar',
-        sampleRate,
+        sampleRate: encSampleRate,
         numberOfFrames: framesInChunk,
-        numberOfChannels,
+        numberOfChannels: encNumChannels,
         timestamp: timestampUs,
         data: planar,
       });
@@ -415,7 +551,11 @@ async function exportProjectOnMainThread(options: {
     }
 
     const analyzer = new OfflineAudioAnalyzer(slicedBuffer, 2048);
-    const beatTracker = settings.beatDetection
+    const needsBeatDetector =
+      settings.beatDetection ||
+      (settings.glitchIntensity ?? 0) > 0 ||
+      (settings.bassShake ?? 0) > 0;
+    const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
       : null;
     const beatState = createInitialBeatState();
@@ -442,7 +582,7 @@ async function exportProjectOnMainThread(options: {
 
       let beatBurst = 0;
       let beatTriggered = false;
-      if (beatTracker && settings.beatDetection) {
+      if (beatTracker && needsBeatDetector) {
         const lowPassRms = beatTracker.getLowPassRmsAt(localTime, 1024);
         const step = stepBeatDetector(
           beatState,
@@ -512,23 +652,35 @@ async function exportProjectOnMainThread(options: {
       throw new DOMException('Export cancelled', 'AbortError');
     }
 
+    const containerLabel = containerFormat.toUpperCase();
     onProgress({
       status: 'muxing',
       currentFrame: totalFrames,
       totalFrames,
       percentage: 98,
-      message: 'Finalizing H.264 + AAC MP4 container...',
+      message: `Finalizing ${videoSelection.codecLabel} + ${audioSelection.codecLabel} ${containerLabel} container...`,
     });
 
     await Promise.all([videoEncoder.flush(), audioEncoder.flush()]);
     if (encoderError) throw encoderError;
 
-    muxer.finalize();
+    let buffer: ArrayBuffer;
+    if (webmMuxer && webmTarget) {
+      webmMuxer.finalize();
+      buffer = webmTarget.buffer;
+    } else if (mp4Muxer && mp4Target) {
+      mp4Muxer.finalize();
+      buffer = mp4Target.buffer;
+    } else {
+      throw new Error('Muxer target failed to initialize.');
+    }
 
     return {
-      buffer: target.buffer,
+      buffer,
       totalFrames,
       elapsedMs: Math.round(performance.now() - startTimeMs),
+      mimeType: containerFormat === 'webm' ? 'video/webm' : 'video/mp4',
+      fileExtension: containerFormat,
     };
   } finally {
     try {
@@ -542,6 +694,281 @@ async function exportProjectOnMainThread(options: {
       // ignore close errors
     }
   }
+}
+
+async function exportProjectViaMediaRecorder(options: {
+  slicedBuffer: AudioBuffer;
+  trimStart: number;
+  settings: StudioSettings;
+  lyrics: LyricLine[];
+  bgImage: HTMLImageElement | null;
+  albumImage: HTMLImageElement | null;
+  signal: AbortSignal;
+  onProgress: (state: ExportProgressState) => void;
+  startTimeMs: number;
+}): Promise<{
+  buffer: ArrayBuffer;
+  totalFrames: number;
+  elapsedMs: number;
+  mimeType: string;
+  fileExtension: string;
+}> {
+  const {
+    slicedBuffer,
+    trimStart,
+    settings,
+    lyrics,
+    bgImage,
+    albumImage,
+    signal,
+    onProgress,
+    startTimeMs,
+  } = options;
+
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error(
+      'Neither WebCodecs audio/video encoding nor MediaRecorder fallback is supported in this browser.'
+    );
+  }
+
+  const { width, height } = resolveExportDimensions(
+    settings.aspectRatio,
+    settings.exportResolution
+  );
+  const fps = settings.exportFps;
+  const clipDuration = slicedBuffer.duration;
+  const totalFrames = Math.max(1, Math.ceil(clipDuration * fps));
+  const videoBitrateBps = Math.round((settings.videoBitrateMbps || 8) * 1_000_000);
+  const audioBitrateBps = (settings.audioBitrateKbps || 192) * 1000;
+
+  const chosenMime = selectBestMediaRecorderMime();
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  if (!ctx) {
+    throw new Error('Failed to create 2D context for MediaRecorder fallback.');
+  }
+
+  const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) {
+    throw new Error('Web Audio API is unavailable for MediaRecorder fallback.');
+  }
+
+  const audioCtx = new AudioCtx({ sampleRate: slicedBuffer.sampleRate });
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
+
+  const destination = audioCtx.createMediaStreamDestination();
+  const source = audioCtx.createBufferSource();
+  source.buffer = slicedBuffer;
+  source.connect(destination);
+
+  const canvasStream = canvas.captureStream(fps);
+  const combinedStream = new MediaStream([
+    ...canvasStream.getVideoTracks(),
+    ...destination.stream.getAudioTracks(),
+  ]);
+
+  const recorderOptions: MediaRecorderOptions = {
+    videoBitsPerSecond: videoBitrateBps,
+    audioBitsPerSecond: audioBitrateBps,
+    ...(chosenMime.mimeType ? { mimeType: chosenMime.mimeType } : {}),
+  };
+
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(combinedStream, recorderOptions);
+  } catch {
+    recorder = new MediaRecorder(combinedStream);
+  }
+
+  const chunks: BlobPart[] = [];
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size > 0) {
+      chunks.push(ev.data);
+    }
+  };
+
+  const analyzer = new OfflineAudioAnalyzer(slicedBuffer, 2048);
+  const needsBeatDetector =
+    settings.beatDetection ||
+    (settings.glitchIntensity ?? 0) > 0 ||
+    (settings.bassShake ?? 0) > 0;
+  const beatTracker = needsBeatDetector
+    ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
+    : null;
+  const beatState = createInitialBeatState();
+  const minDim = Math.min(width, height);
+  const frequencyData = new Uint8Array(1024);
+  const timeDomainData = new Uint8Array(1024);
+  const particles: Particle[] = [];
+  const motionBlurState: MotionBlurState = { canvas: null, hasFrame: false };
+  const albumRotationRef = { angle: 0 };
+  const dt = 1 / fps;
+
+  onProgress({
+    status: 'rendering',
+    currentFrame: 0,
+    totalFrames,
+    percentage: 1,
+    message: 'Using real-time MediaRecorder compatibility encoder...',
+  });
+
+  const recordingPromise = new Promise<ArrayBuffer>((resolve, reject) => {
+    let rafId = 0;
+    let stopTimeoutId = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (stopTimeoutId) window.clearTimeout(stopTimeoutId);
+      signal.removeEventListener('abort', onAbort);
+      try {
+        source.stop();
+      } catch {
+        // ignore if already stopped
+      }
+      combinedStream.getTracks().forEach((t) => t.stop());
+      canvasStream.getTracks().forEach((t) => t.stop());
+      void audioCtx.close().catch(() => {});
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (recorder.state !== 'inactive') recorder.stop();
+      } catch {
+        // ignore stop errors
+      }
+      cleanup();
+      reject(new DOMException('Export cancelled', 'AbortError'));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    recorder.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('MediaRecorder fallback encoding failed.'));
+    };
+
+    recorder.onstop = async () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try {
+        const blob = new Blob(chunks, {
+          type: recorder.mimeType || chosenMime.mimeType || 'video/webm',
+        });
+        const buf = await blob.arrayBuffer();
+        resolve(buf);
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+
+    const renderStartPerfMs = performance.now();
+    let lastProgressPerfMs = renderStartPerfMs;
+
+    recorder.start(250);
+    source.start();
+
+    const tick = () => {
+      if (settled || signal.aborted) return;
+      const elapsedSec = Math.min(clipDuration, (performance.now() - renderStartPerfMs) / 1000);
+      const absoluteTrackTime = trimStart + elapsedSec;
+      const currentFrame = Math.min(totalFrames, Math.max(1, Math.round(elapsedSec * fps)));
+
+      analyzer.analyzeAt(elapsedSec, settings.smoothing, frequencyData, timeDomainData);
+
+      let beatBurst = 0;
+      let beatTriggered = false;
+      if (beatTracker && needsBeatDetector) {
+        const lowPassRms = beatTracker.getLowPassRmsAt(elapsedSec, 1024);
+        const step = stepBeatDetector(
+          beatState,
+          lowPassRms,
+          dt,
+          settings.beatSensitivity,
+          minDim,
+          settings.primaryColor,
+          settings.secondaryColor
+        );
+        beatBurst = step.burstIntensity;
+        beatTriggered = step.triggered;
+      }
+
+      renderVisualizerFrame({
+        ctx,
+        width,
+        height,
+        currentTime: absoluteTrackTime,
+        dt,
+        frequencyData,
+        timeDomainData,
+        settings,
+        lyrics,
+        bgImage,
+        albumImage,
+        particles,
+        isExport: true,
+        albumRotationRef,
+        beatBurst,
+        beatTriggered,
+        beatShockwaves: beatState.shockwaves,
+        motionBlurState,
+      });
+
+      const nowMs = performance.now();
+      if (nowMs - lastProgressPerfMs >= 100 || elapsedSec >= clipDuration) {
+        const pct = Math.min(97, Math.round((elapsedSec / Math.max(0.001, clipDuration)) * 96));
+        onProgress({
+          status: 'rendering',
+          currentFrame,
+          totalFrames,
+          percentage: pct,
+          message: `Compatibility recording frame ${currentFrame} of ${totalFrames} — ${pct}%`,
+        });
+        lastProgressPerfMs = nowMs;
+      }
+
+      if (elapsedSec < clipDuration) {
+        rafId = requestAnimationFrame(tick);
+      } else {
+        onProgress({
+          status: 'muxing',
+          currentFrame: totalFrames,
+          totalFrames,
+          percentage: 98,
+          message: 'Finalizing compatibility video container...',
+        });
+        stopTimeoutId = window.setTimeout(() => {
+          if (!settled && recorder.state !== 'inactive') {
+            recorder.stop();
+          }
+        }, 120);
+      }
+    };
+
+    rafId = requestAnimationFrame(tick);
+  });
+
+  const buffer = await recordingPromise;
+  const actualMime = chosenMime.mimeType || 'video/webm';
+  const actualExt = actualMime.includes('mp4') ? 'mp4' : chosenMime.extension;
+
+  return {
+    buffer,
+    totalFrames,
+    elapsedMs: Math.round(performance.now() - startTimeMs),
+    mimeType: actualMime,
+    fileExtension: actualExt,
+  };
 }
 
 export async function exportProjectToMp4(options: ExportMp4Options): Promise<ExportMp4Result> {
@@ -558,17 +985,6 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     autoDownload = true,
     customFileName,
   } = options;
-
-  if (
-    typeof VideoEncoder === 'undefined' ||
-    typeof AudioEncoder === 'undefined' ||
-    typeof VideoFrame === 'undefined' ||
-    typeof AudioData === 'undefined'
-  ) {
-    throw new Error(
-      'Your browser does not support WebCodecs (VideoEncoder / AudioEncoder). Please use Chrome, Edge, or Safari 16.4+.'
-    );
-  }
 
   const startTimeMs = performance.now();
 
@@ -589,9 +1005,27 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     settings.fadeType
   );
 
-  let exportResult: { buffer: ArrayBuffer; totalFrames: number; elapsedMs: number };
+  let exportResult: {
+    buffer: ArrayBuffer;
+    totalFrames: number;
+    elapsedMs: number;
+    mimeType?: string;
+    fileExtension?: string;
+  };
 
-  if (canUseWorkerPipeline()) {
+  if (isWebCodecsUnavailable()) {
+    exportResult = await exportProjectViaMediaRecorder({
+      slicedBuffer,
+      trimStart,
+      settings,
+      lyrics,
+      bgImage,
+      albumImage,
+      signal,
+      onProgress,
+      startTimeMs,
+    });
+  } else if (canUseWorkerPipeline()) {
     try {
       onProgress({
         status: 'preparing',
@@ -611,8 +1045,68 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         onProgress,
       });
     } catch (err) {
-      if (err instanceof WorkerStartupError) {
-        exportResult = await exportProjectOnMainThread({
+      if (err instanceof WebCodecsUnsupportedError) {
+        exportResult = await exportProjectViaMediaRecorder({
+          slicedBuffer,
+          trimStart,
+          settings,
+          lyrics,
+          bgImage,
+          albumImage,
+          signal,
+          onProgress,
+          startTimeMs,
+        });
+      } else if (err instanceof WorkerStartupError) {
+        try {
+          exportResult = await exportProjectOnMainThread({
+            slicedBuffer,
+            trimStart,
+            settings,
+            lyrics,
+            bgImage,
+            albumImage,
+            signal,
+            onProgress,
+            startTimeMs,
+          });
+        } catch (mainErr) {
+          if (mainErr instanceof WebCodecsUnsupportedError) {
+            exportResult = await exportProjectViaMediaRecorder({
+              slicedBuffer,
+              trimStart,
+              settings,
+              lyrics,
+              bgImage,
+              albumImage,
+              signal,
+              onProgress,
+              startTimeMs,
+            });
+          } else {
+            throw mainErr;
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    try {
+      exportResult = await exportProjectOnMainThread({
+        slicedBuffer,
+        trimStart,
+        settings,
+        lyrics,
+        bgImage,
+        albumImage,
+        signal,
+        onProgress,
+        startTimeMs,
+      });
+    } catch (mainErr) {
+      if (mainErr instanceof WebCodecsUnsupportedError) {
+        exportResult = await exportProjectViaMediaRecorder({
           slicedBuffer,
           trimStart,
           settings,
@@ -624,30 +1118,20 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           startTimeMs,
         });
       } else {
-        throw err;
+        throw mainErr;
       }
     }
-  } else {
-    exportResult = await exportProjectOnMainThread({
-      slicedBuffer,
-      trimStart,
-      settings,
-      lyrics,
-      bgImage,
-      albumImage,
-      signal,
-      onProgress,
-      startTimeMs,
-    });
   }
 
-  const mp4Blob = new Blob([exportResult.buffer], { type: 'video/mp4' });
+  const outputMime = exportResult.mimeType || 'video/mp4';
+  const outputExt = exportResult.fileExtension || 'mp4';
+  const mp4Blob = new Blob([exportResult.buffer], { type: outputMime });
   const downloadUrl = URL.createObjectURL(mp4Blob);
   const trackSlug = sanitizeFileName(settings.trackTitle || 'pulsewave-video');
   const ratioSlug = settings.aspectRatio.replace(':', 'x');
   const downloadFileName = customFileName
-    ? `${sanitizeFileName(customFileName)}.mp4`
-    : `${trackSlug}-${ratioSlug}.mp4`;
+    ? `${sanitizeFileName(customFileName)}.${outputExt}`
+    : `${trackSlug}-${ratioSlug}.${outputExt}`;
 
   // Trigger automatic download unless batch caller suppresses it
   if (autoDownload) {

@@ -338,6 +338,77 @@ export function extractWaveformPeaks(buffer: AudioBuffer, bucketCount = 200): nu
 }
 
 /**
+ * Computes a consistent global peak amplitude across an AudioBuffer so zoomed
+ * waveform views maintain proportional dynamics.
+ */
+export function computeBufferMaxPeak(buffer: AudioBuffer): number {
+  const ch0 = buffer.getChannelData(0);
+  const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
+  const totalSamples = ch0.length;
+  const step = Math.max(1, Math.floor(totalSamples / 16000));
+  let maxPeak = 0.0001;
+
+  for (let i = 0; i < totalSamples; i += step) {
+    const v0 = Math.abs(ch0[i]);
+    const v1 = ch1 ? Math.abs(ch1[i]) : 0;
+    const v = v0 > v1 ? v0 : v1;
+    if (v > maxPeak) maxPeak = v;
+  }
+
+  return maxPeak;
+}
+
+/**
+ * Extracts high-resolution normalized waveform peaks (0..1) for a specific [startSec, endSec] time window.
+ */
+export function extractWaveformWindowPeaks(
+  buffer: AudioBuffer,
+  startSec: number,
+  endSec: number,
+  bucketCount: number,
+  globalMaxPeak?: number
+): number[] {
+  const count = Math.max(16, Math.floor(bucketCount));
+  const safeDur = Math.max(0.01, buffer.duration);
+  const clampedStart = Math.max(0, Math.min(safeDur, startSec));
+  const clampedEnd = Math.max(clampedStart + 0.01, Math.min(safeDur, endSec));
+
+  const ch0 = buffer.getChannelData(0);
+  const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
+  const totalSamples = ch0.length;
+  const sampleRate = buffer.sampleRate;
+
+  const startSample = Math.max(0, Math.min(totalSamples - 1, Math.floor(clampedStart * sampleRate)));
+  const endSample = Math.max(startSample + 1, Math.min(totalSamples, Math.ceil(clampedEnd * sampleRate)));
+  const spanSamples = endSample - startSample;
+
+  const peaks: number[] = new Array(count).fill(0);
+  let localMax = 0.0001;
+
+  for (let b = 0; b < count; b++) {
+    const bStart = startSample + Math.floor((b / count) * spanSamples);
+    const bEnd = Math.min(
+      endSample,
+      Math.max(bStart + 1, startSample + Math.floor(((b + 1) / count) * spanSamples))
+    );
+    const step = Math.max(1, Math.floor((bEnd - bStart) / 64));
+    let peak = 0;
+    for (let i = bStart; i < bEnd; i += step) {
+      const v0 = Math.abs(ch0[i]);
+      const v1 = ch1 ? Math.abs(ch1[i]) : 0;
+      const v = v0 > v1 ? v0 : v1;
+      if (v > peak) peak = v;
+    }
+    peaks[b] = peak;
+    if (peak > localMax) localMax = peak;
+  }
+
+  const refMax = globalMaxPeak && globalMaxPeak > 0.05 ? globalMaxPeak : localMax;
+  const norm = refMax > 0.05 ? 1 / refMax : 1;
+  return peaks.map((p) => Math.min(1, p * norm));
+}
+
+/**
  * Evaluates a normalized fade gain in [0, 1] for progress p in [0, 1] (0 = silence, 1 = unity)
  */
 export function computeFadeGain(progress: number, fadeType: FadeType): number {

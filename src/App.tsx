@@ -18,6 +18,7 @@ import type {
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  BatchCompletionSummary,
   BatchExportJob,
   BeatState,
   ExportProfile,
@@ -26,6 +27,7 @@ import {
   MotionBlurState,
   Particle,
   SavedPreset,
+  SceneTransitionState,
   ShareableVideoAsset,
   SidebarTab,
   StudioProjectRecord,
@@ -94,6 +96,11 @@ import {
   saveProjectRecord,
   setLastActiveProjectId,
 } from './utils/projectStorage';
+import {
+  computeTapTempoCalibration,
+  TAP_TEMPO_IDLE_RESET_MS,
+  TapSample,
+} from './utils/tapTempo';
 
 const DEFAULT_SETTINGS: StudioSettings = {
   aspectRatio: '16:9',
@@ -108,6 +115,12 @@ const DEFAULT_SETTINGS: StudioSettings = {
   smoothing: 0.78,
   motionBlur: 0,
   bloomIntensity: 0,
+  bloomPreset: 'off',
+  bloomRadius: 1.0,
+  bloomSpread: 0.5,
+  bloomSaturation: 1.05,
+  glitchIntensity: 0,
+  bassShake: 0,
   visualizerScale: 1,
   lyricPosition: 80,
   trackTitle: '',
@@ -124,6 +137,9 @@ const DEFAULT_SETTINGS: StudioSettings = {
   showSafeZone: false,
   beatDetection: false,
   beatSensitivity: 1.25,
+  sceneTransitionType: 'crossfade',
+  sceneTransitionDuration: 0.45,
+  sceneTransitionTarget: 'both',
 };
 
 const INITIAL_EXPORT_STATE: ExportProgressState = {
@@ -205,12 +221,8 @@ export default function App() {
   );
   const [notificationPermission, setNotificationPermission] =
     useState<BrowserNotificationPermission>(() => getBrowserNotificationPermission());
-  const [batchCompletionBanner, setBatchCompletionBanner] = useState<{
-    completedCount: number;
-    failedCount: number;
-    totalElapsedMs: number;
-    desktopSent: boolean;
-  } | null>(null);
+  const [batchCompletionBanner, setBatchCompletionBanner] =
+    useState<BatchCompletionSummary | null>(null);
   const [autoArrangeNotice, setAutoArrangeNotice] = useState<string | null>(null);
   const [midiMappings, setMidiMappings] = useState<MidiMapping[]>(() =>
     loadMidiMappings()
@@ -219,6 +231,8 @@ export default function App() {
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
   const [learningParam, setLearningParam] = useState<MidiMappableParamKey | null>(null);
   const [midiNotice, setMidiNotice] = useState<string | null>(null);
+  const [tapTempoBpm, setTapTempoBpm] = useState<number | null>(null);
+  const [tapTempoCount, setTapTempoCount] = useState(0);
 
   // Refs for Web Audio API, Canvas, Images, and AbortController
   const audioElRef = useRef<HTMLAudioElement | null>(null);
@@ -242,7 +256,17 @@ export default function App() {
 
   const particlesRef = useRef<Particle[]>([]);
   const motionBlurStateRef = useRef<MotionBlurState>({ canvas: null, hasFrame: false });
+  const sceneTransitionStateRef = useRef<SceneTransitionState>({
+    activeMode: null,
+    fromMode: null,
+    elapsed: 0,
+    duration: 0.45,
+  });
   const beatStateRef = useRef<BeatState>(createInitialBeatState());
+  const latestBassRmsRef = useRef(0);
+  const rollingBassRmsRef = useRef(0.08);
+  const tapSamplesRef = useRef<TapSample[]>([]);
+  const tapResetTimerRef = useRef<number | null>(null);
   const beatMeterBarRef = useRef<HTMLDivElement | null>(null);
   const albumRotationRef = useRef<{ angle: number }>({ angle: 0 });
   const exportAbortRef = useRef<AbortController | null>(null);
@@ -485,6 +509,11 @@ export default function App() {
         'smoothing',
         'motionBlur',
         'bloomIntensity',
+        'bloomRadius',
+        'bloomSpread',
+        'bloomSaturation',
+        'glitchIntensity',
+        'bassShake',
         'visualizerScale',
         'lyricPosition',
         'videoBitrateMbps',
@@ -528,6 +557,68 @@ export default function App() {
     updateSettings(result.patch);
     setAutoArrangeNotice(result.summary);
   }, [updateSettings]);
+
+  useEffect(() => {
+    return () => {
+      if (tapResetTimerRef.current !== null) {
+        window.clearTimeout(tapResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleTapTempo = useCallback(() => {
+    const now = performance.now();
+    const prevSamples = tapSamplesRef.current;
+    const lastSample = prevSamples[prevSamples.length - 1];
+    const isFreshSequence =
+      !lastSample || now - lastSample.tapTimeMs > TAP_TEMPO_IDLE_RESET_MS;
+
+    const nextSample: TapSample = {
+      tapTimeMs: now,
+      bassRms: isPlayingRef.current ? latestBassRmsRef.current : 0,
+      rollingRms: isPlayingRef.current ? rollingBassRmsRef.current : 0,
+    };
+
+    const nextSamples = isFreshSequence
+      ? [nextSample]
+      : [...prevSamples.slice(-7), nextSample];
+    tapSamplesRef.current = nextSamples;
+    setTapTempoCount(nextSamples.length);
+
+    if (tapResetTimerRef.current !== null) {
+      window.clearTimeout(tapResetTimerRef.current);
+    }
+    tapResetTimerRef.current = window.setTimeout(() => {
+      tapSamplesRef.current = [];
+      setTapTempoCount(0);
+      tapResetTimerRef.current = null;
+    }, TAP_TEMPO_IDLE_RESET_MS);
+
+    // Give subtle visual beat feedback in live preview while tapping
+    beatStateRef.current.burstIntensity = Math.max(
+      beatStateRef.current.burstIntensity,
+      0.78
+    );
+
+    const calibration = computeTapTempoCalibration(
+      nextSamples,
+      audioElRef.current?.playbackRate ?? 1
+    );
+    if (!calibration) return;
+
+    setTapTempoBpm(calibration.bpm);
+    commitHistory(
+      (prev) => ({
+        ...prev,
+        settings: {
+          ...prev.settings,
+          beatDetection: true,
+          beatSensitivity: calibration.beatSensitivity,
+        },
+      }),
+      'tap-tempo:calibrate'
+    );
+  }, [commitHistory]);
 
   const midiUpdateSettings = useCallback(
     (patch: Partial<StudioSettings>) => {
@@ -1389,6 +1480,21 @@ export default function App() {
     setTrimEnd(end);
   }, []);
 
+  const handlePreviewSceneTransition = useCallback(() => {
+    const activeSettings = settingsRef.current;
+    if ((activeSettings.sceneTransitionType ?? 'none') === 'none') return;
+    const altMode =
+      activeSettings.visualizerMode === 'mirrored-bars'
+        ? 'circular-ring'
+        : 'mirrored-bars';
+    sceneTransitionStateRef.current = {
+      activeMode: activeSettings.visualizerMode,
+      fromMode: altMode,
+      elapsed: 0,
+      duration: Math.max(0.15, Math.min(1.5, activeSettings.sceneTransitionDuration ?? 0.45)),
+    };
+  }, []);
+
   // Global keyboard shortcuts: Spacebar (Play/Pause), Left/Right Arrows (Seek), S (Safe Zone grid)
   useEffect(() => {
     const isModalOpen =
@@ -1497,6 +1603,9 @@ export default function App() {
         if (beatAnalyser) {
           beatAnalyser.getByteTimeDomainData(lowPassWaveBuf);
           lowPassRms = computeLowPassRms(lowPassWaveBuf);
+          latestBassRmsRef.current = lowPassRms;
+          rollingBassRmsRef.current =
+            rollingBassRmsRef.current * 0.94 + lowPassRms * 0.06;
         }
       } else {
         // Gentle idle decay when paused so bars settle cleanly
@@ -1515,7 +1624,11 @@ export default function App() {
         ASPECT_RATIOS[activeSettings.aspectRatio].height
       );
 
-      if (activeSettings.beatDetection) {
+      const needsBeatDetector =
+        activeSettings.beatDetection ||
+        (activeSettings.glitchIntensity ?? 0) > 0 ||
+        (activeSettings.bassShake ?? 0) > 0;
+      if (needsBeatDetector) {
         const step = stepBeatDetector(
           beatStateRef.current,
           lowPassRms,
@@ -1569,6 +1682,7 @@ export default function App() {
               ? beatStateRef.current.shockwaves
               : undefined,
             motionBlurState: motionBlurStateRef.current,
+            sceneTransitionState: sceneTransitionStateRef.current,
           });
         }
       }
@@ -1612,7 +1726,7 @@ export default function App() {
         currentFrame: 0,
         totalFrames: 1,
         percentage: 0,
-        message: 'Initializing H.264 & AAC encoders...',
+        message: 'Initializing video & audio encoders...',
       });
 
       try {
@@ -1904,6 +2018,9 @@ export default function App() {
     const batchStartMs = performance.now();
     let completedCount = 0;
     let failedCount = 0;
+    let totalClipDurationMs = 0;
+    let totalOutputBytes = 0;
+    let totalFramesRendered = 0;
     let wasCancelled = false;
 
     try {
@@ -1920,7 +2037,7 @@ export default function App() {
                   ...j,
                   status: 'rendering',
                   percentage: 0,
-                  message: 'Initializing H.264 & AAC encoders...',
+                  message: 'Initializing video & audio encoders...',
                 }
               : j
           )
@@ -1962,6 +2079,9 @@ export default function App() {
           });
 
           completedCount += 1;
+          totalClipDurationMs += Math.max(0, job.trimEnd - job.trimStart) * 1000;
+          totalOutputBytes += result.fileSizeBytes;
+          totalFramesRendered += result.totalFrames;
           setBatchJobs((prev) =>
             prev.map((j) =>
               j.id === job.id
@@ -2037,6 +2157,9 @@ export default function App() {
           completedCount,
           failedCount,
           totalElapsedMs,
+          totalClipDurationMs: Math.round(totalClipDurationMs),
+          totalOutputBytes,
+          totalFramesRendered,
           desktopSent: alertResult.desktopSent,
         });
       }
@@ -2481,6 +2604,7 @@ export default function App() {
           onImportPresetFile={handleImportPresetFile}
           onDownloadSnapshot={handleSaveCanvasSnapshot}
           hasAudio={Boolean(audioBuffer)}
+          audioBuffer={audioBuffer}
           isGeneratingCaptions={isGeneratingCaptions}
           captionsNotice={captionsNotice}
           onDismissCaptionsNotice={() => setCaptionsNotice(null)}
@@ -2490,6 +2614,7 @@ export default function App() {
           beatMeterBarRef={beatMeterBarRef}
           midiMappingBadges={midiMappingBadges}
           onOpenMidiMapping={() => setIsMidiModalOpen(true)}
+          onPreviewSceneTransition={handlePreviewSceneTransition}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -2515,6 +2640,7 @@ export default function App() {
 
           <TransportBar
             hasAudio={Boolean(audioBuffer)}
+            audioBuffer={audioBuffer}
             duration={duration}
             currentTime={currentTime}
             trimStart={trimStart}
@@ -2527,12 +2653,17 @@ export default function App() {
             isExporting={isExporting}
             batchQueueCount={pendingBatchCount}
             isGeneratingCaptions={isGeneratingCaptions}
+            beatDetection={settings.beatDetection}
+            beatSensitivity={settings.beatSensitivity}
+            tapTempoBpm={tapTempoBpm}
+            tapTempoCount={tapTempoCount}
             waveformPeaks={waveformPeaks}
             primaryColor={settings.primaryColor}
             onTogglePlay={() => void handleTogglePlay()}
             onSeek={handleSeek}
             onTrimChange={handleTrimChange}
             onToggleLoop={() => setLoopClip((v) => !v)}
+            onTapTempo={handleTapTempo}
             onVolumeChange={(v) => {
               setVolume(v);
               if (v > 0 && isMuted) setIsMuted(false);

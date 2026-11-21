@@ -27,6 +27,7 @@ import type { MidiMappableParamKey } from '../types/midi';
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  BloomPresetKey,
   ExportResolution,
   FadeType,
   LyricLine,
@@ -35,9 +36,14 @@ import {
   SavedPreset,
   SidebarTab,
   StudioSettings,
-  THEME_PRESETS,
   VisualizerMode,
 } from '../types/studio';
+import {
+  BLOOM_PRESETS,
+  DEFAULT_BLOOM_SHADER_PARAMS,
+  getBloomPresetPatch,
+  resolveActiveBloomPreset,
+} from '../utils/bloomPresets';
 import {
   createLyricId,
   formatLrcTimestamp,
@@ -46,8 +52,17 @@ import {
   parseTimeInput,
   serializeLrc,
 } from '../utils/lrcParser';
+import {
+  analyzeBeatsFromAudioBuffer,
+  BeatDetectionAnalysis,
+  LyricBeatSuggestion,
+  suggestBeatSyncedTimestamps,
+  suggestTimestampsForPlainLyrics,
+} from '../utils/lyricBeatAutoSync';
 import { downloadPresetJson, formatPresetSummary } from '../utils/presetStorage';
+import { ColorHarmonyPanel } from './ColorHarmonyPanel';
 import { PresetThumbnail } from './PresetThumbnail';
+import { SceneTransitionPanel } from './SceneTransitionPanel';
 
 interface ControlSidebarProps {
   activeTab: SidebarTab;
@@ -81,6 +96,7 @@ interface ControlSidebarProps {
   ) => Promise<{ ok: true; preset: SavedPreset } | { ok: false; error: string }>;
   onDownloadSnapshot: (name: string, targetSettings?: StudioSettings) => Promise<string>;
   hasAudio: boolean;
+  audioBuffer: AudioBuffer | null;
   isGeneratingCaptions: boolean;
   captionsNotice: { type: 'success' | 'error'; text: string } | null;
   onDismissCaptionsNotice: () => void;
@@ -90,6 +106,7 @@ interface ControlSidebarProps {
   beatMeterBarRef: React.RefObject<HTMLDivElement | null>;
   midiMappingBadges?: Partial<Record<MidiMappableParamKey, string>>;
   onOpenMidiMapping?: () => void;
+  onPreviewSceneTransition?: () => void;
 }
 
 const TABS: Array<{ id: SidebarTab; label: string; icon: typeof Sliders }> = [
@@ -165,6 +182,56 @@ const VISUALIZER_MODES: Array<{
     id: 'seismic-ridges',
     name: 'Seismic Ridge Stack',
     desc: 'Stacked 3D topographic spectrum waves with depth occlusion',
+  },
+  {
+    id: 'dna-helix',
+    name: 'Double Helix Strand',
+    desc: 'Twisting twin wave strands & frequency-reactive base rungs',
+  },
+  {
+    id: 'radar-sonar',
+    name: 'Sonar Pulse Radar',
+    desc: 'Rotating sweep beam lighting up radial spectrum blips',
+  },
+  {
+    id: 'lissajous-scope',
+    name: 'Lissajous Phase Scope',
+    desc: 'Harmonic X-Y phase-orbit curves & glowing studio reticle',
+  },
+  {
+    id: 'rain-matrix',
+    name: 'Digital Rain Waterfall',
+    desc: 'Cascading neon glyph columns synced to frequency bands',
+  },
+  {
+    id: 'flower-mandala',
+    name: 'Sacred Lotus Mandala',
+    desc: 'Layered symmetrical petal geometry blooming with bass & mids',
+  },
+  {
+    id: 'vortex-rings',
+    name: '3D Torus Gyroscope',
+    desc: 'Nested 3D gimbal rings with orbiting spectrum beads',
+  },
+  {
+    id: 'isometric-city',
+    name: 'Isometric Equalizer',
+    desc: '3D isometric prism skyline pulsing in depth-sorted rows',
+  },
+  {
+    id: 'analog-vu',
+    name: 'Dual Analog VU Meters',
+    desc: 'Twin studio needle dials with dB arcs & peak indicators',
+  },
+  {
+    id: 'kaleido-shards',
+    name: 'Kaleidoscope Shards',
+    desc: '8-fold mirrored geometric crystal facets pulsing to beats',
+  },
+  {
+    id: 'flame-corona',
+    name: 'Solar Plasma Corona',
+    desc: 'Eclipse core surrounded by multi-octave plasma flares',
   },
 ];
 
@@ -245,6 +312,7 @@ export function ControlSidebar({
   onImportPresetFile,
   onDownloadSnapshot,
   hasAudio,
+  audioBuffer,
   isGeneratingCaptions,
   captionsNotice,
   onDismissCaptionsNotice,
@@ -254,6 +322,7 @@ export function ControlSidebar({
   beatMeterBarRef,
   midiMappingBadges,
   onOpenMidiMapping,
+  onPreviewSceneTransition,
 }: ControlSidebarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
   const albumInputRef = useRef<HTMLInputElement>(null);
@@ -291,7 +360,19 @@ export function ControlSidebar({
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+  const [modeQuery, setModeQuery] = useState('');
   const [appliedPresetId, setAppliedPresetId] = useState<string | null>(null);
+  const [showBloomShaderParams, setShowBloomShaderParams] = useState(false);
+
+  // Beat Auto-Sync State
+  const [autoSyncPreview, setAutoSyncPreview] = useState<{
+    source: 'existing' | 'plain';
+    analysis: BeatDetectionAnalysis;
+    suggestions: LyricBeatSuggestion[];
+    snapWindowSec: number;
+    beatsPerLine: 1 | 2 | 4;
+  } | null>(null);
+  const [autoSyncNotice, setAutoSyncNotice] = useState<string | null>(null);
 
   const commitStartInput = () => {
     const parsed = parseTimeInput(startInput);
@@ -397,6 +478,134 @@ export function ControlSidebar({
     a.download = `${(settings.trackTitle || 'lyrics').toLowerCase().replace(/\s+/g, '-')}.lrc`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const runAutoSyncExisting = (snapWindowSec = 0.45) => {
+    if (!audioBuffer || lyrics.length === 0) return;
+    setAutoSyncNotice(null);
+    const analysis = analyzeBeatsFromAudioBuffer(audioBuffer, {
+      startSec: 0,
+      endSec: audioBuffer.duration,
+      beatSensitivity: settings.beatSensitivity,
+    });
+    const suggestions = suggestBeatSyncedTimestamps(lyrics, analysis, snapWindowSec);
+    setAutoSyncPreview({
+      source: 'existing',
+      analysis,
+      suggestions,
+      snapWindowSec,
+      beatsPerLine: 2,
+    });
+  };
+
+  const runAutoSyncPlainText = (beatsPerLine: 1 | 2 | 4 = 2) => {
+    if (!audioBuffer) return;
+    const cleanedLines = rawLyricsText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (cleanedLines.length === 0) return;
+
+    setAutoSyncNotice(null);
+    const analysis = analyzeBeatsFromAudioBuffer(audioBuffer, {
+      startSec: trimStart,
+      endSec: trimEnd > trimStart + 0.5 ? trimEnd : audioBuffer.duration,
+      beatSensitivity: settings.beatSensitivity,
+    });
+    const suggestions = suggestTimestampsForPlainLyrics(cleanedLines, analysis, beatsPerLine);
+    setAutoSyncPreview({
+      source: 'plain',
+      analysis,
+      suggestions,
+      snapWindowSec: 0.45,
+      beatsPerLine,
+    });
+  };
+
+  const updateAutoSyncSnapWindow = (nextSnapSec: number) => {
+    if (!autoSyncPreview || autoSyncPreview.source !== 'existing') return;
+    const suggestions = suggestBeatSyncedTimestamps(
+      lyrics,
+      autoSyncPreview.analysis,
+      nextSnapSec
+    );
+    setAutoSyncPreview({
+      ...autoSyncPreview,
+      snapWindowSec: nextSnapSec,
+      suggestions,
+    });
+  };
+
+  const updateAutoSyncBeatsPerLine = (nextBeatsPerLine: 1 | 2 | 4) => {
+    if (!autoSyncPreview || autoSyncPreview.source !== 'plain') return;
+    const cleanedLines = autoSyncPreview.suggestions.map((s) => s.text);
+    const suggestions = suggestTimestampsForPlainLyrics(
+      cleanedLines,
+      autoSyncPreview.analysis,
+      nextBeatsPerLine
+    );
+    setAutoSyncPreview({
+      ...autoSyncPreview,
+      beatsPerLine: nextBeatsPerLine,
+      suggestions,
+    });
+  };
+
+  const applyAllAutoSyncSuggestions = () => {
+    if (!autoSyncPreview) return;
+    if (autoSyncPreview.source === 'existing') {
+      const suggestionById = new Map(autoSyncPreview.suggestions.map((s) => [s.id, s]));
+      const nextLyrics = lyrics
+        .map((cue) => {
+          const s = suggestionById.get(cue.id);
+          return s ? { ...cue, time: s.suggestedTime } : cue;
+        })
+        .sort((a, b) => a.time - b.time);
+      onLyricsChange(nextLyrics);
+      const changedCount = autoSyncPreview.suggestions.filter(
+        (s) => Math.abs(s.deltaMs) >= 10
+      ).length;
+      setAutoSyncNotice(
+        `Aligned ${changedCount} of ${autoSyncPreview.suggestions.length} cues to detected beats.`
+      );
+    } else {
+      const nextLyrics: LyricLine[] = autoSyncPreview.suggestions
+        .map((s) => ({
+          id: s.id,
+          time: s.suggestedTime,
+          text: s.text,
+        }))
+        .sort((a, b) => a.time - b.time);
+      onLyricsChange(nextLyrics);
+      setAutoSyncNotice(
+        `Auto-synced ${nextLyrics.length} lyric lines to ${
+          autoSyncPreview.analysis.estimatedBpm
+            ? `~${autoSyncPreview.analysis.estimatedBpm} BPM `
+            : ''
+        }beats.`
+      );
+    }
+    setAutoSyncPreview(null);
+  };
+
+  const applySingleAutoSyncSuggestion = (suggestion: LyricBeatSuggestion) => {
+    if (!autoSyncPreview || autoSyncPreview.source !== 'existing') return;
+    const nextLyrics = lyrics
+      .map((cue) =>
+        cue.id === suggestion.id ? { ...cue, time: suggestion.suggestedTime } : cue
+      )
+      .sort((a, b) => a.time - b.time);
+    onLyricsChange(nextLyrics);
+    const remaining = autoSyncPreview.suggestions.filter((s) => s.id !== suggestion.id);
+    if (remaining.length === 0) {
+      setAutoSyncPreview(null);
+      setAutoSyncNotice('Applied beat-aligned timestamp.');
+    } else {
+      setAutoSyncPreview({
+        ...autoSyncPreview,
+        suggestions: remaining,
+      });
+    }
   };
 
   return (
@@ -863,12 +1072,28 @@ export function ControlSidebar({
             <section className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
-                <span className="text-[11px] font-mono text-slate-400">
+                <span className="text-[11px] font-mono tabular-nums text-slate-400">
                   {VISUALIZER_MODES.length} styles
                 </span>
               </div>
-              <div className="space-y-1.5">
-                {VISUALIZER_MODES.map((mode) => {
+              <input
+                type="search"
+                value={modeQuery}
+                onChange={(e) => setModeQuery(e.target.value)}
+                placeholder="Filter visualizer styles..."
+                aria-label="Filter visualizer styles"
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/60"
+              />
+              <div className="space-y-1.5 max-h-[296px] overflow-y-auto studio-scroll pr-0.5">
+                {VISUALIZER_MODES.filter((mode) => {
+                  const q = modeQuery.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    mode.name.toLowerCase().includes(q) ||
+                    mode.desc.toLowerCase().includes(q) ||
+                    mode.id.toLowerCase().includes(q)
+                  );
+                }).map((mode) => {
                   const active = settings.visualizerMode === mode.id;
                   return (
                     <button
@@ -1037,35 +1262,246 @@ export function ControlSidebar({
                 </p>
               </div>
 
+              <div className="space-y-2.5">
+                {(() => {
+                  const activeBloomPreset = resolveActiveBloomPreset(settings);
+                  const activeBloomConfig = BLOOM_PRESETS.find((p) => p.key === activeBloomPreset);
+                  const radiusVal = settings.bloomRadius ?? DEFAULT_BLOOM_SHADER_PARAMS.bloomRadius;
+                  const spreadVal = settings.bloomSpread ?? DEFAULT_BLOOM_SHADER_PARAMS.bloomSpread;
+                  const satVal =
+                    settings.bloomSaturation ?? DEFAULT_BLOOM_SHADER_PARAMS.bloomSaturation;
+
+                  return (
+                    <>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label
+                            htmlFor="bloom-presets-select"
+                            className="text-[11px] font-medium text-slate-300"
+                          >
+                            Bloom Presets
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setShowBloomShaderParams((v) => !v)}
+                            className="text-[10.5px] font-medium text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            {showBloomShaderParams ? 'Hide Shader' : 'Tune Shader'}
+                          </button>
+                        </div>
+
+                        <select
+                          id="bloom-presets-select"
+                          aria-label="Bloom Presets"
+                          value={activeBloomPreset}
+                          onChange={(e) => {
+                            const val = e.target.value as BloomPresetKey;
+                            if (val === 'custom') return;
+                            onUpdateSettings(getBloomPresetPatch(val));
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                        >
+                          {BLOOM_PRESETS.map((preset) => (
+                            <option key={preset.key} value={preset.key} className="bg-[#090b10]">
+                              {preset.name}
+                            </option>
+                          ))}
+                          {activeBloomPreset === 'custom' && (
+                            <option value="custom" className="bg-[#090b10]">
+                              Custom (Modified)
+                            </option>
+                          )}
+                        </select>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] mb-1">
+                          <span className="text-slate-400">
+                            Bloom Intensity
+                            {midiMappingBadges?.bloomIntensity && (
+                              <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                                · {midiMappingBadges.bloomIntensity}
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono tabular-nums text-cyan-400">
+                            {settings.bloomIntensity === 0
+                              ? 'Off'
+                              : `${Math.round(settings.bloomIntensity * 100)}%`}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1.5}
+                          step={0.05}
+                          value={settings.bloomIntensity}
+                          onChange={(e) => {
+                            const nextVal = parseFloat(e.target.value);
+                            onUpdateSettings({
+                              bloomIntensity: nextVal,
+                              bloomPreset: nextVal <= 0.005 ? 'off' : 'custom',
+                            });
+                          }}
+                          className="studio-range w-full"
+                        />
+                        <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500 mt-1">
+                          <span className="truncate">
+                            {activeBloomConfig
+                              ? activeBloomConfig.description
+                              : 'Custom intensity & multi-pass shader parameters.'}
+                          </span>
+                        </div>
+                        <div className="text-[10px] font-mono tabular-nums text-slate-400 mt-0.5">
+                          Radius {radiusVal.toFixed(2)}× · Haze {Math.round(spreadVal * 100)}% · Sat{' '}
+                          {Math.round(satVal * 100)}%
+                        </div>
+                      </div>
+
+                      {showBloomShaderParams && (
+                        <div className="p-2.5 rounded-lg bg-[#090b10] border border-white/[0.07] space-y-2.5">
+                          <div>
+                            <div className="flex justify-between text-[10.5px] mb-1">
+                              <span className="text-slate-400">Blur Kernel Radius</span>
+                              <span className="font-mono tabular-nums text-cyan-400">
+                                {radiusVal.toFixed(2)}×
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={2.2}
+                              step={0.05}
+                              aria-label="Blur Kernel Radius"
+                              value={radiusVal}
+                              onChange={(e) =>
+                                onUpdateSettings({
+                                  bloomRadius: parseFloat(e.target.value),
+                                  bloomPreset: 'custom',
+                                })
+                              }
+                              className="studio-range w-full"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex justify-between text-[10.5px] mb-1">
+                              <span className="text-slate-400">Atmospheric Haze Spread</span>
+                              <span className="font-mono tabular-nums text-cyan-400">
+                                {Math.round(spreadVal * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.02}
+                              aria-label="Atmospheric Haze Spread"
+                              value={spreadVal}
+                              onChange={(e) =>
+                                onUpdateSettings({
+                                  bloomSpread: parseFloat(e.target.value),
+                                  bloomPreset: 'custom',
+                                })
+                              }
+                              className="studio-range w-full"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex justify-between text-[10.5px] mb-1">
+                              <span className="text-slate-400">Glow Saturation Drive</span>
+                              <span className="font-mono tabular-nums text-cyan-400">
+                                {Math.round(satVal * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.7}
+                              max={1.8}
+                              step={0.02}
+                              aria-label="Glow Saturation Drive"
+                              value={satVal}
+                              onChange={(e) =>
+                                onUpdateSettings({
+                                  bloomSaturation: parseFloat(e.target.value),
+                                  bloomPreset: 'custom',
+                                })
+                              }
+                              className="studio-range w-full"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
                   <span className="text-slate-400">
-                    Bloom Intensity
-                    {midiMappingBadges?.bloomIntensity && (
+                    Glitch Intensity
+                    {midiMappingBadges?.glitchIntensity && (
                       <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
-                        · {midiMappingBadges.bloomIntensity}
+                        · {midiMappingBadges.glitchIntensity}
                       </span>
                     )}
                   </span>
                   <span className="font-mono tabular-nums text-cyan-400">
-                    {settings.bloomIntensity === 0
+                    {(settings.glitchIntensity ?? 0) === 0
                       ? 'Off'
-                      : `${Math.round(settings.bloomIntensity * 100)}%`}
+                      : `${Math.round((settings.glitchIntensity ?? 0) * 100)}%`}
                   </span>
                 </div>
                 <input
                   type="range"
                   min={0}
-                  max={1.5}
+                  max={1}
                   step={0.05}
-                  value={settings.bloomIntensity}
+                  aria-label="Glitch Intensity"
+                  value={settings.glitchIntensity ?? 0}
                   onChange={(e) =>
-                    onUpdateSettings({ bloomIntensity: parseFloat(e.target.value) })
+                    onUpdateSettings({ glitchIntensity: parseFloat(e.target.value) })
                   }
                   className="studio-range w-full"
                 />
                 <p className="text-[10px] text-slate-500 mt-1">
-                  Additive lighter glow across multi-pass blur layers on reactive visuals.
+                  Triggers randomized frame-dropping, RGB chromatic aberration, and slice tears on
+                  heavy drum hits.
+                </p>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[11px] mb-1">
+                  <span className="text-slate-400">
+                    Bass Shake
+                    {midiMappingBadges?.bassShake && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.bassShake}
+                      </span>
+                    )}
+                  </span>
+                  <span className="font-mono tabular-nums text-cyan-400">
+                    {(settings.bassShake ?? 0) === 0
+                      ? 'Off'
+                      : `${Math.round((settings.bassShake ?? 0) * 100)}%`}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  aria-label="Bass Shake"
+                  value={settings.bassShake ?? 0}
+                  onChange={(e) =>
+                    onUpdateSettings({ bassShake: parseFloat(e.target.value) })
+                  }
+                  className="studio-range w-full"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Subtly oscillates and punches the canvas camera on heavy 140 Hz bass hits.
                 </p>
               </div>
             </section>
@@ -1152,6 +1588,14 @@ export function ControlSidebar({
                 </p>
               )}
             </section>
+
+            <hr className="border-white/[0.07]" />
+
+            <SceneTransitionPanel
+              settings={settings}
+              onUpdateSettings={onUpdateSettings}
+              onPreviewTransition={onPreviewSceneTransition}
+            />
           </>
         )}
 
@@ -1234,6 +1678,14 @@ export function ControlSidebar({
 
             <hr className="border-white/[0.07]" />
 
+            <SceneTransitionPanel
+              settings={settings}
+              onUpdateSettings={onUpdateSettings}
+              onPreviewTransition={onPreviewSceneTransition}
+            />
+
+            <hr className="border-white/[0.07]" />
+
             <section ref={autoCaptionsSectionRef} className="space-y-2.5">
               <h2 className="text-xs font-semibold text-slate-200">Automatic Captions</h2>
               <button
@@ -1313,14 +1765,26 @@ export function ControlSidebar({
                     placeholder="Paste plain lyrics (one line per cue) to stamp timestamps in real time..."
                     className="w-full min-h-[144px] p-3 rounded-lg bg-[#090b10] border border-white/[0.09] text-[13px] leading-relaxed text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-cyan-400/60 resize-y"
                   />
-                  <button
-                    type="button"
-                    disabled={!rawLyricsText.trim()}
-                    onClick={startTapToSync}
-                    className="w-full py-2 px-3 rounded-lg text-xs font-semibold bg-white/[0.07] hover:bg-white/[0.12] text-slate-100 border border-white/[0.09] transition-colors disabled:opacity-40 cursor-pointer"
-                  >
-                    Start Tap-to-Sync Mode
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={!rawLyricsText.trim()}
+                      onClick={startTapToSync}
+                      className="py-2 px-2.5 rounded-lg text-xs font-semibold bg-white/[0.07] hover:bg-white/[0.12] text-slate-100 border border-white/[0.09] transition-colors disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                    >
+                      Tap-to-Sync
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!hasAudio || !rawLyricsText.trim()}
+                      onClick={() => runAutoSyncPlainText(2)}
+                      title="Analyze audio beats and suggest timestamps for pasted lyrics"
+                      className="py-2 px-2.5 rounded-lg text-xs font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/35 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                    >
+                      <Activity className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <span>Auto-Sync Beats</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div
@@ -1376,16 +1840,28 @@ export function ControlSidebar({
             <hr className="border-white/[0.07]" />
 
             <section className="space-y-2.5">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold text-slate-200">
                   Synced Cue List ({lyrics.length})
                 </h2>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
+                  {lyrics.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={!hasAudio}
+                      onClick={() => runAutoSyncExisting(0.45)}
+                      title="Align existing lyric cues to detected kick/drum beats"
+                      className="px-2 py-1 rounded-md text-[10.5px] font-medium bg-cyan-500/12 hover:bg-cyan-500/22 text-cyan-300 border border-cyan-400/30 transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 whitespace-nowrap"
+                    >
+                      <Activity className="w-3 h-3" />
+                      <span>Auto-Sync</span>
+                    </button>
+                  )}
                   {lyrics.length > 0 && (
                     <button
                       type="button"
                       onClick={handleDownloadLrc}
-                      className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                      className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer whitespace-nowrap"
                     >
                       Save .lrc
                     </button>
@@ -1403,13 +1879,170 @@ export function ControlSidebar({
                       ].sort((a, b) => a.time - b.time);
                       onLyricsChange(next);
                     }}
-                    className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-0.5 cursor-pointer"
+                    className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-0.5 cursor-pointer whitespace-nowrap"
                   >
                     <Plus className="w-3 h-3" />
                     <span>Add Cue</span>
                   </button>
                 </div>
               </div>
+
+              {autoSyncNotice && (
+                <div
+                  role="status"
+                  className="px-3 py-2 rounded-lg border bg-emerald-500/10 border-emerald-500/30 text-[11px] text-emerald-200 flex items-center justify-between gap-2"
+                >
+                  <span className="leading-snug">{autoSyncNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setAutoSyncNotice(null)}
+                    className="text-[10px] opacity-75 hover:opacity-100 shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {autoSyncPreview && (
+                <div
+                  role="region"
+                  aria-label="Beat Auto-Sync timestamp suggestions"
+                  className="p-3 rounded-lg bg-[#090b10] border border-cyan-400/40 space-y-2.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-cyan-300">
+                        Auto-Sync Suggestions
+                      </div>
+                      <div className="text-[10.5px] font-mono tabular-nums text-slate-400 mt-0.5">
+                        {autoSyncPreview.analysis.beats.length} beats detected
+                        {autoSyncPreview.analysis.estimatedBpm
+                          ? ` · ~${autoSyncPreview.analysis.estimatedBpm} BPM`
+                          : ''}
+                        {' · '}
+                        {autoSyncPreview.suggestions.filter((s) => s.matchedBeat).length}/
+                        {autoSyncPreview.suggestions.length} beat-locked
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAutoSyncPreview(null)}
+                      className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer shrink-0"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+
+                  {autoSyncPreview.source === 'existing' ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10.5px] text-slate-400">Snap Window</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {([0.25, 0.45, 0.7] as const).map((win) => (
+                          <button
+                            key={win}
+                            type="button"
+                            onClick={() => updateAutoSyncSnapWindow(win)}
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono tabular-nums border transition-colors cursor-pointer ${
+                              autoSyncPreview.snapWindowSec === win
+                                ? 'bg-cyan-400 text-[#090b10] border-cyan-400 font-semibold'
+                                : 'bg-[#121620] text-slate-300 border-white/[0.08] hover:border-white/[0.18]'
+                            }`}
+                          >
+                            ±{Math.round(win * 1000)}ms
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10.5px] text-slate-400">Beat Spacing</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {([1, 2, 4] as const).map((step) => (
+                          <button
+                            key={step}
+                            type="button"
+                            onClick={() => updateAutoSyncBeatsPerLine(step)}
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono tabular-nums border transition-colors cursor-pointer whitespace-nowrap ${
+                              autoSyncPreview.beatsPerLine === step
+                                ? 'bg-cyan-400 text-[#090b10] border-cyan-400 font-semibold'
+                                : 'bg-[#121620] text-slate-300 border-white/[0.08] hover:border-white/[0.18]'
+                            }`}
+                          >
+                            {step === 1 ? '1 Beat' : `${step} Beats`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="max-h-[196px] overflow-y-auto studio-scroll space-y-1 pr-0.5">
+                    {autoSyncPreview.suggestions.map((item) => {
+                      const hasDelta =
+                        item.originalTime !== null && Math.abs(item.deltaMs) >= 10;
+                      const deltaStr =
+                        item.originalTime === null
+                          ? item.matchedBeat
+                            ? 'beat'
+                            : 'grid'
+                          : hasDelta
+                          ? `${item.deltaMs > 0 ? '+' : ''}${item.deltaMs}ms`
+                          : 'aligned';
+
+                      return (
+                        <div
+                          key={item.id}
+                          className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#121620] border border-white/[0.07] text-[11px]"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onSeek(item.suggestedTime)}
+                            title="Jump preview to suggested beat timestamp"
+                            className="font-mono tabular-nums text-cyan-300 hover:text-cyan-200 shrink-0 cursor-pointer"
+                          >
+                            [{formatLrcTimestamp(item.suggestedTime)}]
+                          </button>
+                          <span
+                            className={`font-mono tabular-nums text-[10px] shrink-0 ${
+                              hasDelta
+                                ? 'text-amber-300'
+                                : item.matchedBeat
+                                ? 'text-emerald-400'
+                                : 'text-slate-500'
+                            }`}
+                          >
+                            {deltaStr}
+                          </span>
+                          <span className="flex-1 min-w-0 truncate text-slate-200">
+                            {item.text}
+                          </span>
+                          {autoSyncPreview.source === 'existing' && (
+                            <button
+                              type="button"
+                              onClick={() => applySingleAutoSyncSuggestion(item)}
+                              title="Apply this suggestion"
+                              aria-label={`Apply beat timestamp to ${item.text}`}
+                              className="p-0.5 rounded text-slate-400 hover:text-emerald-300 hover:bg-emerald-500/10 cursor-pointer shrink-0"
+                            >
+                              <Check className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={applyAllAutoSyncSuggestions}
+                    className="w-full py-2 px-3 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>
+                      Apply All Timestamps ({autoSyncPreview.suggestions.length})
+                    </span>
+                  </button>
+                </div>
+              )}
 
               {lyrics.length === 0 ? (
                 <p className="text-[11px] text-slate-500 py-3 text-center border border-dashed border-white/[0.08] rounded-lg">
@@ -1453,49 +2086,10 @@ export function ControlSidebar({
         {/* 5. STYLE & TEXT TAB */}
         {activeTab === 'style' && (
           <>
-            <section className="space-y-2.5">
-              <h2 className="text-xs font-semibold text-slate-200">Color Presets</h2>
-              <div className="grid grid-cols-2 gap-2">
-                {THEME_PRESETS.map((preset) => {
-                  const active = settings.themePreset === preset.key;
-                  return (
-                    <button
-                      key={preset.key}
-                      type="button"
-                      onClick={() =>
-                        onUpdateSettings({
-                          themePreset: preset.key,
-                          primaryColor: preset.primaryColor,
-                          secondaryColor: preset.secondaryColor,
-                          bgColor: preset.bgColor,
-                        })
-                      }
-                      className={`p-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-cyan-500/12 border-cyan-400/45 text-slate-100'
-                          : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        <span
-                          className="w-3 h-3 rounded-full border border-white/20"
-                          style={{ backgroundColor: preset.primaryColor }}
-                        />
-                        <span
-                          className="w-3 h-3 rounded-full border border-white/20"
-                          style={{ backgroundColor: preset.secondaryColor }}
-                        />
-                        <span
-                          className="w-3 h-3 rounded-full border border-white/20"
-                          style={{ backgroundColor: preset.bgColor }}
-                        />
-                      </div>
-                      <div className="text-[11px] font-medium truncate">{preset.name}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+            <ColorHarmonyPanel
+              settings={settings}
+              onUpdateSettings={onUpdateSettings}
+            />
 
             <hr className="border-white/[0.07]" />
 

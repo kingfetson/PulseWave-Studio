@@ -294,8 +294,11 @@ export async function shareVideoViaWebShare(
   try {
     const response = await fetch(asset.downloadUrl);
     const blob = await response.blob();
+    const fallbackMime = asset.downloadFileName.toLowerCase().endsWith('.webm')
+      ? 'video/webm'
+      : 'video/mp4';
     const file = new File([blob], asset.downloadFileName, {
-      type: 'video/mp4',
+      type: blob.type || fallbackMime,
     });
 
     if (!navigator.canShare({ files: [file] })) {

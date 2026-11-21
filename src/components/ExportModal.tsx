@@ -13,6 +13,7 @@ import {
   Download,
   Eye,
   Film,
+  FolderArchive,
   Layers,
   Loader2,
   Play,
@@ -29,6 +30,7 @@ import {
   ASPECT_RATIOS,
   AspectRatioKey,
   AudioBitrateKbps,
+  BatchCompletionSummary,
   BatchExportJob,
   EXPORT_BITRATE_PRESETS,
   ExportProfile,
@@ -42,6 +44,7 @@ import {
   VisualizerMode,
 } from '../types/studio';
 import { computeAutoArrangeFraming } from '../utils/autoArrange';
+import { exportCompletedBatchToZip } from '../utils/batchZipExport';
 import type { BrowserNotificationPermission } from '../utils/batchNotifications';
 import {
   estimateMp4SizeMb,
@@ -51,6 +54,11 @@ import {
 } from '../utils/exportProfiles';
 import { formatShortTime, parseTimeInput } from '../utils/lrcParser';
 import { sanitizeFileName } from '../utils/mp4Exporter';
+import {
+  BrowserExportCapabilities,
+  probeBrowserExportCapabilities,
+} from '../utils/videoMimeSupport';
+import { BatchSummaryCard } from './BatchSummaryCard';
 
 export type ExportModalView = 'single' | 'batch';
 
@@ -80,12 +88,7 @@ interface ExportModalProps {
   onToggleAutoDownloadBatch: (value: boolean) => void;
   notifyOnBatchComplete: boolean;
   notificationPermission: BrowserNotificationPermission;
-  batchCompletionBanner: {
-    completedCount: number;
-    failedCount: number;
-    totalElapsedMs: number;
-    desktopSent: boolean;
-  } | null;
+  batchCompletionBanner: BatchCompletionSummary | null;
   onToggleNotifyOnBatchComplete: (value: boolean) => void;
   onRequestNotificationPermission: () => void;
   onDismissBatchCompletionBanner: () => void;
@@ -128,6 +131,16 @@ const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'galaxy-spiral', label: 'Galaxy Vortex' },
   { id: 'cyber-tunnel', label: 'Warp Tunnel' },
   { id: 'seismic-ridges', label: 'Seismic Ridges' },
+  { id: 'dna-helix', label: 'DNA Helix' },
+  { id: 'radar-sonar', label: 'Sonar Radar' },
+  { id: 'lissajous-scope', label: 'Lissajous Scope' },
+  { id: 'rain-matrix', label: 'Digital Rain' },
+  { id: 'flower-mandala', label: 'Lotus Mandala' },
+  { id: 'vortex-rings', label: '3D Gyroscope' },
+  { id: 'isometric-city', label: 'Iso Equalizer' },
+  { id: 'analog-vu', label: 'Dual VU Meters' },
+  { id: 'kaleido-shards', label: 'Kaleidoscope' },
+  { id: 'flame-corona', label: 'Solar Corona' },
 ];
 
 const LYRIC_STYLE_OPTIONS: Array<{ id: LyricStyle; label: string }> = [
@@ -868,6 +881,24 @@ export function ExportModal({
   const [profileNameInput, setProfileNameInput] = useState('');
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const [autoArrangeOnProfileRatio, setAutoArrangeOnProfileRatio] = useState(true);
+  const [exportCaps, setExportCaps] = useState<BrowserExportCapabilities | null>(null);
+  const [isExportingZip, setIsExportingZip] = useState(false);
+  const [zipProgressPct, setZipProgressPct] = useState(0);
+  const [zipNotice, setZipNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    void probeBrowserExportCapabilities().then((caps) => {
+      if (!cancelled) setExportCaps(caps);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     if (!profileNotice) return;
@@ -877,11 +908,18 @@ export function ExportModal({
 
   if (!isOpen) return null;
 
+  const activeContainerLabel = exportCaps
+    ? exportCaps.extension.toUpperCase()
+    : 'MP4';
+  const activeFormatSummary = exportCaps
+    ? exportCaps.label
+    : 'MP4 (H.264 + AAC)';
+
   const isSingleRunning =
     state.status === 'preparing' ||
     state.status === 'rendering' ||
     state.status === 'muxing';
-  const isAnyRunning = isSingleRunning || isBatchRunning;
+  const isAnyRunning = isSingleRunning || isBatchRunning || isExportingZip;
   const matchedActiveProfile = findMatchingExportProfile(currentSettings, exportProfiles);
   const resolvedSingleDims = resolveExportDimensions(
     currentSettings.aspectRatio,
@@ -1016,6 +1054,39 @@ export function ExportModal({
     ]);
   };
 
+  const handleExportBatchToFolder = async () => {
+    if (isExportingZip || isBatchRunning || completedBatchJobs.length === 0) return;
+    setIsExportingZip(true);
+    setZipProgressPct(0);
+    setZipNotice(null);
+    try {
+      const result = await exportCompletedBatchToZip({
+        jobs: completedBatchJobs,
+        trackTitle: currentSettings.trackTitle,
+        onProgress: (p) => {
+          setZipProgressPct(p.percentage);
+        },
+      });
+      const sizeMb = (result.totalBytes / (1024 * 1024)).toFixed(1);
+      setZipNotice({
+        type: 'success',
+        text: `Archived ${result.fileCount} ${
+          result.fileCount === 1 ? 'video' : 'videos'
+        } into ${result.zipFileName} (${sizeMb} MB)`,
+      });
+    } catch (err) {
+      setZipNotice({
+        type: 'error',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Failed to create ZIP archive of completed videos.',
+      });
+    } finally {
+      setIsExportingZip(false);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1055,23 +1126,31 @@ export function ExportModal({
                 {view === 'batch'
                   ? 'Batch Export Queue'
                   : state.status === 'completed'
-                  ? 'MP4 Export Complete'
+                  ? `${
+                      state.downloadFileName?.toLowerCase().endsWith('.webm')
+                        ? 'WebM'
+                        : 'MP4'
+                    } Export Complete`
                   : state.status === 'error'
                   ? 'Export Failed'
                   : state.status === 'cancelled'
                   ? 'Export Cancelled'
                   : state.status === 'idle'
-                  ? 'Export MP4'
-                  : 'Rendering Offline MP4'}
+                  ? `Export ${activeContainerLabel}`
+                  : `Rendering Offline ${activeContainerLabel}`}
               </h3>
               <p className="text-xs text-slate-400 mt-0.5 truncate">
                 {view === 'batch'
                   ? `${batchJobs.length} ${
                       batchJobs.length === 1 ? 'item' : 'items'
-                    } queued · Sequential WebCodecs H.264 + AAC`
+                    } queued · Sequential ${activeFormatSummary}`
                   : state.status === 'completed'
                   ? state.downloadFileName
-                  : 'WebCodecs H.264 + AAC hardware pipeline'}
+                  : `${
+                      exportCaps?.pipeline === 'mediarecorder'
+                        ? 'MediaRecorder compatibility pipeline'
+                        : 'WebCodecs hardware pipeline'
+                    } · ${activeFormatSummary}`}
               </p>
             </div>
           </div>
@@ -1381,7 +1460,7 @@ export function ExportModal({
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <div className="space-y-1">
-                        <span className="text-[10.5px] text-slate-400">Audio AAC Bitrate</span>
+                        <span className="text-[10.5px] text-slate-400">Audio Bitrate</span>
                         <div className="grid grid-cols-4 gap-1 p-1 rounded-lg bg-[#090b10] border border-white/[0.08]">
                           {([128, 192, 256, 320] as AudioBitrateKbps[]).map((kbps) => (
                             <button
@@ -1439,8 +1518,8 @@ export function ExportModal({
                       <span className="text-slate-400">Output Stream</span>
                       <span className="font-mono tabular-nums text-slate-200 text-right">
                         {resolvedSingleDims.width}×{resolvedSingleDims.height} ·{' '}
-                        {currentSettings.exportFps}fps · {currentSettings.videoBitrateMbps} Mbps H.264 ·{' '}
-                        {currentSettings.audioBitrateKbps}k AAC
+                        {currentSettings.exportFps}fps · {currentSettings.videoBitrateMbps} Mbps ·{' '}
+                        {currentSettings.audioBitrateKbps}k · {activeFormatSummary}
                       </span>
                     </div>
                     <div className="flex justify-between text-xs gap-2">
@@ -1505,7 +1584,7 @@ export function ExportModal({
                       className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      <span>Render MP4</span>
+                      <span>Render {activeContainerLabel}</span>
                     </button>
                   )}
                   {state.status === 'completed' &&
@@ -1526,7 +1605,12 @@ export function ExportModal({
                           className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 whitespace-nowrap"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          <span>Download MP4</span>
+                          <span>
+                            Download{' '}
+                            {state.downloadFileName.toLowerCase().endsWith('.webm')
+                              ? 'WebM'
+                              : 'MP4'}
+                          </span>
                         </a>
                       </>
                     )}
@@ -1652,65 +1736,20 @@ export function ExportModal({
             {/* Scrollable Queue List */}
             <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2.5">
               {batchCompletionBanner && !isBatchRunning && (
-                <div
-                  role="status"
-                  className={`rounded-lg border px-3.5 py-2.5 flex items-center justify-between gap-3 ${
-                    batchCompletionBanner.completedCount > 0
-                      ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-200'
-                      : 'bg-rose-500/10 border-rose-500/35 text-rose-200'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <BellRing className="w-4 h-4 shrink-0 text-emerald-400" />
-                    <div className="min-w-0 text-xs">
-                      <span className="font-semibold">
-                        {batchCompletionBanner.completedCount > 0
-                          ? `Batch Export Ready: ${batchCompletionBanner.completedCount} MP4 ${
-                              batchCompletionBanner.completedCount === 1 ? 'file' : 'files'
-                            } rendered`
-                          : 'Batch Export Finished'}
-                      </span>
-                      <span className="text-slate-300 ml-1.5">
-                        ({(batchCompletionBanner.totalElapsedMs / 1000).toFixed(1)}s
-                        {batchCompletionBanner.failedCount > 0
-                          ? ` · ${batchCompletionBanner.failedCount} failed`
-                          : ''}
-                        {batchCompletionBanner.desktopSent ? ' · Desktop alert sent' : ''})
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {batchCompletionBanner.completedCount > 0 && (
-                      <>
-                        {completedBatchJobs[0] && (
-                          <button
-                            type="button"
-                            onClick={() => onShareBatchJob(completedBatchJobs[0])}
-                            className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer"
-                          >
-                            <Share2 className="w-3 h-3" />
-                            <span>Share</span>
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={onDownloadAllBatch}
-                          className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-400 hover:bg-emerald-300 text-[#090b10] transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          Download All
-                        </button>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      onClick={onDismissBatchCompletionBanner}
-                      aria-label="Dismiss batch notification banner"
-                      className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/[0.08] transition-colors cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
+                <BatchSummaryCard
+                  summary={batchCompletionBanner}
+                  hasShareableJob={Boolean(completedBatchJobs[0])}
+                  isExportingZip={isExportingZip}
+                  zipProgressPct={zipProgressPct}
+                  onShareFirst={() => {
+                    if (completedBatchJobs[0]) {
+                      onShareBatchJob(completedBatchJobs[0]);
+                    }
+                  }}
+                  onDownloadAll={onDownloadAllBatch}
+                  onExportToFolder={() => void handleExportBatchToFolder()}
+                  onDismiss={onDismissBatchCompletionBanner}
+                />
               )}
 
               {batchJobs.length === 0 ? (
@@ -1767,6 +1806,26 @@ export function ExportModal({
                       style={{ width: `${batchTotalPct}%` }}
                     />
                   </div>
+                </div>
+              )}
+
+              {zipNotice && !isBatchRunning && (
+                <div
+                  role="status"
+                  className={`rounded-lg border px-3 py-2 text-[11px] flex items-center justify-between gap-2 ${
+                    zipNotice.type === 'error'
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                  }`}
+                >
+                  <span className="truncate font-mono tabular-nums">{zipNotice.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setZipNotice(null)}
+                    className="text-[10px] opacity-80 hover:opacity-100 shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
                 </div>
               )}
 
@@ -1842,33 +1901,55 @@ export function ExportModal({
                   )}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {isBatchRunning ? (
                     <button
                       type="button"
                       onClick={onCancel}
-                      className="px-4 py-2 rounded-lg text-xs font-medium bg-white/[0.06] hover:bg-white/[0.1] text-slate-200 border border-white/[0.08] transition-colors cursor-pointer"
+                      className="px-4 py-2 rounded-lg text-xs font-medium bg-white/[0.06] hover:bg-white/[0.1] text-slate-200 border border-white/[0.08] transition-colors cursor-pointer whitespace-nowrap"
                     >
                       Cancel Batch
                     </button>
                   ) : (
                     <>
                       {completedBatchJobs.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={onDownloadAllBatch}
-                          className="px-3.5 py-2 rounded-lg text-xs font-medium bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/35 transition-colors flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Download All ({completedBatchJobs.length})</span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            disabled={isExportingZip}
+                            onClick={() => void handleExportBatchToFolder()}
+                            title="Package all completed videos into a single ZIP folder archive"
+                            className="px-3.5 py-2 rounded-lg text-xs font-medium bg-white/[0.07] hover:bg-white/[0.12] text-slate-100 border border-white/[0.14] transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-60"
+                          >
+                            {isExportingZip ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                            ) : (
+                              <FolderArchive className="w-3.5 h-3.5 text-cyan-400" />
+                            )}
+                            <span>
+                              {isExportingZip
+                                ? `Zipping ${zipProgressPct}%...`
+                                : `Export to Folder (${completedBatchJobs.length})`}
+                            </span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isExportingZip}
+                            onClick={onDownloadAllBatch}
+                            className="px-3.5 py-2 rounded-lg text-xs font-medium bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/35 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Download All ({completedBatchJobs.length})</span>
+                          </button>
+                        </>
                       )}
 
                       <button
                         type="button"
-                        disabled={pendingBatchJobs.length === 0}
+                        disabled={pendingBatchJobs.length === 0 || isExportingZip}
                         onClick={onStartBatchExport}
-                        className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                        className="px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
                       >
                         <Play className="w-3.5 h-3.5 fill-current" />
                         <span>
@@ -1878,8 +1959,9 @@ export function ExportModal({
 
                       <button
                         type="button"
+                        disabled={isExportingZip}
                         onClick={onClose}
-                        className="px-3.5 py-2 rounded-lg text-xs font-medium bg-white/[0.06] hover:bg-white/[0.1] text-slate-200 border border-white/[0.08] transition-colors cursor-pointer"
+                        className="px-3.5 py-2 rounded-lg text-xs font-medium bg-white/[0.06] hover:bg-white/[0.1] text-slate-200 border border-white/[0.08] transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                       >
                         Close
                       </button>
