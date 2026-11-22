@@ -20,6 +20,7 @@ import {
   stepBeatDetector,
 } from '../utils/audioEngine';
 import { renderVisualizerFrame } from '../utils/canvasRenderer';
+import { resolveAutoCycledColors } from '../utils/colorHarmony';
 import {
   ResolvedVideoConfig,
   resolveSupportedVideoConfigForContainer,
@@ -39,6 +40,7 @@ export interface StartWorkerExportPayload {
   numberOfChannels: number;
   channels: Float32Array[];
   trimStart: number;
+  trackDuration?: number;
   settings: StudioSettings;
   lyrics: LyricLine[];
   bgBitmap: ImageBitmap | null;
@@ -107,6 +109,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     numberOfChannels,
     channels,
     trimStart,
+    trackDuration,
     settings,
     lyrics,
     bgBitmap,
@@ -340,7 +343,8 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     const needsBeatDetector =
       settings.beatDetection ||
       (settings.glitchIntensity ?? 0) > 0 ||
-      (settings.bassShake ?? 0) > 0;
+      (settings.bassShake ?? 0) > 0 ||
+      (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(pcmInput, 140, 1.2)
       : null;
@@ -368,6 +372,14 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
 
       analyzer.analyzeAt(localTime, settings.smoothing, frequencyData, timeDomainData);
 
+      const trackDurationForCycle =
+        trackDuration && trackDuration > 0 ? trackDuration : trimStart + length / sampleRate;
+      const cycled = resolveAutoCycledColors(
+        settings,
+        absoluteTrackTime,
+        trackDurationForCycle
+      );
+
       let beatBurst = 0;
       let beatTriggered = false;
       if (beatTracker && needsBeatDetector) {
@@ -378,8 +390,8 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
           dt,
           settings.beatSensitivity,
           minDim,
-          settings.primaryColor,
-          settings.secondaryColor
+          cycled.primaryColor,
+          cycled.secondaryColor
         );
         beatBurst = step.burstIntensity;
         beatTriggered = step.triggered;
@@ -404,6 +416,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
         beatTriggered,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
+        trackDuration: trackDurationForCycle,
       });
 
       const timestampUs = Math.round(localTime * 1_000_000);

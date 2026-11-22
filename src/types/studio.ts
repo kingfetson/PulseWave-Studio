@@ -54,9 +54,80 @@ export type VisualizerMode =
   | 'isometric-city'
   | 'analog-vu'
   | 'kaleido-shards'
-  | 'flame-corona';
+  | 'flame-corona'
+  | 'radial-bars-inward'
+  | 'spectrum-waterfall'
+  | 'pendulum-wave'
+  | 'constellation-net'
+  | 'waveform-mirror'
+  | 'hex-hive'
+  | 'plasma-field'
+  | 'laser-fan'
+  | 'synth-grid'
+  | 'orbit-atoms'
+  | 'bar-arc'
+  | 'dot-equalizer'
+  | 'lightning-bolts'
+  | 'pixel-mosaic'
+  | 'ripple-pond'
+  | 'spiral-bars'
+  | 'pyramid-3d'
+  | 'heartbeat-ecg'
+  | 'ribbon-knot'
+  | 'starburst-rays'
+  | 'glass-shards'
+  | 'vinyl-grooves'
+  | 'staircase-eq'
+  | 'infinity-loop'
+  | 'chromatic-rings'
+  | 'sound-curtain'
+  | 'cyber-compass'
+  | 'nebula-clouds';
 
-export type LyricStyle = 'karaoke' | 'single-pop' | 'subtitle-bar';
+export type ParticleShape =
+  | 'circle'
+  | 'diamond'
+  | 'star'
+  | 'square'
+  | 'triangle'
+  | 'ring';
+
+export const PARTICLE_FLOW_COLS = 16;
+export const PARTICLE_FLOW_ROWS = 12;
+
+export function createEmptyParticleFlowMap(): number[] {
+  return new Array(PARTICLE_FLOW_COLS * PARTICLE_FLOW_ROWS * 2).fill(0);
+}
+
+export type LyricStyle =
+  | 'karaoke'
+  | 'single-pop'
+  | 'subtitle-bar'
+  | 'neon-outline'
+  | 'typewriter'
+  | 'cinematic-serif'
+  | 'word-sweep'
+  | 'glass-card'
+  | 'bold-impact'
+  | 'split-reveal'
+  | 'ticker-ribbon'
+  | 'floating-cloud'
+  | 'cyber-hud'
+  | 'retro-arcade'
+  | 'editorial-quote'
+  | 'vinyl-sleeve'
+  | 'glitch-flash'
+  | 'duotone-badge'
+  | 'vertical-spine'
+  | 'wave-bounce';
+
+export type LyricsOnlyLayout = 'half-verse' | 'full-verse' | 'full-lyrics';
+
+export type BackgroundFitMode = 'cover' | 'contain-blur' | 'stretch';
+
+export type CoverCardSource = 'auto' | 'bg' | 'album';
+
+export type CoverCardPosition = 'top-left' | 'top-center' | 'center';
 
 export type FadeType = 'linear' | 'logarithmic' | 'exponential';
 
@@ -77,6 +148,8 @@ export type BloomPresetKey =
   | 'neon-bloom'
   | 'aggressive-flare'
   | 'custom';
+
+export type MotionBlurPresetKey = 'none' | 'trails' | 'ghosting' | 'stutter';
 
 export type ExportResolution = '720p' | '1080p' | '1440p';
 
@@ -227,16 +300,21 @@ export interface SavedPreset {
 export interface StudioSettings {
   aspectRatio: AspectRatioKey;
   visualizerMode: VisualizerMode;
+  lyricsOnly: boolean;
+  lyricsOnlyLayout: LyricsOnlyLayout;
   lyricStyle: LyricStyle;
   themePreset: ThemePresetKey | 'custom';
   primaryColor: string;
   secondaryColor: string;
   bgColor: string;
+  autoCycleColor?: boolean;
+  colorCycleSpeed?: number; // 0.25 - 8.0 rotations across track progress
   sensitivity: number; // 0.5 - 2.5
   barCount: number; // 32 - 160
   smoothing: number; // 0.1 - 0.95
   visualizerScale: number; // 0.55 - 1.5
   motionBlur: number; // 0 - 0.85 (previous frame trail opacity)
+  motionBlurPreset?: MotionBlurPresetKey;
   bloomIntensity: number; // 0 - 1.5 (additive lighter blur bloom)
   bloomPreset?: BloomPresetKey;
   bloomRadius?: number; // 0.5 - 2.2 (multi-pass blur kernel multiplier)
@@ -250,8 +328,25 @@ export interface StudioSettings {
   artistName: string;
   showTrackOverlay: boolean;
   lyricPosition: number; // 15 - 92 (% from top)
+  lyricShadowIntensity?: number; // 0 - 2.0 (0 = off, 1 = standard, 2 = deep contrast)
+  lyricBeatSync?: boolean; // scale up & glow active lyrics on detected beats
+  lyricPulseIntensity?: number; // 0 - 2.0 (beat sync scale/glow multiplier)
   bgBlur: number; // 0 - 30
   bgDim: number; // 0 - 0.9
+  bgFit?: BackgroundFitMode;
+  bgScale?: number; // 1.0 - 2.0
+  bgOffsetX?: number; // -50 - 50 (%)
+  bgOffsetY?: number; // -50 - 50 (%)
+  bgBrightness?: number; // 0.4 - 1.6
+  bgContrast?: number; // 0.5 - 1.6
+  bgSaturation?: number; // 0 - 2.0
+  bgVignette?: number; // 0 - 1.0
+  bgTintStrength?: number; // 0 - 0.65
+  showCoverCard?: boolean;
+  coverCardSource?: CoverCardSource;
+  coverCardPosition?: CoverCardPosition;
+  coverCardSize?: number; // 0.6 - 1.4
+  coverCardRadius?: number; // 0 - 32px
   exportFps: 30 | 60;
   exportResolution: ExportResolution;
   bitratePreset: ExportBitratePreset;
@@ -262,6 +357,11 @@ export interface StudioSettings {
   sceneTransitionType: SceneTransitionType;
   sceneTransitionDuration: number; // 0.15 - 1.5 seconds
   sceneTransitionTarget: SceneTransitionTarget;
+  particleEnabled: boolean;
+  particleShape: ParticleShape;
+  particleVelocity: number; // 0.2 - 3.0 multiplier
+  particleLifespan: number; // 0.3 - 3.5 seconds
+  particleFlowMap: number[]; // interleaved [vx, vy] grid (16x12x2)
 }
 
 export interface BeatShockwave {
@@ -281,7 +381,10 @@ export interface BeatState {
 
 export interface MotionBlurState {
   canvas: HTMLCanvasElement | OffscreenCanvas | null;
+  secondaryCanvas?: HTMLCanvasElement | OffscreenCanvas | null;
   hasFrame: boolean;
+  frameIndex?: number;
+  lastPreset?: MotionBlurPresetKey;
 }
 
 export interface SceneTransitionState {

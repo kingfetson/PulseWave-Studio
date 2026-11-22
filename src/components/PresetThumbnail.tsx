@@ -70,7 +70,11 @@ export function PresetThumbnail({ settings }: PresetThumbnailProps) {
 
     // Step multiple simulated frames for particles or motion blur trails
     const steps =
-      settings.visualizerMode === 'hybrid-particles' || settings.motionBlur > 0 ? 10 : 1;
+      (!settings.lyricsOnly &&
+        (settings.visualizerMode === 'hybrid-particles' || settings.particleEnabled)) ||
+      settings.motionBlur > 0
+        ? 10
+        : 1;
     const previewSettings: StudioSettings = {
       ...settings,
       trackTitle: settings.trackTitle.trim() || 'PulseWave',
@@ -111,8 +115,8 @@ export function PresetThumbnail({ settings }: PresetThumbnailProps) {
         particles,
         isExport: true,
         albumRotationRef,
-        beatBurst: settings.beatDetection ? 0.68 : 0,
-        beatTriggered: settings.beatDetection && s === 0,
+        beatBurst: settings.beatDetection || settings.lyricBeatSync ? 0.68 : 0,
+        beatTriggered: (settings.beatDetection || Boolean(settings.lyricBeatSync)) && s === 0,
         beatShockwaves: sampleShockwaves,
         motionBlurState,
       });

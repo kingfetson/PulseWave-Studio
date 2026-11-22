@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
+  ArrowLeftRight,
   AudioWaveform,
   Bookmark,
   Cable,
@@ -27,11 +28,16 @@ import type { MidiMappableParamKey } from '../types/midi';
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
+  BackgroundFitMode,
   BloomPresetKey,
+  CoverCardPosition,
+  CoverCardSource,
   ExportResolution,
   FadeType,
   LyricLine,
+  LyricsOnlyLayout,
   LyricStyle,
+  MotionBlurPresetKey,
   resolveExportDimensions,
   SavedPreset,
   SidebarTab,
@@ -44,6 +50,11 @@ import {
   getBloomPresetPatch,
   resolveActiveBloomPreset,
 } from '../utils/bloomPresets';
+import {
+  getMotionBlurPresetPatch,
+  MOTION_BLUR_PRESETS,
+  resolveActiveMotionBlurPreset,
+} from '../utils/motionBlurPresets';
 import {
   createLyricId,
   formatLrcTimestamp,
@@ -60,7 +71,9 @@ import {
   suggestTimestampsForPlainLyrics,
 } from '../utils/lyricBeatAutoSync';
 import { downloadPresetJson, formatPresetSummary } from '../utils/presetStorage';
+import { resolveAutoCycledColors } from '../utils/colorHarmony';
 import { ColorHarmonyPanel } from './ColorHarmonyPanel';
+import { ParticleSystemPanel } from './ParticleSystemPanel';
 import { PresetThumbnail } from './PresetThumbnail';
 import { SceneTransitionPanel } from './SceneTransitionPanel';
 
@@ -81,8 +94,14 @@ interface ControlSidebarProps {
   isGeneratingDemo: boolean;
   onBgImageSelect: (file: File | null) => void;
   bgImageName: string | null;
+  hasBgImage?: boolean;
   onAlbumImageSelect: (file: File | null) => void;
   albumImageName: string | null;
+  hasAlbumImage?: boolean;
+  onCopyBgToAlbum?: () => void;
+  onCopyAlbumToBg?: () => void;
+  onDownloadCoverThumbnail?: (mode: 'clean-cover' | 'full-stage') => Promise<string>;
+  onSetProjectThumbnailFromCover?: () => Promise<void>;
   lyrics: LyricLine[];
   onLyricsChange: (lyrics: LyricLine[]) => void;
   onSeek: (time: number) => void;
@@ -233,6 +252,146 @@ const VISUALIZER_MODES: Array<{
     name: 'Solar Plasma Corona',
     desc: 'Eclipse core surrounded by multi-octave plasma flares',
   },
+  {
+    id: 'radial-bars-inward',
+    name: 'Implosion Ring',
+    desc: 'Inward-pointing radial spectrum converging on a bass core',
+  },
+  {
+    id: 'spectrum-waterfall',
+    name: 'Neon Waterfall',
+    desc: 'Receding perspective waveform sheets cascading to the horizon',
+  },
+  {
+    id: 'pendulum-wave',
+    name: 'Harmonic Pendulum',
+    desc: 'Coupled phase-shifted swinging bobs synced to frequency bands',
+  },
+  {
+    id: 'constellation-net',
+    name: 'Constellation Net',
+    desc: 'Drifting star-mesh nodes connected by reactive energy filaments',
+  },
+  {
+    id: 'waveform-mirror',
+    name: 'Mirrored Scope',
+    desc: 'Symmetrical top-and-bottom time-domain oscilloscope ribbons',
+  },
+  {
+    id: 'hex-hive',
+    name: 'Hex Honeycomb',
+    desc: 'Audio-illuminated hexagonal lattice cells pulsing to the beat',
+  },
+  {
+    id: 'plasma-field',
+    name: 'EM Flux Field',
+    desc: 'Flowing vector field needles deflected by bass & mid energy',
+  },
+  {
+    id: 'laser-fan',
+    name: 'Concert Laser Fan',
+    desc: 'Sweeping arena spotlight beams rising with spectrum intensity',
+  },
+  {
+    id: 'synth-grid',
+    name: 'Synthwave Horizon',
+    desc: 'Retro sunset disc above a scrolling 3D perspective grid floor',
+  },
+  {
+    id: 'orbit-atoms',
+    name: 'Atomic Orbital',
+    desc: 'Tilted elliptical electron tracks & glowing orbital nodes',
+  },
+  {
+    id: 'bar-arc',
+    name: 'Archway EQ',
+    desc: 'Semi-circular stadium arch equalizer bars with radiant core',
+  },
+  {
+    id: 'dot-equalizer',
+    name: 'LED Dot Matrix',
+    desc: 'Crisp quantized dot-grid equalizer columns with floating caps',
+  },
+  {
+    id: 'lightning-bolts',
+    name: 'Tesla Arcs',
+    desc: 'High-voltage jagged lightning discharges cracking on transients',
+  },
+  {
+    id: 'pixel-mosaic',
+    name: 'Pixel Mosaic',
+    desc: 'Reactive checkerboard tiles scaling luminance with audio bands',
+  },
+  {
+    id: 'ripple-pond',
+    name: 'Acoustic Ripples',
+    desc: 'Concentric water-like resonance waves radiating from center',
+  },
+  {
+    id: 'spiral-bars',
+    name: 'Fibonacci Spiral',
+    desc: 'Golden-angle phyllotaxis spiral bars blooming with volume',
+  },
+  {
+    id: 'pyramid-3d',
+    name: '3D Wire Pyramid',
+    desc: 'Spinning 3D wireframe octahedron & pyramid reactive to bass',
+  },
+  {
+    id: 'heartbeat-ecg',
+    name: 'Pulse ECG Trace',
+    desc: 'Biometric cardiogram trace with rhythmic R-peak beat spikes',
+  },
+  {
+    id: 'ribbon-knot',
+    name: 'Toroidal Knot',
+    desc: 'Continuous 3D Lissajous torus knot modulating with frequency',
+  },
+  {
+    id: 'starburst-rays',
+    name: 'Hypernova Rays',
+    desc: 'Rotating angular light rays & glowing core flare',
+  },
+  {
+    id: 'glass-shards',
+    name: 'Prismatic Shards',
+    desc: 'Fractured floating crystal triangles spinning to treble hits',
+  },
+  {
+    id: 'vinyl-grooves',
+    name: 'Vinyl Resonance',
+    desc: 'Spinning micro-groove record tracks pulsing with waveform modulation',
+  },
+  {
+    id: 'staircase-eq',
+    name: 'Stepped Skyline',
+    desc: 'Cascading architectural silhouette blocks driven by spectrum height',
+  },
+  {
+    id: 'infinity-loop',
+    name: 'Infinity Loop',
+    desc: 'Lemniscate figure-eight ribbon tracing harmonic beads',
+  },
+  {
+    id: 'chromatic-rings',
+    name: 'Chromatic Halo',
+    desc: 'Layered concentric frequency halos offset by stereo phase',
+  },
+  {
+    id: 'sound-curtain',
+    name: 'Acoustic Curtain',
+    desc: 'Swaying vertical silk strings vibrating like plucked harp chords',
+  },
+  {
+    id: 'cyber-compass',
+    name: 'HUD Compass',
+    desc: 'Aerospace rotating azimuth ticks and counter-spinning arcs',
+  },
+  {
+    id: 'nebula-clouds',
+    name: 'Cosmic Nebula',
+    desc: 'Soft volumetric plasma clouds drifting amid sparkling starlight',
+  },
 ];
 
 const LYRIC_STYLES: Array<{
@@ -254,6 +413,91 @@ const LYRIC_STYLES: Array<{
     id: 'subtitle-bar',
     name: 'Subtitle Bar',
     desc: 'Clean bottom-anchored social caption box',
+  },
+  {
+    id: 'neon-outline',
+    name: 'Neon Outline',
+    desc: 'Hollow uppercase stroke typography with glowing neon rim',
+  },
+  {
+    id: 'typewriter',
+    name: 'Typewriter Reveal',
+    desc: 'Monospace character-by-character typing with blinking cursor',
+  },
+  {
+    id: 'cinematic-serif',
+    name: 'Cinematic Serif',
+    desc: 'Editorial serif display framed by hairline accent dividers',
+  },
+  {
+    id: 'word-sweep',
+    name: 'Word Sweep Fill',
+    desc: 'Left-to-right gradient sweep filling each line in sync',
+  },
+  {
+    id: 'glass-card',
+    name: 'Frosted Glass Card',
+    desc: 'Translucent glass panel with left accent bar and crisp shadow',
+  },
+  {
+    id: 'bold-impact',
+    name: 'Bold Impact',
+    desc: 'Heavy uppercase headline punch reacting to bass peaks',
+  },
+  {
+    id: 'split-reveal',
+    name: 'Split Accent',
+    desc: 'Alternating primary-colored words with expanding underline',
+  },
+  {
+    id: 'ticker-ribbon',
+    name: 'Broadcast Ribbon',
+    desc: 'Full-width lower-third gradient banner with neon border strips',
+  },
+  {
+    id: 'floating-cloud',
+    name: 'Floating Stack',
+    desc: '5-line depth-faded vertical stack centered on active lyric',
+  },
+  {
+    id: 'cyber-hud',
+    name: 'Cyber HUD Bracket',
+    desc: 'Monospace telemetry frame with glowing corner brackets',
+  },
+  {
+    id: 'retro-arcade',
+    name: 'Retro Arcade',
+    desc: 'Bold monospace text with dual-offset chromatic 8-bit shadows',
+  },
+  {
+    id: 'editorial-quote',
+    name: 'Editorial Quote',
+    desc: 'Italic magazine pull-quote with vertical bar and quote glyph',
+  },
+  {
+    id: 'vinyl-sleeve',
+    name: 'Minimal Sleeve',
+    desc: 'Liner-note layout with live timestamp pill and clean left text',
+  },
+  {
+    id: 'glitch-flash',
+    name: 'Chromatic Glitch',
+    desc: 'Beat-jittered RGB chromatic split on entrances and bass hits',
+  },
+  {
+    id: 'duotone-badge',
+    name: 'Duotone Badge',
+    desc: 'Vibrant gradient capsule with high-contrast dark knockout type',
+  },
+  {
+    id: 'vertical-spine',
+    name: 'Vertical Spine',
+    desc: 'Central glowing timeline spine with alternating left/right lines',
+  },
+  {
+    id: 'wave-bounce',
+    name: 'Wave Bounce',
+    desc: 'Per-word sine-wave bounce pulsing rhythmically with bass',
   },
 ];
 
@@ -283,6 +527,78 @@ const FADE_TYPES: Array<{
   },
 ];
 
+const BACKDROP_LOOK_PRESETS: Array<{
+  id: string;
+  label: string;
+  patch: Partial<StudioSettings>;
+}> = [
+  {
+    id: 'natural',
+    label: 'Natural',
+    patch: {
+      bgBlur: 0,
+      bgDim: 0.25,
+      bgBrightness: 1,
+      bgContrast: 1,
+      bgSaturation: 1,
+      bgTintStrength: 0,
+      bgVignette: 0.15,
+    },
+  },
+  {
+    id: 'cinema-dark',
+    label: 'Cinema',
+    patch: {
+      bgBlur: 6,
+      bgDim: 0.55,
+      bgBrightness: 0.9,
+      bgContrast: 1.2,
+      bgSaturation: 0.92,
+      bgTintStrength: 0.12,
+      bgVignette: 0.65,
+    },
+  },
+  {
+    id: 'dreamy-bokeh',
+    label: 'Bokeh',
+    patch: {
+      bgBlur: 18,
+      bgDim: 0.42,
+      bgBrightness: 1.05,
+      bgContrast: 0.96,
+      bgSaturation: 1.22,
+      bgTintStrength: 0.24,
+      bgVignette: 0.4,
+    },
+  },
+  {
+    id: 'noir-bw',
+    label: 'Noir B&W',
+    patch: {
+      bgBlur: 4,
+      bgDim: 0.48,
+      bgBrightness: 0.96,
+      bgContrast: 1.32,
+      bgSaturation: 0,
+      bgTintStrength: 0,
+      bgVignette: 0.72,
+    },
+  },
+  {
+    id: 'neon-grade',
+    label: 'Neon Tint',
+    patch: {
+      bgBlur: 10,
+      bgDim: 0.5,
+      bgBrightness: 0.95,
+      bgContrast: 1.18,
+      bgSaturation: 1.38,
+      bgTintStrength: 0.36,
+      bgVignette: 0.52,
+    },
+  },
+];
+
 export function ControlSidebar({
   activeTab,
   onTabChange,
@@ -299,8 +615,14 @@ export function ControlSidebar({
   isGeneratingDemo,
   onBgImageSelect,
   bgImageName,
+  hasBgImage,
   onAlbumImageSelect,
   albumImageName,
+  hasAlbumImage,
+  onCopyBgToAlbum,
+  onCopyAlbumToBg,
+  onDownloadCoverThumbnail,
+  onSetProjectThumbnailFromCover,
   lyrics,
   onLyricsChange,
   onSeek,
@@ -361,8 +683,13 @@ export function ControlSidebar({
     text: string;
   } | null>(null);
   const [modeQuery, setModeQuery] = useState('');
+  const [lyricStyleQuery, setLyricStyleQuery] = useState('');
   const [appliedPresetId, setAppliedPresetId] = useState<string | null>(null);
   const [showBloomShaderParams, setShowBloomShaderParams] = useState(false);
+  const [coverThumbStatus, setCoverThumbStatus] = useState<
+    'clean-cover' | 'full-stage' | 'project-thumb' | null
+  >(null);
+  const [isSettingProjectThumb, setIsSettingProjectThumb] = useState(false);
 
   // Beat Auto-Sync State
   const [autoSyncPreview, setAutoSyncPreview] = useState<{
@@ -792,15 +1119,40 @@ export function ControlSidebar({
             <section className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-slate-200">Background Image</h2>
-                {bgImageName && (
+                <div className="flex items-center gap-2.5">
                   <button
                     type="button"
-                    onClick={() => onBgImageSelect(null)}
-                    className="text-[11px] text-rose-400 hover:text-rose-300 cursor-pointer"
+                    onClick={() =>
+                      onUpdateSettings({
+                        bgFit: 'cover',
+                        bgScale: 1,
+                        bgOffsetX: 0,
+                        bgOffsetY: 0,
+                        bgBlur: 8,
+                        bgDim: 0.45,
+                        bgBrightness: 1,
+                        bgContrast: 1,
+                        bgSaturation: 1,
+                        bgTintStrength: 0,
+                        bgVignette: 0,
+                      })
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-cyan-300 transition-colors cursor-pointer"
+                    title="Reset backdrop look & framing"
                   >
-                    Remove
+                    <RotateCcw className="w-3 h-3" />
+                    Reset
                   </button>
-                )}
+                  {bgImageName && (
+                    <button
+                      type="button"
+                      onClick={() => onBgImageSelect(null)}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
               <input
                 ref={bgInputRef}
@@ -825,54 +1177,519 @@ export function ControlSidebar({
                 <span className="text-[11px] text-cyan-400 shrink-0 ml-2">Browse</span>
               </button>
 
-              <div className="space-y-2.5 pt-1">
-                <div>
-                  <div className="flex justify-between text-[11px] mb-1">
-                    <span className="text-slate-400">
-                      Backdrop Blur
-                      {midiMappingBadges?.bgBlur && (
-                        <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
-                          · {midiMappingBadges.bgBlur}
-                        </span>
-                      )}
-                    </span>
-                    <span className="font-mono tabular-nums text-slate-300">{settings.bgBlur}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={30}
-                    step={1}
-                    value={settings.bgBlur}
-                    onChange={(e) => onUpdateSettings({ bgBlur: Number(e.target.value) })}
-                    className="studio-range w-full"
-                  />
+              {/* Pro Backdrop Looks */}
+              <div className="space-y-1.5 pt-0.5">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-400">Pro Look Presets</span>
+                  <span className="text-[10px] text-slate-500">1-Click Grade</span>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {BACKDROP_LOOK_PRESETS.map((look) => (
+                    <button
+                      key={look.id}
+                      type="button"
+                      onClick={() => onUpdateSettings(look.patch)}
+                      className="px-1.5 py-1.5 rounded-md text-[10px] font-medium bg-[#090b10] hover:bg-white/[0.06] text-slate-300 hover:text-cyan-200 border border-white/[0.08] hover:border-cyan-500/40 transition-colors cursor-pointer truncate"
+                    >
+                      {look.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Fit & Framing */}
+              <div className="rounded-lg bg-[#090b10]/70 border border-white/[0.07] p-2.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-slate-300">Fit &amp; Framing</span>
+                  <span className="font-mono text-[10px] text-slate-500 tabular-nums">
+                    {(settings.bgScale ?? 1).toFixed(2)}×
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      { id: 'cover', label: 'Fill Crop' },
+                      { id: 'contain-blur', label: 'Blur Frame' },
+                      { id: 'stretch', label: 'Stretch' },
+                    ] as Array<{ id: BackgroundFitMode; label: string }>
+                  ).map((opt) => {
+                    const active = (settings.bgFit ?? 'cover') === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onUpdateSettings({ bgFit: opt.id })}
+                        className={`px-2 py-1.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
+                            : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div>
                   <div className="flex justify-between text-[11px] mb-1">
-                    <span className="text-slate-400">
-                      Backdrop Dimness
-                      {midiMappingBadges?.bgDim && (
-                        <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
-                          · {midiMappingBadges.bgDim}
-                        </span>
-                      )}
-                    </span>
+                    <span className="text-slate-400">Zoom Scale</span>
                     <span className="font-mono tabular-nums text-slate-300">
-                      {Math.round(settings.bgDim * 100)}%
+                      {(settings.bgScale ?? 1).toFixed(2)}×
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={2}
+                    step={0.02}
+                    value={settings.bgScale ?? 1}
+                    onChange={(e) => onUpdateSettings({ bgScale: Number(e.target.value) })}
+                    className="studio-range w-full"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Pan X</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {(settings.bgOffsetX ?? 0) > 0 ? '+' : ''}
+                        {Math.round(settings.bgOffsetX ?? 0)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-50}
+                      max={50}
+                      step={1}
+                      value={settings.bgOffsetX ?? 0}
+                      onChange={(e) => onUpdateSettings({ bgOffsetX: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Pan Y</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {(settings.bgOffsetY ?? 0) > 0 ? '+' : ''}
+                        {Math.round(settings.bgOffsetY ?? 0)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-50}
+                      max={50}
+                      step={1}
+                      value={settings.bgOffsetY ?? 0}
+                      onChange={(e) => onUpdateSettings({ bgOffsetY: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Atmosphere & Color Grading */}
+              <div className="rounded-lg bg-[#090b10]/70 border border-white/[0.07] p-2.5 space-y-2.5">
+                <div className="text-[11px] font-medium text-slate-300">
+                  Color Grading &amp; Atmosphere
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">
+                        Blur
+                        {midiMappingBadges?.bgBlur && (
+                          <span className="ml-1 font-mono text-[10px] text-cyan-400/85">
+                            · {midiMappingBadges.bgBlur}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono tabular-nums text-slate-300">{settings.bgBlur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={30}
+                      step={1}
+                      value={settings.bgBlur}
+                      onChange={(e) => onUpdateSettings({ bgBlur: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">
+                        Dimness
+                        {midiMappingBadges?.bgDim && (
+                          <span className="ml-1 font-mono text-[10px] text-cyan-400/85">
+                            · {midiMappingBadges.bgDim}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.round(settings.bgDim * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.9}
+                      step={0.05}
+                      value={settings.bgDim}
+                      onChange={(e) => onUpdateSettings({ bgDim: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Brightness</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.round((settings.bgBrightness ?? 1) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={1.6}
+                      step={0.02}
+                      value={settings.bgBrightness ?? 1}
+                      onChange={(e) => onUpdateSettings({ bgBrightness: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Contrast</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.round((settings.bgContrast ?? 1) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={1.6}
+                      step={0.02}
+                      value={settings.bgContrast ?? 1}
+                      onChange={(e) => onUpdateSettings({ bgContrast: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Saturation</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.round((settings.bgSaturation ?? 1) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      value={settings.bgSaturation ?? 1}
+                      onChange={(e) => onUpdateSettings({ bgSaturation: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-400">Theme Tint</span>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.round((settings.bgTintStrength ?? 0) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.65}
+                      step={0.02}
+                      value={settings.bgTintStrength ?? 0}
+                      onChange={(e) => onUpdateSettings({ bgTintStrength: Number(e.target.value) })}
+                      className="studio-range w-full"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-[11px] mb-1">
+                    <span className="text-slate-400">Cinematic Edge Vignette</span>
+                    <span className="font-mono tabular-nums text-slate-300">
+                      {Math.round((settings.bgVignette ?? 0) * 100)}%
                     </span>
                   </div>
                   <input
                     type="range"
                     min={0}
-                    max={0.9}
+                    max={1}
                     step={0.05}
-                    value={settings.bgDim}
-                    onChange={(e) => onUpdateSettings({ bgDim: Number(e.target.value) })}
+                    value={settings.bgVignette ?? 0}
+                    onChange={(e) => onUpdateSettings({ bgVignette: Number(e.target.value) })}
                     className="studio-range w-full"
                   />
                 </div>
+              </div>
+            </section>
+
+            <hr className="border-white/[0.07]" />
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-200">
+                  Cover Image &amp; Thumbnail
+                </h2>
+                <span className="text-[10px] font-medium text-cyan-400/90">Stage &amp; Export</span>
+              </div>
+
+              {/* Insert / Copy between Backdrop and Center Cover Art */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  disabled={!hasBgImage}
+                  onClick={() => onCopyBgToAlbum?.()}
+                  className="px-2.5 py-2 rounded-lg text-[11px] font-medium bg-[#090b10] hover:bg-white/[0.06] disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 border border-white/[0.09] hover:border-cyan-500/40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  title="Copy Background Image into Center Cover Art"
+                >
+                  <ArrowLeftRight className="w-3 h-3 text-cyan-400 shrink-0" />
+                  <span className="truncate">Use BG as Cover</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!hasAlbumImage}
+                  onClick={() => onCopyAlbumToBg?.()}
+                  className="px-2.5 py-2 rounded-lg text-[11px] font-medium bg-[#090b10] hover:bg-white/[0.06] disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 border border-white/[0.09] hover:border-cyan-500/40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  title="Copy Center Cover Art into Background Image"
+                >
+                  <ArrowLeftRight className="w-3 h-3 text-slate-400 shrink-0" />
+                  <span className="truncate">Use Cover as BG</span>
+                </button>
+              </div>
+
+              {/* Floating Cover Card overlay toggle */}
+              <div className="rounded-lg bg-[#090b10]/70 border border-white/[0.07] p-2.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-200">
+                      Insert Cover Card on Stage
+                    </div>
+                    <p className="text-[10px] text-slate-500">
+                      Pin crisp framed artwork into the video &amp; cover export.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={Boolean(settings.showCoverCard)}
+                    onClick={() => onUpdateSettings({ showCoverCard: !settings.showCoverCard })}
+                    className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors cursor-pointer ${
+                      settings.showCoverCard ? 'bg-cyan-500' : 'bg-white/15'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform mt-0.5 ${
+                        settings.showCoverCard ? 'translate-x-4.5' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {settings.showCoverCard && (
+                  <div className="space-y-2.5 pt-1 border-t border-white/[0.06]">
+                    <div>
+                      <div className="text-[11px] text-slate-400 mb-1">Card Image Source</div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {(
+                          [
+                            { id: 'auto', label: 'Auto' },
+                            { id: 'bg', label: 'Background' },
+                            { id: 'album', label: 'Album Art' },
+                          ] as Array<{ id: CoverCardSource; label: string }>
+                        ).map((opt) => {
+                          const active = (settings.coverCardSource ?? 'auto') === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => onUpdateSettings({ coverCardSource: opt.id })}
+                              className={`px-2 py-1.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
+                                  : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] text-slate-400 mb-1">Stage Placement</div>
+                      <div className="grid grid-cols-3 gap-1">
+                        {(
+                          [
+                            { id: 'top-left', label: 'Top Left' },
+                            { id: 'top-center', label: 'Top Center' },
+                            { id: 'center', label: 'Center' },
+                          ] as Array<{ id: CoverCardPosition; label: string }>
+                        ).map((opt) => {
+                          const active = (settings.coverCardPosition ?? 'top-left') === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => onUpdateSettings({ coverCardPosition: opt.id })}
+                              className={`px-2 py-1.5 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
+                                  : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <div className="flex justify-between text-[11px] mb-1">
+                          <span className="text-slate-400">Card Size</span>
+                          <span className="font-mono tabular-nums text-slate-300">
+                            {(settings.coverCardSize ?? 1).toFixed(2)}×
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.6}
+                          max={1.4}
+                          step={0.05}
+                          value={settings.coverCardSize ?? 1}
+                          onChange={(e) =>
+                            onUpdateSettings({ coverCardSize: Number(e.target.value) })
+                          }
+                          className="studio-range w-full"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] mb-1">
+                          <span className="text-slate-400">Corner Radius</span>
+                          <span className="font-mono tabular-nums text-slate-300">
+                            {Math.round(settings.coverCardRadius ?? 14)}px
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={32}
+                          step={2}
+                          value={settings.coverCardRadius ?? 14}
+                          onChange={(e) =>
+                            onUpdateSettings({ coverCardRadius: Number(e.target.value) })
+                          }
+                          className="studio-range w-full"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Download Cover PNG / Stage Thumbnail / Set Project Thumbnail */}
+              <div className="space-y-1.5">
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!onDownloadCoverThumbnail) return;
+                      await onDownloadCoverThumbnail('clean-cover');
+                      setCoverThumbStatus('clean-cover');
+                      window.setTimeout(() => {
+                        setCoverThumbStatus((prev) => (prev === 'clean-cover' ? null : prev));
+                      }, 2200);
+                    }}
+                    className="px-2.5 py-2 rounded-lg text-[11px] font-medium bg-[#090b10] hover:bg-white/[0.06] text-slate-200 border border-white/[0.09] hover:border-cyan-500/40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="Download clean Cover PNG (Graded backdrop + Cover Card + Title/Artist)"
+                  >
+                    {coverThumbStatus === 'clean-cover' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {coverThumbStatus === 'clean-cover' ? 'Saved Cover!' : 'Clean Cover PNG'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!onDownloadCoverThumbnail) return;
+                      await onDownloadCoverThumbnail('full-stage');
+                      setCoverThumbStatus('full-stage');
+                      window.setTimeout(() => {
+                        setCoverThumbStatus((prev) => (prev === 'full-stage' ? null : prev));
+                      }, 2200);
+                    }}
+                    className="px-2.5 py-2 rounded-lg text-[11px] font-medium bg-[#090b10] hover:bg-white/[0.06] text-slate-200 border border-white/[0.09] hover:border-cyan-500/40 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="Download full preview frame as Thumbnail PNG"
+                  >
+                    {coverThumbStatus === 'full-stage' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <Camera className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {coverThumbStatus === 'full-stage' ? 'Saved PNG!' : 'Stage Thumbnail'}
+                    </span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isSettingProjectThumb}
+                  onClick={async () => {
+                    if (!onSetProjectThumbnailFromCover) return;
+                    setIsSettingProjectThumb(true);
+                    try {
+                      await onSetProjectThumbnailFromCover();
+                      setCoverThumbStatus('project-thumb');
+                      window.setTimeout(() => {
+                        setCoverThumbStatus((prev) => (prev === 'project-thumb' ? null : prev));
+                      }, 2400);
+                    } finally {
+                      setIsSettingProjectThumb(false);
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-lg text-[11px] font-medium bg-cyan-500/12 hover:bg-cyan-500/20 disabled:opacity-60 text-cyan-200 border border-cyan-500/35 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {isSettingProjectThumb ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : coverThumbStatus === 'project-thumb' ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  ) : (
+                    <Bookmark className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  )}
+                  <span>
+                    {coverThumbStatus === 'project-thumb'
+                      ? 'Project Cover Thumbnail Saved!'
+                      : 'Set Graded Cover as Project Thumbnail'}
+                  </span>
+                </button>
               </div>
             </section>
 
@@ -1071,10 +1888,115 @@ export function ControlSidebar({
           <>
             <section className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
-                <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                  {VISUALIZER_MODES.length} styles
+                <h2 className="text-xs font-semibold text-slate-200">Display Layer</h2>
+                <span className="text-[11px] font-mono text-slate-400">
+                  {settings.lyricsOnly ? 'Lyrics Only' : 'Visualizer + Lyrics'}
                 </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onUpdateSettings({ lyricsOnly: false })}
+                  className={`px-2.5 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
+                    !settings.lyricsOnly
+                      ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
+                      : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                  }`}
+                >
+                  Visualizer + Lyrics
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onUpdateSettings({ lyricsOnly: true })}
+                  className={`px-2.5 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
+                    settings.lyricsOnly
+                      ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
+                      : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                  }`}
+                >
+                  Lyrics Only
+                </button>
+              </div>
+              {settings.lyricsOnly && (
+                <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-400/25 space-y-2.5">
+                  <p className="text-[11px] leading-relaxed text-slate-300">
+                    Visualizer modes, bloom, and particles are hidden. Background art, track info, and synced lyrics remain active.
+                  </p>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10.5px] text-slate-300">
+                      <span className="font-medium">Visible Lyrics</span>
+                      <span className="font-mono text-cyan-300">
+                        {(settings.lyricsOnlyLayout ?? 'full-verse') === 'half-verse'
+                          ? 'Half Verse'
+                          : (settings.lyricsOnlyLayout ?? 'full-verse') === 'full-lyrics'
+                          ? 'Full Lyrics'
+                          : 'Full Verse'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { id: 'half-verse', label: 'Half Verse' },
+                          { id: 'full-verse', label: 'Full Verse' },
+                          { id: 'full-lyrics', label: 'Full Lyrics' },
+                        ] as const
+                      ).map((opt) => {
+                        const active =
+                          (settings.lyricsOnlyLayout ?? 'full-verse') === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({ lyricsOnlyLayout: opt.id })
+                            }
+                            className={`px-2 py-1.5 rounded-md border text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                              active
+                                ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-100'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onTabChange('lyrics')}
+                      className="flex-1 px-2.5 py-1.5 rounded-md bg-[#090b10] hover:bg-white/[0.06] border border-white/[0.1] text-[11px] font-medium text-cyan-300 transition-colors cursor-pointer"
+                    >
+                      Open Lyrics Tab
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onUpdateSettings({ lyricsOnly: false })}
+                      className="px-2.5 py-1.5 rounded-md bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-[11px] font-medium text-cyan-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Enable Visualizer
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <hr className="border-white/[0.07]" />
+
+            <section className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
+                <div className="flex items-center gap-1.5">
+                  {settings.lyricsOnly && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/30 text-[10px] font-medium text-amber-200">
+                      Hidden
+                    </span>
+                  )}
+                  <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                    {VISUALIZER_MODES.length} styles
+                  </span>
+                </div>
               </div>
               <input
                 type="search"
@@ -1084,7 +2006,11 @@ export function ControlSidebar({
                 aria-label="Filter visualizer styles"
                 className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/60"
               />
-              <div className="space-y-1.5 max-h-[296px] overflow-y-auto studio-scroll pr-0.5">
+              <div
+                className={`space-y-1.5 max-h-[296px] overflow-y-auto studio-scroll pr-0.5 transition-opacity ${
+                  settings.lyricsOnly ? 'opacity-50' : ''
+                }`}
+              >
                 {VISUALIZER_MODES.filter((mode) => {
                   const q = modeQuery.trim().toLowerCase();
                   if (!q) return true;
@@ -1094,12 +2020,14 @@ export function ControlSidebar({
                     mode.id.toLowerCase().includes(q)
                   );
                 }).map((mode) => {
-                  const active = settings.visualizerMode === mode.id;
+                  const active = !settings.lyricsOnly && settings.visualizerMode === mode.id;
                   return (
                     <button
                       key={mode.id}
                       type="button"
-                      onClick={() => onUpdateSettings({ visualizerMode: mode.id })}
+                      onClick={() =>
+                        onUpdateSettings({ visualizerMode: mode.id, lyricsOnly: false })
+                      }
                       className={`w-full px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
                         active
                           ? 'bg-cyan-500/12 border-cyan-400/45 text-slate-100'
@@ -1232,34 +2160,91 @@ export function ControlSidebar({
                 />
               </div>
 
-              <div>
-                <div className="flex justify-between text-[11px] mb-1">
-                  <span className="text-slate-400">
-                    Motion Blur
-                    {midiMappingBadges?.motionBlur && (
-                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
-                        · {midiMappingBadges.motionBlur}
-                      </span>
-                    )}
-                  </span>
-                  <span className="font-mono tabular-nums text-cyan-400">
-                    {settings.motionBlur === 0
-                      ? 'Off'
-                      : `${Math.round((settings.motionBlur / 0.85) * 100)}%`}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={0.85}
-                  step={0.05}
-                  value={settings.motionBlur}
-                  onChange={(e) => onUpdateSettings({ motionBlur: parseFloat(e.target.value) })}
-                  className="studio-range w-full"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Blends the previous frame with transparency to create smooth kinetic trails.
-                </p>
+              <div className="space-y-2.5">
+                {(() => {
+                  const activeMotionBlurPreset = resolveActiveMotionBlurPreset(settings);
+                  const activeMotionBlurConfig = MOTION_BLUR_PRESETS.find(
+                    (p) => p.key === activeMotionBlurPreset
+                  );
+
+                  return (
+                    <>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label
+                            htmlFor="motion-blur-preset-select"
+                            className="text-[11px] font-medium text-slate-300"
+                          >
+                            Motion Blur Preset
+                          </label>
+                          <span className="font-mono text-[10px] text-cyan-400/90">
+                            {activeMotionBlurConfig?.name ?? 'None'}
+                          </span>
+                        </div>
+                        <select
+                          id="motion-blur-preset-select"
+                          aria-label="Motion Blur Preset"
+                          value={activeMotionBlurPreset}
+                          onChange={(e) => {
+                            const nextPreset = e.target.value as MotionBlurPresetKey;
+                            onUpdateSettings(
+                              getMotionBlurPresetPatch(nextPreset, settings.motionBlur)
+                            );
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                        >
+                          {MOTION_BLUR_PRESETS.map((preset) => (
+                            <option key={preset.key} value={preset.key} className="bg-[#090b10]">
+                              {preset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-[11px] mb-1">
+                          <span className="text-slate-400">
+                            Motion Blur Intensity
+                            {midiMappingBadges?.motionBlur && (
+                              <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                                · {midiMappingBadges.motionBlur}
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono tabular-nums text-cyan-400">
+                            {settings.motionBlur === 0
+                              ? 'Off'
+                              : `${Math.round((settings.motionBlur / 0.85) * 100)}%`}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={0.85}
+                          step={0.05}
+                          value={settings.motionBlur}
+                          onChange={(e) => {
+                            const nextVal = parseFloat(e.target.value);
+                            const currentPreset = settings.motionBlurPreset ?? 'none';
+                            onUpdateSettings({
+                              motionBlur: nextVal,
+                              motionBlurPreset:
+                                nextVal <= 0.005
+                                  ? 'none'
+                                  : currentPreset === 'none'
+                                  ? 'trails'
+                                  : currentPreset,
+                            });
+                          }}
+                          className="studio-range w-full"
+                        />
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          {activeMotionBlurConfig?.description}
+                        </p>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               <div className="space-y-2.5">
@@ -1591,6 +2576,13 @@ export function ControlSidebar({
 
             <hr className="border-white/[0.07]" />
 
+            <ParticleSystemPanel
+              settings={settings}
+              onUpdateSettings={onUpdateSettings}
+            />
+
+            <hr className="border-white/[0.07]" />
+
             <SceneTransitionPanel
               settings={settings}
               onUpdateSettings={onUpdateSettings}
@@ -1602,10 +2594,109 @@ export function ControlSidebar({
         {/* 4. LYRICS TAB */}
         {activeTab === 'lyrics' && (
           <>
+            <section className="space-y-2">
+              <div className="p-2.5 rounded-lg bg-[#090b10] border border-white/[0.08] space-y-2.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-200">
+                      Lyrics-Only Mode
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Hide visualizer modes and show half verse, full verse, or full lyrics
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={Boolean(settings.lyricsOnly)}
+                    aria-label="Toggle Lyrics-Only Mode"
+                    onClick={() => onUpdateSettings({ lyricsOnly: !settings.lyricsOnly })}
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                      settings.lyricsOnly
+                        ? 'bg-cyan-500/35 border-cyan-400/60'
+                        : 'bg-white/[0.07] border-white/[0.12]'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                        settings.lyricsOnly ? 'translate-x-4' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {settings.lyricsOnly && (
+                  <div className="pt-2 border-t border-white/[0.07] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-300 font-medium">Visible Lyrics</span>
+                      <span className="font-mono text-cyan-300">
+                        {(settings.lyricsOnlyLayout ?? 'full-verse') === 'half-verse'
+                          ? '~5 lines'
+                          : (settings.lyricsOnlyLayout ?? 'full-verse') === 'full-lyrics'
+                          ? `${lyrics.length} lines`
+                          : 'Active verse'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(
+                        [
+                          { id: 'half-verse', label: 'Half Verse' },
+                          { id: 'full-verse', label: 'Full Verse' },
+                          { id: 'full-lyrics', label: 'Full Lyrics' },
+                        ] as const
+                      ).map((opt) => {
+                        const active =
+                          (settings.lyricsOnlyLayout ?? 'full-verse') === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({
+                                lyricsOnlyLayout: opt.id as LyricsOnlyLayout,
+                              })
+                            }
+                            className={`px-2 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                              active
+                                ? 'bg-cyan-500/18 border-cyan-400/50 text-cyan-100'
+                                : 'bg-[#111520] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
             <section className="space-y-2.5">
-              <h2 className="text-xs font-semibold text-slate-200">Display Style</h2>
-              <div className="grid grid-cols-1 gap-1.5">
-                {LYRIC_STYLES.map((style) => {
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-200">Display Style</h2>
+                <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                  {LYRIC_STYLES.length} styles
+                </span>
+              </div>
+              <input
+                type="search"
+                value={lyricStyleQuery}
+                onChange={(e) => setLyricStyleQuery(e.target.value)}
+                placeholder="Filter display styles..."
+                aria-label="Filter display styles"
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/60"
+              />
+              <div className="space-y-1.5 max-h-[296px] overflow-y-auto studio-scroll pr-0.5">
+                {LYRIC_STYLES.filter((style) => {
+                  const q = lyricStyleQuery.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    style.name.toLowerCase().includes(q) ||
+                    style.desc.toLowerCase().includes(q) ||
+                    style.id.toLowerCase().includes(q)
+                  );
+                }).map((style) => {
                   const active = settings.lyricStyle === style.id;
                   return (
                     <button
@@ -1674,6 +2765,173 @@ export function ControlSidebar({
                   </button>
                 ))}
               </div>
+            </section>
+
+            {/* Lyric Shadow Intensity */}
+            <section className="space-y-2.5">
+              {(() => {
+                const shadowVal = settings.lyricShadowIntensity ?? 1;
+                return (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-200">
+                        Shadow Intensity
+                      </span>
+                      <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                        {shadowVal <= 0.01 ? 'Off' : `${Math.round(shadowVal * 100)}%`}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      aria-label="Shadow Intensity"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      value={shadowVal}
+                      onChange={(e) =>
+                        onUpdateSettings({
+                          lyricShadowIntensity: parseFloat(e.target.value),
+                        })
+                      }
+                      className="studio-range w-full"
+                    />
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {(
+                        [
+                          { label: 'Off', val: 0 },
+                          { label: 'Soft', val: 0.5 },
+                          { label: 'Standard', val: 1 },
+                          { label: 'Deep', val: 1.8 },
+                        ] as const
+                      ).map((preset) => {
+                        const active = Math.abs(shadowVal - preset.val) < 0.03;
+                        return (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({ lyricShadowIntensity: preset.val })
+                            }
+                            className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                              active
+                                ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10.5px] text-slate-500 leading-relaxed">
+                      Boosts drop-shadow depth and contrast behind lyrics over bright or complex backgrounds.
+                    </p>
+                  </>
+                );
+              })()}
+            </section>
+
+            {/* Lyric Beat Sync & Pulse Intensity */}
+            <section className="space-y-3">
+              {(() => {
+                const beatSyncEnabled = Boolean(settings.lyricBeatSync);
+                const pulseVal = settings.lyricPulseIntensity ?? 1;
+                return (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-xs font-semibold text-slate-200">Lyric Beat Sync</h2>
+                        <p className="text-[11px] text-slate-400">
+                          Scale up and glow active lyrics on every detected beat.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-label="Lyric Beat Sync"
+                        aria-checked={beatSyncEnabled}
+                        onClick={() =>
+                          onUpdateSettings({ lyricBeatSync: !beatSyncEnabled })
+                        }
+                        className={`w-10 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                          beatSyncEnabled ? 'bg-cyan-400' : 'bg-white/[0.14]'
+                        }`}
+                      >
+                        <span
+                          className={`block w-4 h-4 rounded-full bg-[#090b10] transition-transform ${
+                            beatSyncEnabled ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    <div
+                      className={`space-y-2 transition-opacity ${
+                        beatSyncEnabled ? 'opacity-100' : 'opacity-65'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-200">
+                          Lyric Pulse Intensity
+                        </span>
+                        <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                          {pulseVal <= 0.01 ? 'Off' : `${Math.round(pulseVal * 100)}%`}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        aria-label="Lyric Pulse Intensity"
+                        min={0}
+                        max={2}
+                        step={0.05}
+                        value={pulseVal}
+                        onChange={(e) => {
+                          const nextVal = parseFloat(e.target.value);
+                          onUpdateSettings({
+                            lyricPulseIntensity: nextVal,
+                            ...(nextVal > 0 && !beatSyncEnabled
+                              ? { lyricBeatSync: true }
+                              : {}),
+                          });
+                        }}
+                        className="studio-range w-full"
+                      />
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {(
+                          [
+                            { label: 'Subtle', val: 0.5 },
+                            { label: 'Standard', val: 1 },
+                            { label: 'Punch', val: 1.5 },
+                            { label: 'Max', val: 2 },
+                          ] as const
+                        ).map((preset) => {
+                          const active =
+                            beatSyncEnabled && Math.abs(pulseVal - preset.val) < 0.03;
+                          return (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() =>
+                                onUpdateSettings({
+                                  lyricBeatSync: true,
+                                  lyricPulseIntensity: preset.val,
+                                })
+                              }
+                              className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                                active
+                                  ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                                  : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
             </section>
 
             <hr className="border-white/[0.07]" />
@@ -2090,6 +3348,128 @@ export function ControlSidebar({
               settings={settings}
               onUpdateSettings={onUpdateSettings}
             />
+
+            <hr className="border-white/[0.07]" />
+
+            {/* Auto-Cycle Color */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-xs font-semibold text-slate-200">Auto-Cycle Color</h2>
+                  <p className="text-[11px] text-slate-400">
+                    Rotate primary &amp; secondary hues smoothly across track progress.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Auto-Cycle Color"
+                  aria-checked={Boolean(settings.autoCycleColor)}
+                  onClick={() =>
+                    onUpdateSettings({ autoCycleColor: !settings.autoCycleColor })
+                  }
+                  className={`w-10 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    settings.autoCycleColor ? 'bg-cyan-400' : 'bg-white/[0.14]'
+                  }`}
+                >
+                  <span
+                    className={`block w-4 h-4 rounded-full bg-[#090b10] transition-transform ${
+                      settings.autoCycleColor ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {settings.autoCycleColor &&
+                (() => {
+                  const cycleSpeed = settings.colorCycleSpeed ?? 1;
+                  const cycled = resolveAutoCycledColors(
+                    settings,
+                    currentTime,
+                    duration > 0 ? duration : undefined
+                  );
+                  const progressPct =
+                    duration > 0 ? Math.round(cycled.progress * 100) : 0;
+
+                  return (
+                    <div className="rounded-lg bg-[#090b10]/80 border border-white/[0.08] p-2.5 space-y-2.5">
+                      {/* Live Rotated Palette Readout */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/25 shrink-0"
+                            style={{ backgroundColor: cycled.primaryColor }}
+                            title={`Live Primary ${cycled.primaryColor}`}
+                          />
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/25 shrink-0"
+                            style={{ backgroundColor: cycled.secondaryColor }}
+                            title={`Live Secondary ${cycled.secondaryColor}`}
+                          />
+                          <span className="text-[11px] font-mono tabular-nums text-slate-300 truncate">
+                            +{Math.round(cycled.hueShiftDeg)}° shift
+                          </span>
+                        </div>
+                        <span className="text-[10.5px] font-mono tabular-nums text-cyan-400 shrink-0">
+                          {duration > 0 ? `${progressPct}% track` : 'Loop 30s'}
+                        </span>
+                      </div>
+
+                      <div
+                        className="h-1.5 rounded-full w-full"
+                        style={{
+                          background: `linear-gradient(90deg, ${cycled.primaryColor} 0%, ${cycled.secondaryColor} 100%)`,
+                        }}
+                      />
+
+                      {/* Cycle Speed Slider & Quick Presets */}
+                      <div className="space-y-1.5 pt-0.5">
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-slate-400">Cycle Speed (Rotations / Track)</span>
+                          <span className="font-mono tabular-nums text-cyan-400">
+                            {cycleSpeed.toFixed(2).replace(/\.00$/, '')}×
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          aria-label="Color Cycle Speed"
+                          min={0.25}
+                          max={8}
+                          step={0.25}
+                          value={cycleSpeed}
+                          onChange={(e) =>
+                            onUpdateSettings({
+                              colorCycleSpeed: parseFloat(e.target.value),
+                            })
+                          }
+                          className="studio-range w-full"
+                        />
+                        <div className="grid grid-cols-4 gap-1 pt-0.5">
+                          {[0.5, 1, 2, 4].map((presetSpeed) => {
+                            const active = Math.abs(cycleSpeed - presetSpeed) < 0.01;
+                            return (
+                              <button
+                                key={presetSpeed}
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({ colorCycleSpeed: presetSpeed })
+                                }
+                                className={`py-1 rounded-md text-[10.5px] font-mono tabular-nums border transition-colors cursor-pointer ${
+                                  active
+                                    ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
+                                    : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                                }`}
+                              >
+                                {presetSpeed}×
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+            </section>
 
             <hr className="border-white/[0.07]" />
 

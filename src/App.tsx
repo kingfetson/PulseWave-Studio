@@ -21,6 +21,7 @@ import {
   BatchCompletionSummary,
   BatchExportJob,
   BeatState,
+  createEmptyParticleFlowMap,
   ExportProfile,
   ExportProgressState,
   LyricLine,
@@ -45,6 +46,7 @@ import {
 } from './utils/audioEngine';
 import { computeAutoArrangeFraming } from './utils/autoArrange';
 import { renderVisualizerFrame } from './utils/canvasRenderer';
+import { resolveAutoCycledColors } from './utils/colorHarmony';
 import {
   BrowserNotificationPermission,
   getBrowserNotificationPermission,
@@ -105,15 +107,20 @@ import {
 const DEFAULT_SETTINGS: StudioSettings = {
   aspectRatio: '16:9',
   visualizerMode: 'mirrored-bars',
+  lyricsOnly: false,
+  lyricsOnlyLayout: 'full-verse',
   lyricStyle: 'karaoke',
   themePreset: 'cyberpunk',
   primaryColor: THEME_PRESETS[0].primaryColor,
   secondaryColor: THEME_PRESETS[0].secondaryColor,
   bgColor: THEME_PRESETS[0].bgColor,
+  autoCycleColor: false,
+  colorCycleSpeed: 1,
   sensitivity: 1.2,
   barCount: 72,
   smoothing: 0.78,
   motionBlur: 0,
+  motionBlurPreset: 'none',
   bloomIntensity: 0,
   bloomPreset: 'off',
   bloomRadius: 1.0,
@@ -123,11 +130,28 @@ const DEFAULT_SETTINGS: StudioSettings = {
   bassShake: 0,
   visualizerScale: 1,
   lyricPosition: 80,
+  lyricShadowIntensity: 1,
+  lyricBeatSync: false,
+  lyricPulseIntensity: 1,
   trackTitle: '',
   artistName: '',
   showTrackOverlay: true,
   bgBlur: 8,
   bgDim: 0.45,
+  bgFit: 'cover',
+  bgScale: 1,
+  bgOffsetX: 0,
+  bgOffsetY: 0,
+  bgBrightness: 1,
+  bgContrast: 1,
+  bgSaturation: 1,
+  bgVignette: 0,
+  bgTintStrength: 0,
+  showCoverCard: false,
+  coverCardSource: 'auto',
+  coverCardPosition: 'top-left',
+  coverCardSize: 1,
+  coverCardRadius: 14,
   exportFps: 30,
   exportResolution: '720p',
   bitratePreset: 'balanced',
@@ -140,6 +164,11 @@ const DEFAULT_SETTINGS: StudioSettings = {
   sceneTransitionType: 'crossfade',
   sceneTransitionDuration: 0.45,
   sceneTransitionTarget: 'both',
+  particleEnabled: false,
+  particleShape: 'circle',
+  particleVelocity: 1.0,
+  particleLifespan: 1.2,
+  particleFlowMap: createEmptyParticleFlowMap(),
 };
 
 const INITIAL_EXPORT_STATE: ExportProgressState = {
@@ -253,6 +282,7 @@ export default function App() {
   const albumUrlRef = useRef<string | null>(null);
   const albumBlobRef = useRef<Blob | null>(null);
   const audioBlobRef = useRef<Blob | null>(null);
+  const customThumbnailRef = useRef<string | null>(null);
 
   const particlesRef = useRef<Particle[]>([]);
   const motionBlurStateRef = useRef<MotionBlurState>({ canvas: null, hasFrame: false });
@@ -516,6 +546,8 @@ export default function App() {
         'bassShake',
         'visualizerScale',
         'lyricPosition',
+        'lyricShadowIntensity',
+        'lyricPulseIntensity',
         'videoBitrateMbps',
         'bgBlur',
         'bgDim',
@@ -524,6 +556,9 @@ export default function App() {
         'bgColor',
         'trackTitle',
         'artistName',
+        'particleVelocity',
+        'particleLifespan',
+        'particleFlowMap',
       ]);
       const mergeKey =
         keys.length === 1 && coalescedKeys.has(keys[0])
@@ -890,6 +925,7 @@ export default function App() {
   }, [ensureAudioGraph, commitHistory]);
 
   const handleBgImageSelect = useCallback((file: File | null) => {
+    customThumbnailRef.current = null;
     if (bgUrlRef.current) {
       URL.revokeObjectURL(bgUrlRef.current);
       bgUrlRef.current = null;
@@ -912,6 +948,7 @@ export default function App() {
   }, []);
 
   const handleAlbumImageSelect = useCallback((file: File | null) => {
+    customThumbnailRef.current = null;
     if (albumUrlRef.current) {
       URL.revokeObjectURL(albumUrlRef.current);
       albumUrlRef.current = null;
@@ -929,6 +966,48 @@ export default function App() {
     img.onload = () => {
       albumImageRef.current = img;
       setAlbumImageName(file.name);
+    };
+    img.src = url;
+  }, []);
+
+  const handleCopyBgToAlbum = useCallback(() => {
+    const blob = bgBlobRef.current;
+    if (!blob) return;
+    customThumbnailRef.current = null;
+    if (albumUrlRef.current) {
+      URL.revokeObjectURL(albumUrlRef.current);
+      albumUrlRef.current = null;
+    }
+    albumBlobRef.current = blob;
+    const url = URL.createObjectURL(blob);
+    albumUrlRef.current = url;
+    const targetName = mediaMetaRef.current.bgImageName || 'cover-from-backdrop.png';
+    const img = new Image();
+    img.onload = () => {
+      albumImageRef.current = img;
+      setAlbumImageName(targetName);
+      setIsProjectDirty(true);
+    };
+    img.src = url;
+  }, []);
+
+  const handleCopyAlbumToBg = useCallback(() => {
+    const blob = albumBlobRef.current;
+    if (!blob) return;
+    customThumbnailRef.current = null;
+    if (bgUrlRef.current) {
+      URL.revokeObjectURL(bgUrlRef.current);
+      bgUrlRef.current = null;
+    }
+    bgBlobRef.current = blob;
+    const url = URL.createObjectURL(blob);
+    bgUrlRef.current = url;
+    const targetName = mediaMetaRef.current.albumImageName || 'backdrop-from-cover.png';
+    const img = new Image();
+    img.onload = () => {
+      bgImageRef.current = img;
+      setBgImageName(targetName);
+      setIsProjectDirty(true);
     };
     img.src = url;
   }, []);
@@ -961,6 +1040,7 @@ export default function App() {
         audioBlobRef.current = record.audioBlob;
         bgBlobRef.current = record.bgImageBlob;
         albumBlobRef.current = record.albumImageBlob;
+        customThumbnailRef.current = null;
 
         if (record.audioBlob) {
           if (!audioCtxRef.current) {
@@ -1114,7 +1194,8 @@ export default function App() {
         audioFileName: meta.audioFileName,
         bgImageName: meta.bgImageName,
         albumImageName: meta.albumImageName,
-        thumbnailDataUrl: captureProjectThumbnail(previewCanvasRef.current),
+        thumbnailDataUrl:
+          customThumbnailRef.current || captureProjectThumbnail(previewCanvasRef.current),
         hasAudioBlob: Boolean(audioBlobRef.current),
         audioBlob: audioBlobRef.current,
         bgImageBlob: bgBlobRef.current,
@@ -1344,6 +1425,7 @@ export default function App() {
       albumBlobRef.current = null;
       bgImageRef.current = null;
       albumImageRef.current = null;
+      customThumbnailRef.current = null;
 
       setAudioBuffer(null);
       setWaveformPeaks([]);
@@ -1482,6 +1564,7 @@ export default function App() {
 
   const handlePreviewSceneTransition = useCallback(() => {
     const activeSettings = settingsRef.current;
+    if (activeSettings.lyricsOnly) return;
     if ((activeSettings.sceneTransitionType ?? 'none') === 'none') return;
     const altMode =
       activeSettings.visualizerMode === 'mirrored-bars'
@@ -1617,6 +1700,16 @@ export default function App() {
         }
       }
 
+      const activeDuration =
+        mediaMetaRef.current.duration ||
+        trimRef.current.trimEnd ||
+        undefined;
+      const cycled = resolveAutoCycledColors(
+        activeSettings,
+        trackTime,
+        activeDuration
+      );
+
       let beatBurst = 0;
       let beatTriggered = false;
       const minDim = Math.min(
@@ -1627,7 +1720,9 @@ export default function App() {
       const needsBeatDetector =
         activeSettings.beatDetection ||
         (activeSettings.glitchIntensity ?? 0) > 0 ||
-        (activeSettings.bassShake ?? 0) > 0;
+        (activeSettings.bassShake ?? 0) > 0 ||
+        (Boolean(activeSettings.lyricBeatSync) &&
+          (activeSettings.lyricPulseIntensity ?? 1) > 0);
       if (needsBeatDetector) {
         const step = stepBeatDetector(
           beatStateRef.current,
@@ -1635,8 +1730,8 @@ export default function App() {
           dt,
           activeSettings.beatSensitivity,
           minDim,
-          activeSettings.primaryColor,
-          activeSettings.secondaryColor
+          cycled.primaryColor,
+          cycled.secondaryColor
         );
         beatBurst = step.burstIntensity;
         beatTriggered = step.triggered;
@@ -1683,6 +1778,7 @@ export default function App() {
               : undefined,
             motionBlurState: motionBlurStateRef.current,
             sceneTransitionState: sceneTransitionStateRef.current,
+            trackDuration: activeDuration,
           });
         }
       }
@@ -2230,6 +2326,7 @@ export default function App() {
       }
       particlesRef.current.length = 0;
       motionBlurStateRef.current.hasFrame = false;
+      motionBlurStateRef.current.frameIndex = 0;
       handleCloseExportModal();
     },
     [isBatchRunning, duration, commitHistory, handleCloseExportModal]
@@ -2385,7 +2482,11 @@ export default function App() {
 
       const particles: Particle[] = [];
       const rotRef = { angle: albumRotationRef.current.angle };
-      const steps = activeSettings.visualizerMode === 'hybrid-particles' ? 10 : 1;
+      const steps =
+        !activeSettings.lyricsOnly &&
+        (activeSettings.visualizerMode === 'hybrid-particles' || activeSettings.particleEnabled)
+          ? 10
+          : 1;
       const trackTime = audioElRef.current ? audioElRef.current.currentTime : currentTime;
 
       for (let s = 0; s < steps; s++) {
@@ -2404,6 +2505,7 @@ export default function App() {
           particles,
           isExport: true,
           albumRotationRef: rotRef,
+          trackDuration: mediaMetaRef.current.duration || trimRef.current.trimEnd || undefined,
         });
       }
 
@@ -2411,6 +2513,70 @@ export default function App() {
     },
     [currentTime]
   );
+
+  const renderCleanCoverCanvas = useCallback((targetSettings: StudioSettings): HTMLCanvasElement => {
+    const { width, height } = ASPECT_RATIOS[targetSettings.aspectRatio];
+    const offscreen = document.createElement('canvas');
+    offscreen.width = width;
+    offscreen.height = height;
+    const ctx = offscreen.getContext('2d');
+    if (!ctx) {
+      throw new Error('Unable to create 2D canvas context for cover render.');
+    }
+
+    const emptyFreq = new Uint8Array(1024);
+    const neutralWave = new Uint8Array(1024).fill(128);
+    const cleanCoverSettings: StudioSettings = {
+      ...targetSettings,
+      lyricsOnly: true,
+      showSafeZone: false,
+      glitchIntensity: 0,
+      bassShake: 0,
+      motionBlur: 0,
+      motionBlurPreset: 'none',
+    };
+
+    renderVisualizerFrame({
+      ctx,
+      width,
+      height,
+      currentTime: 0,
+      dt: 1 / 30,
+      frequencyData: emptyFreq,
+      timeDomainData: neutralWave,
+      settings: cleanCoverSettings,
+      lyrics: [],
+      bgImage: bgImageRef.current,
+      albumImage: albumImageRef.current,
+      particles: [],
+      isExport: true,
+    });
+
+    return offscreen;
+  }, []);
+
+  const handleDownloadCoverThumbnail = useCallback(
+    async (mode: 'clean-cover' | 'full-stage'): Promise<string> => {
+      const baseTitle = sanitizeFileName(
+        settingsRef.current.trackTitle.trim() || activeProjectName || 'studio-cover'
+      );
+      if (mode === 'full-stage') {
+        return handleSaveCanvasSnapshot(`${baseTitle}-stage`);
+      }
+      const offscreen = renderCleanCoverCanvas(settingsRef.current);
+      return captureCanvasSnapshotPng(offscreen, `${baseTitle}-cover`);
+    },
+    [activeProjectName, handleSaveCanvasSnapshot, renderCleanCoverCanvas]
+  );
+
+  const handleSetProjectThumbnailFromCover = useCallback(async (): Promise<void> => {
+    const offscreen = renderCleanCoverCanvas(settingsRef.current);
+    const dataUrl = captureProjectThumbnail(offscreen);
+    if (dataUrl) {
+      customThumbnailRef.current = dataUrl;
+    }
+    await saveCurrentProject({ forceCreate: true });
+  }, [renderCleanCoverCanvas, saveCurrentProject]);
 
   const handleAutoGenerateCaptions = useCallback(async () => {
     if (!audioBuffer || isGeneratingCaptions) return;
@@ -2591,8 +2757,14 @@ export default function App() {
           isGeneratingDemo={isGeneratingDemo}
           onBgImageSelect={handleBgImageSelect}
           bgImageName={bgImageName}
+          hasBgImage={Boolean(bgImageName)}
           onAlbumImageSelect={handleAlbumImageSelect}
           albumImageName={albumImageName}
+          hasAlbumImage={Boolean(albumImageName)}
+          onCopyBgToAlbum={handleCopyBgToAlbum}
+          onCopyAlbumToBg={handleCopyAlbumToBg}
+          onDownloadCoverThumbnail={handleDownloadCoverThumbnail}
+          onSetProjectThumbnailFromCover={handleSetProjectThumbnailFromCover}
           lyrics={lyrics}
           onLyricsChange={handleLyricsChange}
           onSeek={handleSeek}

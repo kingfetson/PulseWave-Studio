@@ -37,6 +37,7 @@ import {
   ExportProgressState,
   ExportResolution,
   FadeType,
+  LyricsOnlyLayout,
   LyricStyle,
   resolveExportDimensions,
   SavedPreset,
@@ -141,12 +142,57 @@ const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
   { id: 'analog-vu', label: 'Dual VU Meters' },
   { id: 'kaleido-shards', label: 'Kaleidoscope' },
   { id: 'flame-corona', label: 'Solar Corona' },
+  { id: 'radial-bars-inward', label: 'Implosion Ring' },
+  { id: 'spectrum-waterfall', label: 'Neon Waterfall' },
+  { id: 'pendulum-wave', label: 'Harmonic Pendulum' },
+  { id: 'constellation-net', label: 'Constellation Net' },
+  { id: 'waveform-mirror', label: 'Mirrored Scope' },
+  { id: 'hex-hive', label: 'Hex Honeycomb' },
+  { id: 'plasma-field', label: 'EM Flux Field' },
+  { id: 'laser-fan', label: 'Concert Laser Fan' },
+  { id: 'synth-grid', label: 'Synthwave Horizon' },
+  { id: 'orbit-atoms', label: 'Atomic Orbital' },
+  { id: 'bar-arc', label: 'Archway EQ' },
+  { id: 'dot-equalizer', label: 'LED Dot Matrix' },
+  { id: 'lightning-bolts', label: 'Tesla Arcs' },
+  { id: 'pixel-mosaic', label: 'Pixel Mosaic' },
+  { id: 'ripple-pond', label: 'Acoustic Ripples' },
+  { id: 'spiral-bars', label: 'Fibonacci Spiral' },
+  { id: 'pyramid-3d', label: '3D Wire Pyramid' },
+  { id: 'heartbeat-ecg', label: 'Pulse ECG Trace' },
+  { id: 'ribbon-knot', label: 'Toroidal Knot' },
+  { id: 'starburst-rays', label: 'Hypernova Rays' },
+  { id: 'glass-shards', label: 'Prismatic Shards' },
+  { id: 'vinyl-grooves', label: 'Vinyl Resonance' },
+  { id: 'staircase-eq', label: 'Stepped Skyline' },
+  { id: 'infinity-loop', label: 'Infinity Loop' },
+  { id: 'chromatic-rings', label: 'Chromatic Halo' },
+  { id: 'sound-curtain', label: 'Acoustic Curtain' },
+  { id: 'cyber-compass', label: 'HUD Compass' },
+  { id: 'nebula-clouds', label: 'Cosmic Nebula' },
 ];
 
 const LYRIC_STYLE_OPTIONS: Array<{ id: LyricStyle; label: string }> = [
   { id: 'karaoke', label: 'Karaoke' },
   { id: 'single-pop', label: 'Single Pop' },
   { id: 'subtitle-bar', label: 'Subtitle Bar' },
+  { id: 'neon-outline', label: 'Neon Outline' },
+  { id: 'typewriter', label: 'Typewriter' },
+  { id: 'cinematic-serif', label: 'Cinematic Serif' },
+  { id: 'word-sweep', label: 'Word Sweep' },
+  { id: 'glass-card', label: 'Glass Card' },
+  { id: 'bold-impact', label: 'Bold Impact' },
+  { id: 'split-reveal', label: 'Split Accent' },
+  { id: 'ticker-ribbon', label: 'Broadcast Ribbon' },
+  { id: 'floating-cloud', label: 'Floating Stack' },
+  { id: 'cyber-hud', label: 'Cyber HUD' },
+  { id: 'retro-arcade', label: 'Retro Arcade' },
+  { id: 'editorial-quote', label: 'Editorial Quote' },
+  { id: 'vinyl-sleeve', label: 'Minimal Sleeve' },
+  { id: 'glitch-flash', label: 'Chromatic Glitch' },
+  { id: 'duotone-badge', label: 'Duotone Badge' },
+  { id: 'vertical-spine', label: 'Vertical Spine' },
+  { id: 'wave-bounce', label: 'Wave Bounce' },
 ];
 
 const FADE_TYPE_LABELS: Record<FadeType, string> = {
@@ -445,18 +491,41 @@ function BatchJobRow({
         <label className="flex flex-col gap-0.5">
           <span className="text-[10px] text-slate-500">Visualizer</span>
           <select
-            value={job.settings.visualizerMode}
-            disabled={isLocked}
-            onChange={(e) =>
-              onUpdate({
-                settings: {
-                  ...job.settings,
-                  visualizerMode: e.target.value as VisualizerMode,
-                },
-              })
+            value={
+              job.settings.lyricsOnly
+                ? `__lyrics_only__:${job.settings.lyricsOnlyLayout ?? 'full-verse'}`
+                : job.settings.visualizerMode
             }
+            disabled={isLocked}
+            onChange={(e) => {
+              const val = e.target.value;
+              onUpdate({
+                settings: val.startsWith('__lyrics_only__:')
+                  ? {
+                      ...job.settings,
+                      lyricsOnly: true,
+                      lyricsOnlyLayout: val.slice(
+                        '__lyrics_only__:'.length
+                      ) as LyricsOnlyLayout,
+                    }
+                  : {
+                      ...job.settings,
+                      lyricsOnly: false,
+                      visualizerMode: val as VisualizerMode,
+                    },
+              });
+            }}
             className="w-full rounded bg-[#121620] border border-white/[0.08] px-1.5 py-1 text-[11px] text-slate-200 focus:border-cyan-400/60 outline-none disabled:opacity-60"
           >
+            <option value="__lyrics_only__:half-verse">
+              Lyrics Only · Half Verse
+            </option>
+            <option value="__lyrics_only__:full-verse">
+              Lyrics Only · Full Verse
+            </option>
+            <option value="__lyrics_only__:full-lyrics">
+              Lyrics Only · Full Lyrics
+            </option>
             {VISUALIZER_OPTIONS.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.label}
@@ -955,9 +1024,16 @@ export function ExportModal({
   const handleAddCurrentSetup = () => {
     const startLabel = formatShortTime(currentTrimStart);
     const endLabel = formatShortTime(currentTrimEnd);
-    const modeLabel =
-      VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)?.label ??
-      currentSettings.visualizerMode;
+    const layoutLabel =
+      (currentSettings.lyricsOnlyLayout ?? 'full-verse') === 'half-verse'
+        ? 'Half Verse'
+        : (currentSettings.lyricsOnlyLayout ?? 'full-verse') === 'full-lyrics'
+        ? 'Full Lyrics'
+        : 'Full Verse';
+    const modeLabel = currentSettings.lyricsOnly
+      ? `Lyrics Only · ${layoutLabel}`
+      : VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)?.label ??
+        currentSettings.visualizerMode;
     onAddBatchJobs([
       {
         label: `${modeLabel} (${startLabel}-${endLabel})`,
@@ -976,6 +1052,7 @@ export function ExportModal({
         trimEnd: currentTrimEnd,
         settings: {
           ...currentSettings,
+          lyricsOnly: false,
           visualizerMode: v.id,
         },
       }))
@@ -1507,6 +1584,61 @@ export function ExportModal({
 
                   {/* Output Summary */}
                   <div className="p-3.5 rounded-lg bg-[#090b10] border border-white/[0.08] space-y-1.5">
+                    <div className="flex items-center justify-between text-xs gap-2">
+                      <span className="text-slate-400">Visual Layer</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono tabular-nums text-slate-200">
+                          {currentSettings.lyricsOnly
+                            ? 'Lyrics Only (No Visualizer)'
+                            : VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)
+                                ?.label ?? currentSettings.visualizerMode}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({ lyricsOnly: !currentSettings.lyricsOnly })
+                          }
+                          className="px-2 py-0.5 rounded bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-[10.5px] font-medium text-cyan-300 transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          {currentSettings.lyricsOnly ? 'Enable Visualizer' : 'Use Lyrics Only'}
+                        </button>
+                      </div>
+                    </div>
+                    {currentSettings.lyricsOnly && (
+                      <div className="flex items-center justify-between text-xs gap-2">
+                        <span className="text-slate-400">Lyrics Coverage</span>
+                        <div className="flex items-center gap-1">
+                          {(
+                            [
+                              { id: 'half-verse', label: 'Half Verse' },
+                              { id: 'full-verse', label: 'Full Verse' },
+                              { id: 'full-lyrics', label: 'Full Lyrics' },
+                            ] as const
+                          ).map((opt) => {
+                            const active =
+                              (currentSettings.lyricsOnlyLayout ?? 'full-verse') === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({
+                                    lyricsOnlyLayout: opt.id as LyricsOnlyLayout,
+                                  })
+                                }
+                                className={`px-2 py-0.5 rounded border text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                                  active
+                                    ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-100'
+                                    : 'bg-white/[0.04] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <div className="flex justify-between text-xs gap-2">
                       <span className="text-slate-400">Active Clip</span>
                       <span className="font-mono tabular-nums text-slate-200">

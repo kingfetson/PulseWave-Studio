@@ -439,3 +439,58 @@ export function pickRandomPaletteIndex(length: number, currentIndex: number): nu
   }
   return next;
 }
+
+export function rotateHexHue(hex: string, hueShiftDeg: number): string {
+  const normalized = normalizeHex(hex);
+  const shift = ((hueShiftDeg % 360) + 360) % 360;
+  if (shift < 0.05 || shift > 359.95) {
+    return normalized;
+  }
+  const { r, g, b } = hexToRgb(normalized);
+  const { h, s, l } = rgbToHsl(r, g, b);
+  return hslToHex(h + shift, s, l);
+}
+
+export interface AutoCycledColorResult {
+  primaryColor: string;
+  secondaryColor: string;
+  hueShiftDeg: number;
+  progress: number;
+}
+
+export function resolveAutoCycledColors(
+  settings: {
+    primaryColor: string;
+    secondaryColor: string;
+    autoCycleColor?: boolean;
+    colorCycleSpeed?: number;
+  },
+  currentTime: number,
+  trackDuration?: number
+): AutoCycledColorResult {
+  if (!settings.autoCycleColor) {
+    return {
+      primaryColor: settings.primaryColor,
+      secondaryColor: settings.secondaryColor,
+      hueShiftDeg: 0,
+      progress: 0,
+    };
+  }
+
+  const speed = Math.max(0.25, Math.min(8, settings.colorCycleSpeed ?? 1));
+  const hasDuration =
+    typeof trackDuration === 'number' && Number.isFinite(trackDuration) && trackDuration > 0.1;
+  const cycleSpan = hasDuration ? trackDuration : 30;
+  const progress = hasDuration
+    ? Math.max(0, Math.min(1, currentTime / cycleSpan))
+    : (Math.max(0, currentTime) % cycleSpan) / cycleSpan;
+
+  const hueShiftDeg = (progress * speed * 360) % 360;
+  return {
+    primaryColor: rotateHexHue(settings.primaryColor, hueShiftDeg),
+    secondaryColor: rotateHexHue(settings.secondaryColor, hueShiftDeg),
+    hueShiftDeg,
+    progress,
+  };
+}
+

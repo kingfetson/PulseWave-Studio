@@ -2,11 +2,20 @@ import {
   ASPECT_RATIOS,
   AspectRatioKey,
   AudioBitrateKbps,
+  BackgroundFitMode,
   BloomPresetKey,
+  CoverCardPosition,
+  CoverCardSource,
+  createEmptyParticleFlowMap,
   ExportBitratePreset,
   ExportResolution,
   FadeType,
+  LyricsOnlyLayout,
   LyricStyle,
+  MotionBlurPresetKey,
+  PARTICLE_FLOW_COLS,
+  PARTICLE_FLOW_ROWS,
+  ParticleShape,
   SavedPreset,
   SceneTransitionTarget,
   SceneTransitionType,
@@ -41,8 +50,77 @@ const VALID_VISUALIZERS: VisualizerMode[] = [
   'analog-vu',
   'kaleido-shards',
   'flame-corona',
+  'radial-bars-inward',
+  'spectrum-waterfall',
+  'pendulum-wave',
+  'constellation-net',
+  'waveform-mirror',
+  'hex-hive',
+  'plasma-field',
+  'laser-fan',
+  'synth-grid',
+  'orbit-atoms',
+  'bar-arc',
+  'dot-equalizer',
+  'lightning-bolts',
+  'pixel-mosaic',
+  'ripple-pond',
+  'spiral-bars',
+  'pyramid-3d',
+  'heartbeat-ecg',
+  'ribbon-knot',
+  'starburst-rays',
+  'glass-shards',
+  'vinyl-grooves',
+  'staircase-eq',
+  'infinity-loop',
+  'chromatic-rings',
+  'sound-curtain',
+  'cyber-compass',
+  'nebula-clouds',
 ];
-const VALID_LYRIC_STYLES: LyricStyle[] = ['karaoke', 'single-pop', 'subtitle-bar'];
+const VALID_PARTICLE_SHAPES: ParticleShape[] = [
+  'circle',
+  'diamond',
+  'star',
+  'square',
+  'triangle',
+  'ring',
+];
+const VALID_LYRIC_STYLES: LyricStyle[] = [
+  'karaoke',
+  'single-pop',
+  'subtitle-bar',
+  'neon-outline',
+  'typewriter',
+  'cinematic-serif',
+  'word-sweep',
+  'glass-card',
+  'bold-impact',
+  'split-reveal',
+  'ticker-ribbon',
+  'floating-cloud',
+  'cyber-hud',
+  'retro-arcade',
+  'editorial-quote',
+  'vinyl-sleeve',
+  'glitch-flash',
+  'duotone-badge',
+  'vertical-spine',
+  'wave-bounce',
+];
+const VALID_LYRICS_ONLY_LAYOUTS: LyricsOnlyLayout[] = [
+  'half-verse',
+  'full-verse',
+  'full-lyrics',
+];
+const VALID_BG_FIT_MODES: BackgroundFitMode[] = ['cover', 'contain-blur', 'stretch'];
+const VALID_COVER_CARD_SOURCES: CoverCardSource[] = ['auto', 'bg', 'album'];
+const VALID_COVER_CARD_POSITIONS: CoverCardPosition[] = [
+  'top-left',
+  'top-center',
+  'center',
+];
 const VALID_FADE_TYPES: FadeType[] = ['linear', 'logarithmic', 'exponential'];
 const VALID_EXPORT_RESOLUTIONS: ExportResolution[] = ['720p', '1080p', '1440p'];
 const VALID_BITRATE_PRESETS: ExportBitratePreset[] = [
@@ -67,6 +145,12 @@ const VALID_BLOOM_PRESETS: BloomPresetKey[] = [
   'neon-bloom',
   'aggressive-flare',
   'custom',
+];
+const VALID_MOTION_BLUR_PRESETS: MotionBlurPresetKey[] = [
+  'none',
+  'trails',
+  'ghosting',
+  'stutter',
 ];
 const VALID_SCENE_TRANSITION_TYPES: SceneTransitionType[] = [
   'none',
@@ -136,6 +220,7 @@ export function validateAndNormalizeSettings(
   const recognizedKeys = [
     'aspectRatio',
     'visualizerMode',
+    'lyricsOnly',
     'lyricStyle',
     'primaryColor',
     'secondaryColor',
@@ -175,6 +260,13 @@ export function validateAndNormalizeSettings(
   return {
     aspectRatio,
     visualizerMode,
+    lyricsOnly:
+      typeof obj.lyricsOnly === 'boolean' ? obj.lyricsOnly : fallback.lyricsOnly,
+    lyricsOnlyLayout: VALID_LYRICS_ONLY_LAYOUTS.includes(
+      obj.lyricsOnlyLayout as LyricsOnlyLayout
+    )
+      ? (obj.lyricsOnlyLayout as LyricsOnlyLayout)
+      : fallback.lyricsOnlyLayout,
     lyricStyle,
     themePreset,
     primaryColor: isHexColor(obj.primaryColor) ? obj.primaryColor.trim() : fallback.primaryColor,
@@ -182,6 +274,13 @@ export function validateAndNormalizeSettings(
       ? obj.secondaryColor.trim()
       : fallback.secondaryColor,
     bgColor: isHexColor(obj.bgColor) ? obj.bgColor.trim() : fallback.bgColor,
+    autoCycleColor:
+      typeof obj.autoCycleColor === 'boolean'
+        ? obj.autoCycleColor
+        : fallback.autoCycleColor ?? false,
+    colorCycleSpeed: Number(
+      clampNumber(obj.colorCycleSpeed, 0.25, 8, fallback.colorCycleSpeed ?? 1).toFixed(2)
+    ),
     sensitivity: Number(clampNumber(obj.sensitivity, 0.5, 2.5, fallback.sensitivity).toFixed(2)),
     barCount,
     smoothing: Number(clampNumber(obj.smoothing, 0.1, 0.95, fallback.smoothing).toFixed(2)),
@@ -189,6 +288,14 @@ export function validateAndNormalizeSettings(
       clampNumber(obj.visualizerScale, 0.55, 1.5, fallback.visualizerScale).toFixed(2)
     ),
     motionBlur: Number(clampNumber(obj.motionBlur, 0, 0.85, fallback.motionBlur).toFixed(2)),
+    motionBlurPreset: VALID_MOTION_BLUR_PRESETS.includes(
+      obj.motionBlurPreset as MotionBlurPresetKey
+    )
+      ? (obj.motionBlurPreset as MotionBlurPresetKey)
+      : fallback.motionBlurPreset ??
+        (clampNumber(obj.motionBlur, 0, 0.85, fallback.motionBlur) > 0.005
+          ? 'trails'
+          : 'none'),
     bloomIntensity: Number(
       clampNumber(obj.bloomIntensity, 0, 1.5, fallback.bloomIntensity).toFixed(2)
     ),
@@ -222,8 +329,57 @@ export function validateAndNormalizeSettings(
         ? obj.showTrackOverlay
         : fallback.showTrackOverlay,
     lyricPosition: Math.round(clampNumber(obj.lyricPosition, 15, 92, fallback.lyricPosition)),
+    lyricShadowIntensity: Number(
+      clampNumber(obj.lyricShadowIntensity, 0, 2, fallback.lyricShadowIntensity ?? 1).toFixed(2)
+    ),
+    lyricBeatSync:
+      typeof obj.lyricBeatSync === 'boolean'
+        ? obj.lyricBeatSync
+        : fallback.lyricBeatSync ?? false,
+    lyricPulseIntensity: Number(
+      clampNumber(obj.lyricPulseIntensity, 0, 2, fallback.lyricPulseIntensity ?? 1).toFixed(2)
+    ),
     bgBlur: Math.round(clampNumber(obj.bgBlur, 0, 30, fallback.bgBlur)),
     bgDim: Number(clampNumber(obj.bgDim, 0, 0.9, fallback.bgDim).toFixed(2)),
+    bgFit: VALID_BG_FIT_MODES.includes(obj.bgFit as BackgroundFitMode)
+      ? (obj.bgFit as BackgroundFitMode)
+      : fallback.bgFit ?? 'cover',
+    bgScale: Number(clampNumber(obj.bgScale, 1, 2, fallback.bgScale ?? 1).toFixed(2)),
+    bgOffsetX: Math.round(clampNumber(obj.bgOffsetX, -50, 50, fallback.bgOffsetX ?? 0)),
+    bgOffsetY: Math.round(clampNumber(obj.bgOffsetY, -50, 50, fallback.bgOffsetY ?? 0)),
+    bgBrightness: Number(
+      clampNumber(obj.bgBrightness, 0.4, 1.6, fallback.bgBrightness ?? 1).toFixed(2)
+    ),
+    bgContrast: Number(
+      clampNumber(obj.bgContrast, 0.5, 1.6, fallback.bgContrast ?? 1).toFixed(2)
+    ),
+    bgSaturation: Number(
+      clampNumber(obj.bgSaturation, 0, 2, fallback.bgSaturation ?? 1).toFixed(2)
+    ),
+    bgVignette: Number(
+      clampNumber(obj.bgVignette, 0, 1, fallback.bgVignette ?? 0).toFixed(2)
+    ),
+    bgTintStrength: Number(
+      clampNumber(obj.bgTintStrength, 0, 0.65, fallback.bgTintStrength ?? 0).toFixed(2)
+    ),
+    showCoverCard:
+      typeof obj.showCoverCard === 'boolean'
+        ? obj.showCoverCard
+        : fallback.showCoverCard ?? false,
+    coverCardSource: VALID_COVER_CARD_SOURCES.includes(obj.coverCardSource as CoverCardSource)
+      ? (obj.coverCardSource as CoverCardSource)
+      : fallback.coverCardSource ?? 'auto',
+    coverCardPosition: VALID_COVER_CARD_POSITIONS.includes(
+      obj.coverCardPosition as CoverCardPosition
+    )
+      ? (obj.coverCardPosition as CoverCardPosition)
+      : fallback.coverCardPosition ?? 'top-left',
+    coverCardSize: Number(
+      clampNumber(obj.coverCardSize, 0.6, 1.4, fallback.coverCardSize ?? 1).toFixed(2)
+    ),
+    coverCardRadius: Math.round(
+      clampNumber(obj.coverCardRadius, 0, 32, fallback.coverCardRadius ?? 14)
+    ),
     exportFps: obj.exportFps === 60 ? 60 : obj.exportFps === 30 ? 30 : fallback.exportFps,
     exportResolution: VALID_EXPORT_RESOLUTIONS.includes(obj.exportResolution as ExportResolution)
       ? (obj.exportResolution as ExportResolution)
@@ -258,6 +414,32 @@ export function validateAndNormalizeSettings(
     )
       ? (obj.sceneTransitionTarget as SceneTransitionTarget)
       : fallback.sceneTransitionTarget,
+    particleEnabled:
+      typeof obj.particleEnabled === 'boolean'
+        ? obj.particleEnabled
+        : fallback.particleEnabled,
+    particleShape: VALID_PARTICLE_SHAPES.includes(obj.particleShape as ParticleShape)
+      ? (obj.particleShape as ParticleShape)
+      : fallback.particleShape,
+    particleVelocity: Number(
+      clampNumber(obj.particleVelocity, 0.2, 3.0, fallback.particleVelocity).toFixed(2)
+    ),
+    particleLifespan: Number(
+      clampNumber(obj.particleLifespan, 0.3, 3.5, fallback.particleLifespan).toFixed(2)
+    ),
+    particleFlowMap: (() => {
+      const expectedLen = PARTICLE_FLOW_COLS * PARTICLE_FLOW_ROWS * 2;
+      if (Array.isArray(obj.particleFlowMap) && obj.particleFlowMap.length === expectedLen) {
+        return obj.particleFlowMap.map((v) =>
+          typeof v === 'number' && Number.isFinite(v)
+            ? Number(Math.max(-1, Math.min(1, v)).toFixed(3))
+            : 0
+        );
+      }
+      return fallback.particleFlowMap.length === expectedLen
+        ? [...fallback.particleFlowMap]
+        : createEmptyParticleFlowMap();
+    })(),
   };
 }
 
@@ -389,6 +571,43 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'analog-vu': 'Dual VU Meters',
     'kaleido-shards': 'Kaleidoscope',
     'flame-corona': 'Solar Corona',
+    'radial-bars-inward': 'Implosion Ring',
+    'spectrum-waterfall': 'Neon Waterfall',
+    'pendulum-wave': 'Harmonic Pendulum',
+    'constellation-net': 'Constellation Net',
+    'waveform-mirror': 'Mirrored Scope',
+    'hex-hive': 'Hex Honeycomb',
+    'plasma-field': 'EM Flux Field',
+    'laser-fan': 'Concert Laser Fan',
+    'synth-grid': 'Synthwave Horizon',
+    'orbit-atoms': 'Atomic Orbital',
+    'bar-arc': 'Archway EQ',
+    'dot-equalizer': 'LED Dot Matrix',
+    'lightning-bolts': 'Tesla Arcs',
+    'pixel-mosaic': 'Pixel Mosaic',
+    'ripple-pond': 'Acoustic Ripples',
+    'spiral-bars': 'Fibonacci Spiral',
+    'pyramid-3d': '3D Wire Pyramid',
+    'heartbeat-ecg': 'Pulse ECG Trace',
+    'ribbon-knot': 'Toroidal Knot',
+    'starburst-rays': 'Hypernova Rays',
+    'glass-shards': 'Prismatic Shards',
+    'vinyl-grooves': 'Vinyl Resonance',
+    'staircase-eq': 'Stepped Skyline',
+    'infinity-loop': 'Infinity Loop',
+    'chromatic-rings': 'Chromatic Halo',
+    'sound-curtain': 'Acoustic Curtain',
+    'cyber-compass': 'HUD Compass',
+    'nebula-clouds': 'Cosmic Nebula',
   };
+  if (settings.lyricsOnly) {
+    const layoutLabels: Record<LyricsOnlyLayout, string> = {
+      'half-verse': 'Half Verse',
+      'full-verse': 'Full Verse',
+      'full-lyrics': 'Full Lyrics',
+    };
+    const layoutText = layoutLabels[settings.lyricsOnlyLayout ?? 'full-verse'] ?? 'Full Verse';
+    return `${ratio} · Lyrics Only (${layoutText}) · ${settings.exportFps} FPS`;
+  }
   return `${ratio} · ${modeLabel[settings.visualizerMode]} · ${settings.exportFps} FPS`;
 }

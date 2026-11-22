@@ -25,6 +25,7 @@ import {
   stepBeatDetector,
 } from './audioEngine';
 import { renderVisualizerFrame } from './canvasRenderer';
+import { resolveAutoCycledColors } from './colorHarmony';
 import {
   ResolvedVideoConfig,
   resolveSupportedVideoConfigForContainer,
@@ -152,6 +153,7 @@ function isWebCodecsUnavailable(): boolean {
 async function exportProjectViaWorker(options: {
   slicedBuffer: AudioBuffer;
   trimStart: number;
+  trackDuration: number;
   settings: StudioSettings;
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
@@ -168,6 +170,7 @@ async function exportProjectViaWorker(options: {
   const {
     slicedBuffer,
     trimStart,
+    trackDuration,
     settings,
     lyrics,
     bgImage,
@@ -294,6 +297,7 @@ async function exportProjectViaWorker(options: {
       numberOfChannels,
       channels,
       trimStart,
+      trackDuration,
       settings,
       lyrics,
       bgBitmap,
@@ -326,6 +330,7 @@ async function exportProjectViaWorker(options: {
 async function exportProjectOnMainThread(options: {
   slicedBuffer: AudioBuffer;
   trimStart: number;
+  trackDuration: number;
   settings: StudioSettings;
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
@@ -343,6 +348,7 @@ async function exportProjectOnMainThread(options: {
   const {
     slicedBuffer,
     trimStart,
+    trackDuration,
     settings,
     lyrics,
     bgImage,
@@ -554,7 +560,8 @@ async function exportProjectOnMainThread(options: {
     const needsBeatDetector =
       settings.beatDetection ||
       (settings.glitchIntensity ?? 0) > 0 ||
-      (settings.bassShake ?? 0) > 0;
+      (settings.bassShake ?? 0) > 0 ||
+      (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
       : null;
@@ -580,6 +587,8 @@ async function exportProjectOnMainThread(options: {
 
       analyzer.analyzeAt(localTime, settings.smoothing, frequencyData, timeDomainData);
 
+      const cycled = resolveAutoCycledColors(settings, absoluteTrackTime, trackDuration);
+
       let beatBurst = 0;
       let beatTriggered = false;
       if (beatTracker && needsBeatDetector) {
@@ -590,8 +599,8 @@ async function exportProjectOnMainThread(options: {
           dt,
           settings.beatSensitivity,
           minDim,
-          settings.primaryColor,
-          settings.secondaryColor
+          cycled.primaryColor,
+          cycled.secondaryColor
         );
         beatBurst = step.burstIntensity;
         beatTriggered = step.triggered;
@@ -616,6 +625,7 @@ async function exportProjectOnMainThread(options: {
         beatTriggered,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
+        trackDuration,
       });
 
       const timestampUs = Math.round(localTime * 1_000_000);
@@ -699,6 +709,7 @@ async function exportProjectOnMainThread(options: {
 async function exportProjectViaMediaRecorder(options: {
   slicedBuffer: AudioBuffer;
   trimStart: number;
+  trackDuration: number;
   settings: StudioSettings;
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
@@ -716,6 +727,7 @@ async function exportProjectViaMediaRecorder(options: {
   const {
     slicedBuffer,
     trimStart,
+    trackDuration,
     settings,
     lyrics,
     bgImage,
@@ -796,7 +808,8 @@ async function exportProjectViaMediaRecorder(options: {
   const needsBeatDetector =
     settings.beatDetection ||
     (settings.glitchIntensity ?? 0) > 0 ||
-    (settings.bassShake ?? 0) > 0;
+    (settings.bassShake ?? 0) > 0 ||
+    (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
   const beatTracker = needsBeatDetector
     ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
     : null;
@@ -886,6 +899,8 @@ async function exportProjectViaMediaRecorder(options: {
 
       analyzer.analyzeAt(elapsedSec, settings.smoothing, frequencyData, timeDomainData);
 
+      const cycled = resolveAutoCycledColors(settings, absoluteTrackTime, trackDuration);
+
       let beatBurst = 0;
       let beatTriggered = false;
       if (beatTracker && needsBeatDetector) {
@@ -896,8 +911,8 @@ async function exportProjectViaMediaRecorder(options: {
           dt,
           settings.beatSensitivity,
           minDim,
-          settings.primaryColor,
-          settings.secondaryColor
+          cycled.primaryColor,
+          cycled.secondaryColor
         );
         beatBurst = step.burstIntensity;
         beatTriggered = step.triggered;
@@ -922,6 +937,7 @@ async function exportProjectViaMediaRecorder(options: {
         beatTriggered,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
+        trackDuration,
       });
 
       const nowMs = performance.now();
@@ -1013,10 +1029,13 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     fileExtension?: string;
   };
 
+  const fullTrackDuration = audioBuffer.duration;
+
   if (isWebCodecsUnavailable()) {
     exportResult = await exportProjectViaMediaRecorder({
       slicedBuffer,
       trimStart,
+      trackDuration: fullTrackDuration,
       settings,
       lyrics,
       bgImage,
@@ -1037,6 +1056,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       exportResult = await exportProjectViaWorker({
         slicedBuffer,
         trimStart,
+        trackDuration: fullTrackDuration,
         settings,
         lyrics,
         bgImage,
@@ -1049,6 +1069,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         exportResult = await exportProjectViaMediaRecorder({
           slicedBuffer,
           trimStart,
+          trackDuration: fullTrackDuration,
           settings,
           lyrics,
           bgImage,
@@ -1062,6 +1083,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           exportResult = await exportProjectOnMainThread({
             slicedBuffer,
             trimStart,
+            trackDuration: fullTrackDuration,
             settings,
             lyrics,
             bgImage,
@@ -1075,6 +1097,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
             exportResult = await exportProjectViaMediaRecorder({
               slicedBuffer,
               trimStart,
+              trackDuration: fullTrackDuration,
               settings,
               lyrics,
               bgImage,
@@ -1096,6 +1119,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       exportResult = await exportProjectOnMainThread({
         slicedBuffer,
         trimStart,
+        trackDuration: fullTrackDuration,
         settings,
         lyrics,
         bgImage,
@@ -1109,6 +1133,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         exportResult = await exportProjectViaMediaRecorder({
           slicedBuffer,
           trimStart,
+          trackDuration: fullTrackDuration,
           settings,
           lyrics,
           bgImage,
