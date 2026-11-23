@@ -3,6 +3,7 @@ import {
   BeatShockwave,
   LyricLine,
   LyricsOnlyLayout,
+  MocapClipData,
   MotionBlurPresetKey,
   MotionBlurState,
   Particle,
@@ -13,12 +14,15 @@ import {
   VisualizerMode,
 } from '../types/studio';
 import { resolveAutoCycledColors } from './colorHarmony';
+import { renderDanceCharacter } from './danceRenderer';
 import { renderExtraVisualizerMode } from './extraVisualizers';
 import {
+  applyLyricLetterSpacing,
   applyLyricTextShadow,
   drawLyricDarkBackdropShadow,
   getLyricsOnlyStyleSpec,
   renderExtraLyricStyle,
+  resolveLyricFontFamily,
 } from './lyricDisplayRenderer';
 import { sampleParticleFlowMap } from './particleFlowMap';
 
@@ -47,6 +51,7 @@ export interface RenderFrameParams {
   motionBlurState?: MotionBlurState;
   sceneTransitionState?: SceneTransitionState;
   trackDuration?: number;
+  mocapClip?: MocapClipData | null;
 }
 
 function getImageDimensions(
@@ -660,6 +665,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     motionBlurState,
     sceneTransitionState,
     trackDuration,
+    mocapClip,
   } = params;
 
   const cycledColors = rawSettings.autoCycleColor
@@ -851,6 +857,53 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       cachedBgKey = bgKey;
       cachedBgImageRef = bgImage;
       ctx.drawImage(cachedBgCanvas, 0, 0, width, height);
+    }
+  }
+
+  // 1a-2. Beat Flash: briefly invert background and flash toward primary/secondary colors on beat trigger
+  if (settings.beatFlash) {
+    const flashImpulse = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
+    if (flashImpulse > 0.015) {
+      const swapColors = (beatShockwaves?.length ?? 0) % 2 === 1;
+      const flashStart = swapColors ? settings.secondaryColor : settings.primaryColor;
+      const flashEnd = swapColors ? settings.primaryColor : settings.secondaryColor;
+
+      // Brief contrast inversion pulse on sharp beat onset
+      const invertAlpha = Math.pow(flashImpulse, 2.1) * 0.44;
+      if (invertAlpha > 0.01) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'difference';
+        ctx.fillStyle = `rgba(255, 255, 255, ${invertAlpha.toFixed(3)})`;
+        ctx.fillRect(0, 0, width, height);
+        ctx.restore();
+      }
+
+      // Primary / secondary color background flash wash
+      const washAlpha = Math.pow(flashImpulse, 1.3) * 0.56;
+      const flashGrad = ctx.createLinearGradient(0, 0, width, height);
+      flashGrad.addColorStop(0, hexToRgba(flashStart, washAlpha));
+      flashGrad.addColorStop(0.5, hexToRgba(flashEnd, washAlpha * 0.82));
+      flashGrad.addColorStop(1, hexToRgba(flashStart, washAlpha * 0.92));
+      ctx.save();
+      ctx.fillStyle = flashGrad;
+      ctx.fillRect(0, 0, width, height);
+
+      // Center radial impact highlight
+      const radialFlash = ctx.createRadialGradient(
+        width * 0.5,
+        height * 0.5,
+        minDim * 0.02,
+        width * 0.5,
+        height * 0.5,
+        Math.hypot(width, height) * 0.6
+      );
+      radialFlash.addColorStop(0, hexToRgba(flashStart, washAlpha * 0.55));
+      radialFlash.addColorStop(0.6, hexToRgba(flashEnd, washAlpha * 0.22));
+      radialFlash.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = radialFlash;
+      ctx.fillRect(0, 0, width, height);
+      ctx.restore();
     }
   }
 
@@ -3590,6 +3643,27 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     ctx.restore();
   }
 
+  // 2b. Beat & Lyric Synced Character Dance / Motion-Capture Skeleton
+  if (settings.danceEnabled) {
+    renderDanceCharacter({
+      ctx,
+      width,
+      height,
+      minDim,
+      isPortrait,
+      currentTime,
+      bass,
+      mid,
+      treble,
+      beatBurst,
+      beatTriggered,
+      settings,
+      lyrics,
+      mocapClip,
+      hexToRgba,
+    });
+  }
+
   // 3. Track Title & Artist Name Overlay
   if (settings.showTrackOverlay && (settings.trackTitle.trim() || settings.artistName.trim())) {
     ctx.save();
@@ -4042,7 +4116,7 @@ function renderLyricsOnlyState(
     maxW: number;
   }
 
-  const styleSpec = getLyricsOnlyStyleSpec(settings.lyricStyle);
+  const styleSpec = getLyricsOnlyStyleSpec(settings.lyricStyle, settings.lyricFont);
   const formatLineText = (txt: string) =>
     styleSpec.uppercase ? txt.toUpperCase() : txt;
   const italicPrefix = styleSpec.italic ? 'italic ' : '';
@@ -4055,17 +4129,20 @@ function renderLyricsOnlyState(
     const entries: MeasuredEntry[] = [];
     let totalH = 0;
 
+    ctx.save();
     for (let i = startIdx; i <= endIdx; i++) {
       const isActive = !isPreIntro && i === activeIdx;
       const entryFs = isActive ? activeFs : fs;
       const entryLineH = isActive ? activeLineH : sideLineH;
       ctx.font = `${italicPrefix}${isActive ? 700 : 500} ${entryFs}px ${styleSpec.fontFamily}`;
+      applyLyricLetterSpacing(ctx, entryFs, settings.lyricLetterSpacing);
       const wrapped = wrapTextLines(ctx, formatLineText(lyrics[i].text), colWidth);
       const maxW = wrapped.reduce((acc, l) => Math.max(acc, ctx.measureText(l).width), 0);
       const blockH = wrapped.length * entryLineH;
       entries.push({ globalIdx: i, lines: wrapped, isActive, blockH, maxW });
       totalH += blockH + (i < endIdx ? gapY : 0);
     }
+    ctx.restore();
 
     return { entries, totalH, activeFs, sideLineH, activeLineH, gapY };
   };
@@ -4214,6 +4291,7 @@ function renderLyricsOnlyState(
     }
 
     ctx.font = `${italicPrefix}${isActive || isPreFocus ? 700 : 500} ${entryFs}px ${styleSpec.fontFamily}`;
+    applyLyricLetterSpacing(ctx, entryFs, settings.lyricLetterSpacing);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
@@ -4561,7 +4639,12 @@ function renderLyricState(
       ctx.translate(width * 0.5, anchorY);
       ctx.scale(scale, scale);
 
-      ctx.font = `700 ${activeFontSize}px "Plus Jakarta Sans", sans-serif`;
+      const lyricFontFamily = resolveLyricFontFamily(
+        settings.lyricFont,
+        '"Plus Jakarta Sans", sans-serif'
+      );
+      ctx.font = `700 ${activeFontSize}px ${lyricFontFamily}`;
+      applyLyricLetterSpacing(ctx, activeFontSize, settings.lyricLetterSpacing);
       const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth);
       const lineH = activeFontSize * 1.24;
       activeBlockHeight = wrapped.length * lineH;
@@ -4592,7 +4675,12 @@ function renderLyricState(
 
     // Previous line
     if (prevLine) {
-      ctx.font = `500 ${sideFontSize}px "Plus Jakarta Sans", sans-serif`;
+      const sideFontFamily = resolveLyricFontFamily(
+        settings.lyricFont,
+        '"Plus Jakarta Sans", sans-serif'
+      );
+      ctx.font = `500 ${sideFontSize}px ${sideFontFamily}`;
+      applyLyricLetterSpacing(ctx, sideFontSize, settings.lyricLetterSpacing);
       const prevWrapped = wrapTextLines(ctx, prevLine.text, maxTextWidth);
       const displayPrev = prevWrapped[prevWrapped.length - 1] || prevLine.text;
       const py = anchorY - activeBlockHeight * 0.5 - sideFontSize * 1.35;
@@ -4604,7 +4692,12 @@ function renderLyricState(
 
     // Upcoming line
     if (nextLine) {
-      ctx.font = `500 ${sideFontSize}px "Plus Jakarta Sans", sans-serif`;
+      const nextFontFamily = resolveLyricFontFamily(
+        settings.lyricFont,
+        '"Plus Jakarta Sans", sans-serif'
+      );
+      ctx.font = `500 ${sideFontSize}px ${nextFontFamily}`;
+      applyLyricLetterSpacing(ctx, sideFontSize, settings.lyricLetterSpacing);
       const nextWrapped = wrapTextLines(ctx, nextLine.text, maxTextWidth);
       const displayNext = nextWrapped[0] || nextLine.text;
       const ny = anchorY + activeBlockHeight * 0.5 + sideFontSize * 1.35;
@@ -4654,7 +4747,11 @@ function renderLyricState(
     const beatScaleTotal = introScale * (1 + Math.min(0.08, bass * 0.07)) * beatScale;
 
     ctx.save();
-    ctx.font = `700 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `700 ${fontSize}px ${resolveLyricFontFamily(
+      settings.lyricFont,
+      '"Plus Jakarta Sans", sans-serif'
+    )}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.88);
     const lineH = fontSize * 1.26;
     const maxLineW = wrapped.reduce((acc, l) => Math.max(acc, ctx.measureText(l).width), 0);
@@ -4713,7 +4810,11 @@ function renderLyricState(
     const anchorY = height * lyricPosFrac;
 
     ctx.save();
-    ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `600 ${fontSize}px ${resolveLyricFontFamily(
+      settings.lyricFont,
+      '"Plus Jakarta Sans", sans-serif'
+    )}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.88);
     const lineH = fontSize * 1.3;
     const maxLineW = wrapped.reduce((acc, l) => Math.max(acc, ctx.measureText(l).width), 0);

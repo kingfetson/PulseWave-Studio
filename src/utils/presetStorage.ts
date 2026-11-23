@@ -7,9 +7,13 @@ import {
   CoverCardPosition,
   CoverCardSource,
   createEmptyParticleFlowMap,
+  DanceAvatarStyle,
+  DancePlacement,
+  DanceStyleKey,
   ExportBitratePreset,
   ExportResolution,
   FadeType,
+  LyricFontKey,
   LyricsOnlyLayout,
   LyricStyle,
   MotionBlurPresetKey,
@@ -109,6 +113,14 @@ const VALID_LYRIC_STYLES: LyricStyle[] = [
   'vertical-spine',
   'wave-bounce',
 ];
+const VALID_LYRIC_FONTS: LyricFontKey[] = [
+  'auto',
+  'sans',
+  'serif',
+  'mono',
+  'display',
+  'geometric',
+];
 const VALID_LYRICS_ONLY_LAYOUTS: LyricsOnlyLayout[] = [
   'half-verse',
   'full-verse',
@@ -165,6 +177,43 @@ const VALID_SCENE_TRANSITION_TARGETS: SceneTransitionTarget[] = [
   'lyrics',
   'visualizer',
 ];
+const VALID_DANCE_STYLES: DanceStyleKey[] = [
+  'hip-hop',
+  'shuffle',
+  'robot',
+  'groove',
+  'break-freeze',
+  'mocap-salsa',
+  'mocap-ballet',
+  'mocap-breakdance',
+  'mocap-moonwalk',
+  'mocap-house',
+  'mocap-contemporary',
+  'mocap-afrobeat',
+  'mocap-tango',
+  'mocap-shuffle',
+  'mocap-kpop',
+  'mocap-disco',
+  'mocap-waltz',
+  'mocap-custom',
+];
+const VALID_DANCE_AVATARS: DanceAvatarStyle[] = [
+  'robot',
+  'ninja',
+  'casual',
+  'formal',
+  'human-dancer',
+  'human-ballerina',
+  'human-bboy',
+  'human-diva',
+  'human-suit',
+  'human-neon',
+  'silhouette',
+  'neon-cyber',
+  'holo-wire',
+  'minimal-rig',
+];
+const VALID_DANCE_PLACEMENTS: DancePlacement[] = ['left', 'center', 'right'];
 
 function clampNumber(val: unknown, min: number, max: number, fallback: number): number {
   if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
@@ -268,6 +317,9 @@ export function validateAndNormalizeSettings(
       ? (obj.lyricsOnlyLayout as LyricsOnlyLayout)
       : fallback.lyricsOnlyLayout,
     lyricStyle,
+    lyricFont: VALID_LYRIC_FONTS.includes(obj.lyricFont as LyricFontKey)
+      ? (obj.lyricFont as LyricFontKey)
+      : fallback.lyricFont ?? 'auto',
     themePreset,
     primaryColor: isHexColor(obj.primaryColor) ? obj.primaryColor.trim() : fallback.primaryColor,
     secondaryColor: isHexColor(obj.secondaryColor)
@@ -322,6 +374,67 @@ export function validateAndNormalizeSettings(
     beatSensitivity: Number(
       clampNumber(obj.beatSensitivity, 0.8, 2.0, fallback.beatSensitivity).toFixed(2)
     ),
+    beatFlash:
+      typeof obj.beatFlash === 'boolean'
+        ? obj.beatFlash
+        : fallback.beatFlash ?? false,
+    danceEnabled:
+      typeof obj.danceEnabled === 'boolean'
+        ? obj.danceEnabled
+        : fallback.danceEnabled ?? false,
+    danceStyle: VALID_DANCE_STYLES.includes(obj.danceStyle as DanceStyleKey)
+      ? (obj.danceStyle as DanceStyleKey)
+      : fallback.danceStyle ?? 'hip-hop',
+    avatarStyle: VALID_DANCE_AVATARS.includes(obj.avatarStyle as DanceAvatarStyle)
+      ? (obj.avatarStyle as DanceAvatarStyle)
+      : VALID_DANCE_AVATARS.includes(obj.danceAvatarStyle as DanceAvatarStyle)
+      ? (obj.danceAvatarStyle as DanceAvatarStyle)
+      : fallback.avatarStyle ?? fallback.danceAvatarStyle ?? 'human-dancer',
+    danceAvatarStyle: VALID_DANCE_AVATARS.includes(obj.avatarStyle as DanceAvatarStyle)
+      ? (obj.avatarStyle as DanceAvatarStyle)
+      : VALID_DANCE_AVATARS.includes(obj.danceAvatarStyle as DanceAvatarStyle)
+      ? (obj.danceAvatarStyle as DanceAvatarStyle)
+      : fallback.avatarStyle ?? fallback.danceAvatarStyle ?? 'human-dancer',
+    dancePlacement: VALID_DANCE_PLACEMENTS.includes(obj.dancePlacement as DancePlacement)
+      ? (obj.dancePlacement as DancePlacement)
+      : fallback.dancePlacement ?? 'center',
+    danceCount: Math.round(clampNumber(obj.danceCount, 1, 3, fallback.danceCount ?? 1)),
+    danceScale: Number(
+      clampNumber(obj.danceScale, 0.5, 1.6, fallback.danceScale ?? 1).toFixed(2)
+    ),
+    danceEnergy: Number(
+      clampNumber(obj.danceEnergy, 0.3, 2.0, fallback.danceEnergy ?? 1).toFixed(2)
+    ),
+    danceLyricSync:
+      typeof obj.danceLyricSync === 'boolean'
+        ? obj.danceLyricSync
+        : fallback.danceLyricSync ?? true,
+    danceStrobe: Number(
+      clampNumber(obj.danceStrobe, 0, 1, fallback.danceStrobe ?? 0).toFixed(2)
+    ),
+    danceMirror:
+      typeof obj.danceMirror === 'boolean'
+        ? obj.danceMirror
+        : fallback.danceMirror ?? false,
+    danceSpotlightIntensity: Number(
+      clampNumber(
+        obj.danceSpotlightIntensity,
+        0,
+        2,
+        fallback.danceSpotlightIntensity ?? 1
+      ).toFixed(2)
+    ),
+    danceRimColor:
+      typeof obj.danceRimColor === 'string' &&
+      (obj.danceRimColor.trim().toLowerCase() === 'auto' || isHexColor(obj.danceRimColor))
+        ? obj.danceRimColor.trim().toLowerCase() === 'auto'
+          ? 'auto'
+          : obj.danceRimColor.trim()
+        : fallback.danceRimColor ?? 'auto',
+    danceShadow:
+      typeof obj.danceShadow === 'boolean'
+        ? obj.danceShadow
+        : fallback.danceShadow ?? true,
     trackTitle: typeof obj.trackTitle === 'string' ? obj.trackTitle : fallback.trackTitle,
     artistName: typeof obj.artistName === 'string' ? obj.artistName : fallback.artistName,
     showTrackOverlay:
@@ -329,6 +442,9 @@ export function validateAndNormalizeSettings(
         ? obj.showTrackOverlay
         : fallback.showTrackOverlay,
     lyricPosition: Math.round(clampNumber(obj.lyricPosition, 15, 92, fallback.lyricPosition)),
+    lyricLetterSpacing: Number(
+      clampNumber(obj.lyricLetterSpacing, -0.06, 0.3, fallback.lyricLetterSpacing ?? 0).toFixed(2)
+    ),
     lyricShadowIntensity: Number(
       clampNumber(obj.lyricShadowIntensity, 0, 2, fallback.lyricShadowIntensity ?? 1).toFixed(2)
     ),

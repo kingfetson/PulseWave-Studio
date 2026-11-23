@@ -3,6 +3,7 @@ import { ArrayBufferTarget as WebmArrayBufferTarget, Muxer as WebmMuxer } from '
 import {
   ExportProgressState,
   LyricLine,
+  MocapClipData,
   MotionBlurState,
   Particle,
   resolveExportDimensions,
@@ -44,6 +45,7 @@ export interface ExportMp4Options {
   onProgress: (state: ExportProgressState) => void;
   autoDownload?: boolean;
   customFileName?: string;
+  mocapClip?: MocapClipData | null;
 }
 
 export interface ExportMp4Result {
@@ -158,6 +160,7 @@ async function exportProjectViaWorker(options: {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  mocapClip?: MocapClipData | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
 }): Promise<{
@@ -175,6 +178,7 @@ async function exportProjectViaWorker(options: {
     lyrics,
     bgImage,
     albumImage,
+    mocapClip,
     signal,
     onProgress,
   } = options;
@@ -303,6 +307,7 @@ async function exportProjectViaWorker(options: {
       bgBitmap,
       albumBitmap,
       fonts,
+      mocapClip: mocapClip ?? null,
     };
 
     const transferList: Transferable[] = channels.map((c) => c.buffer);
@@ -335,6 +340,7 @@ async function exportProjectOnMainThread(options: {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  mocapClip?: MocapClipData | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   startTimeMs: number;
@@ -353,6 +359,7 @@ async function exportProjectOnMainThread(options: {
     lyrics,
     bgImage,
     albumImage,
+    mocapClip,
     signal,
     onProgress,
     startTimeMs,
@@ -559,6 +566,8 @@ async function exportProjectOnMainThread(options: {
     const analyzer = new OfflineAudioAnalyzer(slicedBuffer, 2048);
     const needsBeatDetector =
       settings.beatDetection ||
+      Boolean(settings.beatFlash) ||
+      Boolean(settings.danceEnabled) ||
       (settings.glitchIntensity ?? 0) > 0 ||
       (settings.bassShake ?? 0) > 0 ||
       (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
@@ -626,6 +635,7 @@ async function exportProjectOnMainThread(options: {
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration,
+        mocapClip,
       });
 
       const timestampUs = Math.round(localTime * 1_000_000);
@@ -714,6 +724,7 @@ async function exportProjectViaMediaRecorder(options: {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  mocapClip?: MocapClipData | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   startTimeMs: number;
@@ -732,6 +743,7 @@ async function exportProjectViaMediaRecorder(options: {
     lyrics,
     bgImage,
     albumImage,
+    mocapClip,
     signal,
     onProgress,
     startTimeMs,
@@ -807,6 +819,8 @@ async function exportProjectViaMediaRecorder(options: {
   const analyzer = new OfflineAudioAnalyzer(slicedBuffer, 2048);
   const needsBeatDetector =
     settings.beatDetection ||
+    Boolean(settings.beatFlash) ||
+    Boolean(settings.danceEnabled) ||
     (settings.glitchIntensity ?? 0) > 0 ||
     (settings.bassShake ?? 0) > 0 ||
     (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
@@ -938,6 +952,7 @@ async function exportProjectViaMediaRecorder(options: {
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration,
+        mocapClip,
       });
 
       const nowMs = performance.now();
@@ -996,6 +1011,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     lyrics,
     bgImage,
     albumImage,
+    mocapClip,
     signal,
     onProgress,
     autoDownload = true,
@@ -1040,6 +1056,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       lyrics,
       bgImage,
       albumImage,
+      mocapClip,
       signal,
       onProgress,
       startTimeMs,
@@ -1061,6 +1078,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         lyrics,
         bgImage,
         albumImage,
+        mocapClip,
         signal,
         onProgress,
       });
@@ -1074,6 +1092,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           lyrics,
           bgImage,
           albumImage,
+          mocapClip,
           signal,
           onProgress,
           startTimeMs,
@@ -1088,6 +1107,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
             lyrics,
             bgImage,
             albumImage,
+            mocapClip,
             signal,
             onProgress,
             startTimeMs,
@@ -1102,6 +1122,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
               lyrics,
               bgImage,
               albumImage,
+              mocapClip,
               signal,
               onProgress,
               startTimeMs,
@@ -1124,6 +1145,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         lyrics,
         bgImage,
         albumImage,
+        mocapClip,
         signal,
         onProgress,
         startTimeMs,
@@ -1138,6 +1160,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           lyrics,
           bgImage,
           albumImage,
+          mocapClip,
           signal,
           onProgress,
           startTimeMs,

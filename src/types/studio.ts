@@ -123,6 +123,57 @@ export type LyricStyle =
 
 export type LyricsOnlyLayout = 'half-verse' | 'full-verse' | 'full-lyrics';
 
+export type LyricFontKey = 'auto' | 'sans' | 'serif' | 'mono' | 'display' | 'geometric';
+
+export type DanceStyleKey =
+  | 'hip-hop'
+  | 'shuffle'
+  | 'robot'
+  | 'groove'
+  | 'break-freeze'
+  | 'mocap-salsa'
+  | 'mocap-ballet'
+  | 'mocap-breakdance'
+  | 'mocap-moonwalk'
+  | 'mocap-house'
+  | 'mocap-contemporary'
+  | 'mocap-afrobeat'
+  | 'mocap-tango'
+  | 'mocap-shuffle'
+  | 'mocap-kpop'
+  | 'mocap-disco'
+  | 'mocap-waltz'
+  | 'mocap-custom';
+
+export type DanceAvatarStyle =
+  | 'robot'
+  | 'ninja'
+  | 'casual'
+  | 'formal'
+  | 'human-dancer'
+  | 'human-ballerina'
+  | 'human-bboy'
+  | 'human-diva'
+  | 'human-suit'
+  | 'human-neon'
+  | 'silhouette'
+  | 'neon-cyber'
+  | 'holo-wire'
+  | 'minimal-rig';
+
+export type DancePlacement = 'left' | 'center' | 'right';
+
+export interface MocapClipData {
+  name: string;
+  fps: number;
+  frameCount: number;
+  jointNames: string[];
+  bones: Array<[number, number]>;
+  frames: number[][];
+  headJointIndex: number;
+  hipsJointIndex: number;
+}
+
 export type BackgroundFitMode = 'cover' | 'contain-blur' | 'stretch';
 
 export type CoverCardSource = 'auto' | 'bg' | 'album';
@@ -324,10 +375,27 @@ export interface StudioSettings {
   bassShake: number; // 0 - 1 (beat-triggered camera oscillation on bass hits)
   beatDetection: boolean;
   beatSensitivity: number; // 0.8 - 2.0
+  beatFlash?: boolean; // briefly invert/flash background on beat triggers
+  danceEnabled?: boolean;
+  danceStyle?: DanceStyleKey;
+  avatarStyle?: DanceAvatarStyle;
+  danceAvatarStyle?: DanceAvatarStyle;
+  dancePlacement?: DancePlacement;
+  danceCount?: number; // 1 - 3 synchronized dancers on stage
+  danceScale?: number; // 0.5 - 1.6
+  danceEnergy?: number; // 0.3 - 2.0
+  danceLyricSync?: boolean;
+  danceStrobe?: number; // 0 - 1 (post-processing beat-peak strobe on dancing avatars)
+  danceMirror?: boolean; // horizontally flip dancing avatars for symmetric stage look
+  danceSpotlightIntensity?: number; // 0 - 2.0 (stage spotlight cone, floor pool & key-light intensity)
+  danceRimColor?: string; // 'auto' (follows active theme) or custom hex rim light color
+  danceShadow?: boolean; // floor-mapped drop shadow reactive to stage lighting position
   trackTitle: string;
   artistName: string;
   showTrackOverlay: boolean;
   lyricPosition: number; // 15 - 92 (% from top)
+  lyricFont?: LyricFontKey; // typography override ('auto' uses display style default)
+  lyricLetterSpacing?: number; // -0.06 - 0.30 em (character tracking / kerning)
   lyricShadowIntensity?: number; // 0 - 2.0 (0 = off, 1 = standard, 2 = deep contrast)
   lyricBeatSync?: boolean; // scale up & glow active lyrics on detected beats
   lyricPulseIntensity?: number; // 0 - 2.0 (beat sync scale/glow multiplier)

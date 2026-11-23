@@ -1,4 +1,82 @@
-import { LyricLine, LyricStyle, StudioSettings } from '../types/studio';
+import { LyricFontKey, LyricLine, LyricStyle, StudioSettings } from '../types/studio';
+
+export interface LyricFontOption {
+  id: LyricFontKey;
+  label: string;
+  shortLabel: string;
+  desc: string;
+  fontFamily: string;
+}
+
+export const LYRIC_FONT_OPTIONS: LyricFontOption[] = [
+  {
+    id: 'auto',
+    label: 'Style Default',
+    shortLabel: 'Default',
+    desc: 'Uses the selected display preset’s curated typeface',
+    fontFamily: '"Plus Jakarta Sans", sans-serif',
+  },
+  {
+    id: 'sans',
+    label: 'Sans · Plus Jakarta Sans',
+    shortLabel: 'Sans',
+    desc: 'Clean, modern studio sans-serif for crisp legibility',
+    fontFamily: '"Plus Jakarta Sans", sans-serif',
+  },
+  {
+    id: 'serif',
+    label: 'Serif · Playfair Display',
+    shortLabel: 'Serif',
+    desc: 'Editorial high-contrast serif for ballads and acoustic tracks',
+    fontFamily: '"Playfair Display", Georgia, "Times New Roman", serif',
+  },
+  {
+    id: 'mono',
+    label: 'Monospace · JetBrains Mono',
+    shortLabel: 'Mono',
+    desc: 'Precision technical monospace for HUD & synth tracks',
+    fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+  },
+  {
+    id: 'display',
+    label: 'Display · Oswald',
+    shortLabel: 'Display',
+    desc: 'Condensed punchy headline type for high-energy drops',
+    fontFamily: '"Oswald", "Plus Jakarta Sans", sans-serif',
+  },
+  {
+    id: 'geometric',
+    label: 'Geometric · Outfit',
+    shortLabel: 'Geometric',
+    desc: 'Rounded geometric display type with balanced proportions',
+    fontFamily: '"Outfit", "Plus Jakarta Sans", sans-serif',
+  },
+];
+
+export function resolveLyricFontFamily(
+  lyricFont: LyricFontKey | undefined,
+  styleDefaultFamily = '"Plus Jakarta Sans", sans-serif'
+): string {
+  if (!lyricFont || lyricFont === 'auto') {
+    return styleDefaultFamily;
+  }
+  const found = LYRIC_FONT_OPTIONS.find((opt) => opt.id === lyricFont);
+  return found ? found.fontFamily : styleDefaultFamily;
+}
+
+export function applyLyricLetterSpacing(
+  ctx: LyricRenderCtx,
+  fontSize: number,
+  letterSpacingEm?: number
+): number {
+  const em = Math.max(-0.08, Math.min(0.35, letterSpacingEm ?? 0));
+  const px = em * fontSize;
+  const anyCtx = ctx as unknown as { letterSpacing?: string };
+  if ('letterSpacing' in anyCtx) {
+    anyCtx.letterSpacing = Math.abs(px) > 0.05 ? `${px.toFixed(2)}px` : '0px';
+  }
+  return px;
+}
 
 export type LyricRenderCtx =
   | CanvasRenderingContext2D
@@ -96,128 +174,138 @@ export interface LyricsOnlyStyleSpec {
     | 'serif-rule';
 }
 
-export function getLyricsOnlyStyleSpec(style: LyricStyle): LyricsOnlyStyleSpec {
-  switch (style) {
-    case 'single-pop':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'pill',
-      };
-    case 'subtitle-bar':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'dark-box',
-        activeHighlightKind: 'solid-primary',
-      };
-    case 'neon-outline':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: true,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'neon-outline',
-      };
-    case 'typewriter':
-      return {
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-        uppercase: false,
-        italic: false,
-        containerKind: 'dark-box',
-        activeHighlightKind: 'solid-primary',
-      };
-    case 'cinematic-serif':
-      return {
-        fontFamily: 'Georgia, "Times New Roman", serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'serif-rule',
-      };
-    case 'glass-card':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'glass-box',
-        activeHighlightKind: 'solid-primary',
-      };
-    case 'bold-impact':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: true,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'gradient',
-      };
-    case 'ticker-ribbon':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'ribbon-box',
-        activeHighlightKind: 'solid-primary',
-      };
-    case 'cyber-hud':
-      return {
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-        uppercase: true,
-        italic: false,
-        containerKind: 'hud-box',
-        activeHighlightKind: 'solid-primary',
-      };
-    case 'retro-arcade':
-      return {
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-        uppercase: true,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'retro',
-      };
-    case 'editorial-quote':
-      return {
-        fontFamily: 'Georgia, "Times New Roman", serif',
-        uppercase: false,
-        italic: true,
-        containerKind: 'none',
-        activeHighlightKind: 'serif-rule',
-      };
-    case 'glitch-flash':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: true,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'glitch',
-      };
-    case 'duotone-badge':
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'duotone-badge',
-      };
-    case 'word-sweep':
-    case 'split-reveal':
-    case 'floating-cloud':
-    case 'vinyl-sleeve':
-    case 'vertical-spine':
-    case 'wave-bounce':
-    case 'karaoke':
-    default:
-      return {
-        fontFamily: '"Plus Jakarta Sans", sans-serif',
-        uppercase: false,
-        italic: false,
-        containerKind: 'none',
-        activeHighlightKind: 'gradient',
-      };
-  }
+export function getLyricsOnlyStyleSpec(
+  style: LyricStyle,
+  lyricFont?: LyricFontKey
+): LyricsOnlyStyleSpec {
+  const pickSpec = (): LyricsOnlyStyleSpec => {
+    switch (style) {
+      case 'single-pop':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'pill',
+        };
+      case 'subtitle-bar':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'dark-box',
+          activeHighlightKind: 'solid-primary',
+        };
+      case 'neon-outline':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: true,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'neon-outline',
+        };
+      case 'typewriter':
+        return {
+          fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+          uppercase: false,
+          italic: false,
+          containerKind: 'dark-box',
+          activeHighlightKind: 'solid-primary',
+        };
+      case 'cinematic-serif':
+        return {
+          fontFamily: '"Playfair Display", Georgia, "Times New Roman", serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'serif-rule',
+        };
+      case 'glass-card':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'glass-box',
+          activeHighlightKind: 'solid-primary',
+        };
+      case 'bold-impact':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: true,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'gradient',
+        };
+      case 'ticker-ribbon':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'ribbon-box',
+          activeHighlightKind: 'solid-primary',
+        };
+      case 'cyber-hud':
+        return {
+          fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+          uppercase: true,
+          italic: false,
+          containerKind: 'hud-box',
+          activeHighlightKind: 'solid-primary',
+        };
+      case 'retro-arcade':
+        return {
+          fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+          uppercase: true,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'retro',
+        };
+      case 'editorial-quote':
+        return {
+          fontFamily: '"Playfair Display", Georgia, "Times New Roman", serif',
+          uppercase: false,
+          italic: true,
+          containerKind: 'none',
+          activeHighlightKind: 'serif-rule',
+        };
+      case 'glitch-flash':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: true,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'glitch',
+        };
+      case 'duotone-badge':
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'duotone-badge',
+        };
+      case 'word-sweep':
+      case 'split-reveal':
+      case 'floating-cloud':
+      case 'vinyl-sleeve':
+      case 'vertical-spine':
+      case 'wave-bounce':
+      case 'karaoke':
+      default:
+        return {
+          fontFamily: '"Plus Jakarta Sans", sans-serif',
+          uppercase: false,
+          italic: false,
+          containerKind: 'none',
+          activeHighlightKind: 'gradient',
+        };
+    }
+  };
+  const spec = pickSpec();
+  return {
+    ...spec,
+    fontFamily: resolveLyricFontFamily(lyricFont, spec.fontFamily),
+  };
 }
 
 export function renderExtraLyricStyle(
@@ -259,6 +347,18 @@ export function renderExtraLyricStyle(
     beatDrive > 0.01
       ? hexToRgba(settings.primaryColor, Math.min(0.96, 0.48 + beatDrive * 0.34))
       : undefined;
+  const fontSans = resolveLyricFontFamily(
+    settings.lyricFont,
+    '"Plus Jakarta Sans", sans-serif'
+  );
+  const fontMono = resolveLyricFontFamily(
+    settings.lyricFont,
+    '"JetBrains Mono", ui-monospace, monospace'
+  );
+  const fontSerif = resolveLyricFontFamily(
+    settings.lyricFont,
+    '"Playfair Display", Georgia, "Times New Roman", serif'
+  );
 
   // Compute approximate line duration for progress-based animations
   const lineDuration = currLine
@@ -297,7 +397,8 @@ export function renderExtraLyricStyle(
       const scale = isAct ? (1 + Math.min(0.04, bass * 0.035)) * beatScale : 1;
 
       ctx.save();
-      ctx.font = `${isAct ? 700 : 500} ${fs}px "Plus Jakarta Sans", sans-serif`;
+      ctx.font = `${isAct ? 700 : 500} ${fs}px ${fontSans}`;
+      applyLyricLetterSpacing(ctx, fs, settings.lyricLetterSpacing);
       const wrapped = wrapTextLines(ctx, lyrics[idx].text, maxTextWidth * 0.92);
       const displayLine = isAct
         ? wrapped
@@ -399,7 +500,8 @@ export function renderExtraLyricStyle(
       );
       ctx.fill();
 
-      ctx.font = `${isAct ? 700 : 500} ${fs}px "Plus Jakarta Sans", sans-serif`;
+      ctx.font = `${isAct ? 700 : 500} ${fs}px ${fontSans}`;
+      applyLyricLetterSpacing(ctx, fs, settings.lyricLetterSpacing);
       const wrapped = wrapTextLines(ctx, lyrics[idx].text, sideColW);
       const lineH = fs * 1.22;
       ctx.textAlign = isRight ? 'left' : 'right';
@@ -442,7 +544,8 @@ export function renderExtraLyricStyle(
     const scale = (1 + Math.min(0.05, bass * 0.045)) * beatScale;
     const text = currLine.text.toUpperCase();
     ctx.save();
-    ctx.font = `800 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `800 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, text, maxTextWidth * 0.94);
     const lineH = fontSize * 1.2;
     ctx.translate(width * 0.5, anchorY);
@@ -491,7 +594,8 @@ export function renderExtraLyricStyle(
       currLine.text.slice(0, visibleChars) + (showCursor ? '▍' : ' ');
 
     ctx.save();
-    ctx.font = `600 ${fontSize}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `600 ${fontSize}px ${fontMono}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, displayStr, maxTextWidth * 0.88);
     const lineH = fontSize * 1.32;
     const maxLineW = wrapped.reduce(
@@ -557,7 +661,8 @@ export function renderExtraLyricStyle(
     const fadeIn = Math.min(1, lineElapsed / 0.28);
     ctx.save();
     ctx.globalAlpha = 0.25 + fadeIn * 0.75;
-    ctx.font = `500 ${fontSize}px Georgia, "Times New Roman", serif`;
+    ctx.font = `500 ${fontSize}px ${fontSerif}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.9);
     const lineH = fontSize * 1.3;
     const maxLineW = wrapped.reduce(
@@ -611,7 +716,8 @@ export function renderExtraLyricStyle(
   if (style === 'word-sweep') {
     const fontSize = Math.round(minDim * (isPortrait ? 0.046 : 0.044));
     ctx.save();
-    ctx.font = `700 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `700 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.92);
     const lineH = fontSize * 1.26;
     if (beatScale > 1.001) {
@@ -687,7 +793,8 @@ export function renderExtraLyricStyle(
   if (style === 'glass-card') {
     const fontSize = Math.round(minDim * (isPortrait ? 0.04 : 0.038));
     ctx.save();
-    ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `600 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.84);
     const lineH = fontSize * 1.28;
     const maxLineW = wrapped.reduce(
@@ -768,7 +875,8 @@ export function renderExtraLyricStyle(
     const upper = currLine.text.toUpperCase();
 
     ctx.save();
-    ctx.font = `900 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `900 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, upper, maxTextWidth * 0.94);
     const lineH = fontSize * 1.12;
     ctx.translate(width * 0.5, anchorY);
@@ -805,7 +913,8 @@ export function renderExtraLyricStyle(
     const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
     const revealFrac = Math.min(1, lineElapsed / 0.25);
     ctx.save();
-    ctx.font = `700 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `700 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.92);
     const lineH = fontSize * 1.28;
     const startY = anchorY - ((wrapped.length - 1) * lineH) * 0.5;
@@ -817,12 +926,19 @@ export function renderExtraLyricStyle(
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
 
+    const spaceAdvance = Math.max(
+      0,
+      ctx.measureText('a b').width - ctx.measureText('a').width - ctx.measureText('b').width
+    );
+
     wrapped.forEach((ln, lineIdx) => {
       const words = ln.split(/\s+/).filter(Boolean);
-      const totalW = ctx.measureText(ln).width;
+      const wordWidths = words.map((w) => ctx.measureText(w).width);
+      const totalW =
+        wordWidths.reduce((sum, w) => sum + w, 0) +
+        Math.max(0, words.length - 1) * spaceAdvance;
       let cursorX = width * 0.5 - totalW * 0.5;
       const ly = startY + lineIdx * lineH;
-      const spaceW = ctx.measureText(' ').width;
 
       words.forEach((word, wIdx) => {
         const isAccent = (wIdx + lineIdx) % 2 === 1;
@@ -838,7 +954,7 @@ export function renderExtraLyricStyle(
           beatDrive
         );
         ctx.fillText(word, cursorX, ly);
-        cursorX += ctx.measureText(word).width + spaceW;
+        cursorX += wordWidths[wIdx] + spaceAdvance;
       });
     });
 
@@ -867,7 +983,8 @@ export function renderExtraLyricStyle(
   if (style === 'ticker-ribbon') {
     const fontSize = Math.round(minDim * (isPortrait ? 0.036 : 0.033));
     ctx.save();
-    ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `600 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, width - safePadX * 2.4);
     const lineH = fontSize * 1.26;
     const bandH = wrapped.length * lineH + fontSize * 0.95;
@@ -924,7 +1041,8 @@ export function renderExtraLyricStyle(
     const fontSize = Math.round(minDim * (isPortrait ? 0.036 : 0.034));
     const upper = currLine.text.toUpperCase();
     ctx.save();
-    ctx.font = `600 ${fontSize}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `600 ${fontSize}px ${fontMono}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, upper, maxTextWidth * 0.84);
     const lineH = fontSize * 1.28;
     const maxLineW = wrapped.reduce(
@@ -995,6 +1113,7 @@ export function renderExtraLyricStyle(
     applyLyricTextShadow(ctx, 'rgba(0, 0, 0, 0.75)', 4, shadowIntensity, 1);
     const tagFs = Math.max(10, Math.round(fontSize * 0.44));
     ctx.font = `700 ${tagFs}px "JetBrains Mono", ui-monospace, monospace`;
+    applyLyricLetterSpacing(ctx, tagFs, 0);
     ctx.fillStyle = settings.primaryColor;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
@@ -1004,7 +1123,8 @@ export function renderExtraLyricStyle(
       boxY - 4
     );
 
-    ctx.font = `600 ${fontSize}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `600 ${fontSize}px ${fontMono}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     ctx.fillStyle = '#f8fafc';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1030,7 +1150,8 @@ export function renderExtraLyricStyle(
     const upper = currLine.text.toUpperCase();
     const scale = (1 + Math.min(0.05, bass * 0.045)) * beatScale;
     ctx.save();
-    ctx.font = `800 ${fontSize}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `800 ${fontSize}px ${fontMono}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, upper, maxTextWidth * 0.92);
     const lineH = fontSize * 1.24;
     ctx.translate(width * 0.5, anchorY);
@@ -1060,7 +1181,8 @@ export function renderExtraLyricStyle(
   if (style === 'editorial-quote') {
     const fontSize = Math.round(minDim * (isPortrait ? 0.041 : 0.039));
     ctx.save();
-    ctx.font = `italic 600 ${fontSize}px Georgia, "Times New Roman", serif`;
+    ctx.font = `italic 600 ${fontSize}px ${fontSerif}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.82);
     const lineH = fontSize * 1.32;
     const blockH = wrapped.length * lineH;
@@ -1083,13 +1205,15 @@ export function renderExtraLyricStyle(
     ctx.fillRect(barX, topY - 4, 4, blockH + 8);
 
     // Oversized decorative opening quote mark
-    ctx.font = `700 ${Math.round(fontSize * 1.9)}px Georgia, serif`;
+    ctx.font = `700 ${Math.round(fontSize * 1.9)}px ${fontSerif}`;
+    applyLyricLetterSpacing(ctx, fontSize, 0);
     ctx.fillStyle = hexToRgba(settings.primaryColor, 0.35);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'top';
     ctx.fillText('“', barX - 8, topY - fontSize * 0.45);
 
-    ctx.font = `italic 600 ${fontSize}px Georgia, "Times New Roman", serif`;
+    ctx.font = `italic 600 ${fontSize}px ${fontSerif}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     const startY = anchorY - ((wrapped.length - 1) * lineH) * 0.5;
@@ -1119,7 +1243,8 @@ export function renderExtraLyricStyle(
     const stamp = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
     ctx.save();
-    ctx.font = `500 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `500 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.88);
     const lineH = fontSize * 1.28;
     const baseY = Math.max(
@@ -1136,6 +1261,7 @@ export function renderExtraLyricStyle(
     // Small timecode pill above text
     const pillFs = Math.max(10, Math.round(fontSize * 0.48));
     ctx.font = `600 ${pillFs}px "JetBrains Mono", ui-monospace, monospace`;
+    applyLyricLetterSpacing(ctx, pillFs, 0);
     const pillW = ctx.measureText(stamp).width + pillFs * 1.1;
     const pillH = pillFs * 1.55;
     const pillY = baseY - (wrapped.length * lineH) * 0.5 - pillH - fontSize * 0.25;
@@ -1152,7 +1278,8 @@ export function renderExtraLyricStyle(
     ctx.textBaseline = 'middle';
     ctx.fillText(stamp, safePadX + pillW * 0.5, pillY + pillH * 0.52);
 
-    ctx.font = `500 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `500 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     ctx.textAlign = 'left';
     const startY = baseY - ((wrapped.length - 1) * lineH) * 0.5;
     wrapped.forEach((ln, idx) => {
@@ -1185,7 +1312,8 @@ export function renderExtraLyricStyle(
     const shiftY = Math.cos(currentTime * 51) * jitter * 0.35;
 
     ctx.save();
-    ctx.font = `800 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `800 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, upper, maxTextWidth * 0.92);
     const lineH = fontSize * 1.22;
     if (beatScale > 1.001) {
@@ -1225,7 +1353,8 @@ export function renderExtraLyricStyle(
     const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.041));
     const scale = (1 + Math.min(0.06, bass * 0.05)) * beatScale;
     ctx.save();
-    ctx.font = `800 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+    ctx.font = `800 ${fontSize}px ${fontSans}`;
+    applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
     const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.86);
     const lineH = fontSize * 1.24;
     const maxLineW = wrapped.reduce(
@@ -1272,7 +1401,8 @@ export function renderExtraLyricStyle(
   // 'wave-bounce'
   const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
   ctx.save();
-  ctx.font = `700 ${fontSize}px "Plus Jakarta Sans", sans-serif`;
+  ctx.font = `700 ${fontSize}px ${fontSans}`;
+  applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
   const wrapped = wrapTextLines(ctx, currLine.text, maxTextWidth * 0.9);
   const lineH = fontSize * 1.3;
   const startY = anchorY - ((wrapped.length - 1) * lineH) * 0.5;
@@ -1285,10 +1415,17 @@ export function renderExtraLyricStyle(
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
 
+  const spaceAdvance = Math.max(
+    0,
+    ctx.measureText('a b').width - ctx.measureText('a').width - ctx.measureText('b').width
+  );
+
   wrapped.forEach((ln, lineIdx) => {
     const words = ln.split(/\s+/).filter(Boolean);
-    const totalW = ctx.measureText(ln).width;
-    const spaceW = ctx.measureText(' ').width;
+    const wordWidths = words.map((w) => ctx.measureText(w).width);
+    const totalW =
+      wordWidths.reduce((sum, w) => sum + w, 0) +
+      Math.max(0, words.length - 1) * spaceAdvance;
     let cursorX = width * 0.5 - totalW * 0.5;
     const baseLy = startY + lineIdx * lineH;
 
@@ -1308,7 +1445,7 @@ export function renderExtraLyricStyle(
         beatDrive
       );
       ctx.fillText(word, cursorX, baseLy + waveY);
-      cursorX += ctx.measureText(word).width + spaceW;
+      cursorX += wordWidths[wIdx] + spaceAdvance;
     });
   });
   ctx.restore();

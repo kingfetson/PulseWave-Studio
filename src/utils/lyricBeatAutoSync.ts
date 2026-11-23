@@ -235,3 +235,194 @@ export function suggestTimestampsForPlainLyrics(
 
   return suggestions;
 }
+
+export interface AutoAlignLyricsResult {
+  alignedLyrics: LyricLine[];
+  alignedCount: number;
+  totalCount: number;
+  highEnergyPeakCount: number;
+  estimatedBpm: number | null;
+}
+
+/**
+ * Refines all existing lyric cue timestamps by extracting audio broadband amplitude peaks
+ * alongside low-pass beat triggers and snapping each cue to the nearest high-energy beat.
+ */
+export function autoAlignLyricsToAmplitudePeaks(
+  lyrics: LyricLine[],
+  audioBuffer: AudioBuffer,
+  options: {
+    beatSensitivity: number;
+    maxSnapSec?: number;
+  }
+): AutoAlignLyricsResult {
+  const ordered = [...lyrics].sort((a, b) => a.time - b.time);
+  const duration = audioBuffer.duration;
+  if (ordered.length === 0 || duration <= 0.2) {
+    return {
+      alignedLyrics: ordered,
+      alignedCount: 0,
+      totalCount: ordered.length,
+      highEnergyPeakCount: 0,
+      estimatedBpm: null,
+    };
+  }
+
+  const maxSnapSec = Math.max(0.15, Math.min(1.2, options.maxSnapSec ?? 0.55));
+  const analysis = analyzeBeatsFromAudioBuffer(audioBuffer, {
+    startSec: 0,
+    endSec: duration,
+    beatSensitivity: options.beatSensitivity,
+  });
+
+  // Build broadband 10ms RMS amplitude envelope across the track
+  const sampleRate = audioBuffer.sampleRate;
+  const ch0 = audioBuffer.getChannelData(0);
+  const ch1 = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : null;
+  const totalSamples = ch0.length;
+  const hopSec = 0.01;
+  const winHalfSamples = Math.max(64, Math.floor(sampleRate * 0.014));
+  const frameCount = Math.max(1, Math.floor(duration / hopSec) + 1);
+  const rmsEnvelope = new Float32Array(frameCount);
+
+  let envelopeSum = 0;
+  for (let f = 0; f < frameCount; f++) {
+    const center = Math.min(totalSamples - 1, Math.floor(f * hopSec * sampleRate));
+    const start = Math.max(0, center - winHalfSamples);
+    const end = Math.min(totalSamples, center + winHalfSamples);
+    let sumSq = 0;
+    let count = 0;
+    for (let i = start; i < end; i += 2) {
+      const s = ch1 ? 0.5 * (ch0[i] + ch1[i]) : ch0[i];
+      sumSq += s * s;
+      count++;
+    }
+    const rms = count > 0 ? Math.min(1, Math.sqrt(sumSq / count) * 1.45) : 0;
+    rmsEnvelope[f] = rms;
+    envelopeSum += rms;
+  }
+
+  const meanBroadband = envelopeSum / frameCount;
+
+  interface AmplitudeBeatPeak {
+    timeSec: number;
+    score: number;
+  }
+
+  const peaks: AmplitudeBeatPeak[] = [];
+
+  // 1. Refine each detected low-pass beat to the exact nearby amplitude crest (±35ms)
+  for (const beat of analysis.beats) {
+    const baseIdx = Math.round(beat.timeSec / hopSec);
+    const searchFrom = Math.max(0, baseIdx - 3);
+    const searchTo = Math.min(frameCount - 1, baseIdx + 4);
+    let bestIdx = Math.max(0, Math.min(frameCount - 1, baseIdx));
+    let bestRms = rmsEnvelope[bestIdx] ?? 0;
+
+    for (let idx = searchFrom; idx <= searchTo; idx++) {
+      if (rmsEnvelope[idx] > bestRms) {
+        bestRms = rmsEnvelope[idx];
+        bestIdx = idx;
+      }
+    }
+
+    const score = beat.energy * 0.55 + bestRms * 0.45;
+    peaks.push({
+      timeSec: Number((bestIdx * hopSec).toFixed(2)),
+      score,
+    });
+  }
+
+  // 2. Capture prominent broadband amplitude peaks (snare hits, vocal onsets) between bass kicks
+  const broadbandPeakThreshold = Math.max(0.06, meanBroadband * 1.28);
+  for (let f = 2; f < frameCount - 2; f++) {
+    const v = rmsEnvelope[f];
+    if (
+      v >= broadbandPeakThreshold &&
+      v >= rmsEnvelope[f - 1] &&
+      v >= rmsEnvelope[f + 1] &&
+      v >= rmsEnvelope[f - 2] &&
+      v >= rmsEnvelope[f + 2]
+    ) {
+      const t = Number((f * hopSec).toFixed(2));
+      const hasNearbyBeat = peaks.some((p) => Math.abs(p.timeSec - t) < 0.13);
+      if (!hasNearbyBeat) {
+        peaks.push({
+          timeSec: t,
+          score: v * 0.85,
+        });
+      }
+    }
+  }
+
+  peaks.sort((a, b) => a.timeSec - b.timeSec);
+
+  // 3. Identify high-energy beats from merged amplitude peaks
+  const meanPeakScore =
+    peaks.length > 0
+      ? peaks.reduce((sum, p) => sum + p.score, 0) / peaks.length
+      : 0;
+  const highThreshold = Math.max(0.04, meanPeakScore * 0.85);
+  const highEnergyPeaks = peaks.filter((p) => p.score >= highThreshold);
+  const primaryPool = highEnergyPeaks.length > 0 ? highEnergyPeaks : peaks;
+
+  // 4. Snap each cue chronologically to its nearest high-energy amplitude beat
+  const maxTrackTime = Math.max(0, duration - 0.1);
+  let minNextTime = 0;
+  let alignedCount = 0;
+
+  const findBestInPool = (
+    pool: AmplitudeBeatPeak[],
+    cueTime: number,
+    windowSec: number
+  ): AmplitudeBeatPeak | null => {
+    let best: AmplitudeBeatPeak | null = null;
+    let bestCost = Infinity;
+    for (const p of pool) {
+      if (p.timeSec < minNextTime - 0.01) continue;
+      const dist = Math.abs(p.timeSec - cueTime);
+      if (dist > windowSec) {
+        if (p.timeSec > cueTime + windowSec) break;
+        continue;
+      }
+      // Prioritize proximity while letting stronger amplitude peaks break near-ties
+      const cost = dist - Math.min(0.045, p.score * 0.055);
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = p;
+      }
+    }
+    return best;
+  };
+
+  const alignedLyrics: LyricLine[] = ordered.map((cue) => {
+    const matched =
+      findBestInPool(primaryPool, cue.time, maxSnapSec) ??
+      findBestInPool(peaks, cue.time, Math.min(0.35, maxSnapSec));
+
+    let nextTime = matched ? matched.timeSec : cue.time;
+    if (nextTime < minNextTime) nextTime = minNextTime;
+    nextTime = Number(Math.max(0, Math.min(maxTrackTime, nextTime)).toFixed(2));
+
+    if (Math.abs(nextTime - cue.time) >= 0.01) {
+      alignedCount++;
+    }
+    minNextTime = nextTime + 0.15;
+
+    return {
+      ...cue,
+      time: nextTime,
+    };
+  });
+
+  alignedLyrics.sort((a, b) => a.time - b.time);
+
+  return {
+    alignedLyrics,
+    alignedCount,
+    totalCount: ordered.length,
+    highEnergyPeakCount: primaryPool.length,
+    estimatedBpm: analysis.estimatedBpm,
+  };
+}
+

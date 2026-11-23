@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
@@ -24,6 +24,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 import {
@@ -117,6 +118,8 @@ interface ExportModalProps {
   onStartSingleExport: () => void;
   onShareSingle: () => void;
   onShareBatchJob: (job: BatchExportJob) => void;
+  lyricsCount?: number;
+  onUploadCaptionsFile?: (file: File) => Promise<number>;
 }
 
 const VISUALIZER_OPTIONS: Array<{ id: VisualizerMode; label: string }> = [
@@ -946,7 +949,11 @@ export function ExportModal({
   onStartSingleExport,
   onShareSingle,
   onShareBatchJob,
+  lyricsCount = 0,
+  onUploadCaptionsFile,
 }: ExportModalProps) {
+  const captionInputRef = useRef<HTMLInputElement>(null);
+  const [captionUploadNotice, setCaptionUploadNotice] = useState<string | null>(null);
   const [profileNameInput, setProfileNameInput] = useState('');
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const [autoArrangeOnProfileRatio, setAutoArrangeOnProfileRatio] = useState(true);
@@ -974,6 +981,12 @@ export function ExportModal({
     const t = window.setTimeout(() => setProfileNotice(null), 2600);
     return () => window.clearTimeout(t);
   }, [profileNotice]);
+
+  useEffect(() => {
+    if (!captionUploadNotice) return;
+    const t = window.setTimeout(() => setCaptionUploadNotice(null), 2800);
+    return () => window.clearTimeout(t);
+  }, [captionUploadNotice]);
 
   if (!isOpen) return null;
 
@@ -1659,6 +1672,44 @@ export function ExportModal({
                       <span className="font-mono tabular-nums text-slate-200">
                         ~{estimatedSizeMb.toFixed(1)} MB · {FADE_TYPE_LABELS[currentSettings.fadeType]}
                       </span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs gap-2 pt-0.5">
+                      <span className="text-slate-400">Lyrics / Captions</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono tabular-nums text-slate-200">
+                          {captionUploadNotice ??
+                            (lyricsCount > 0 ? `${lyricsCount} synced cues` : 'No captions')}
+                        </span>
+                        {onUploadCaptionsFile && (
+                          <>
+                            <input
+                              ref={captionInputRef}
+                              type="file"
+                              accept=".lrc,.srt,.vtt,.txt"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = '';
+                                if (!file) return;
+                                const count = await onUploadCaptionsFile(file);
+                                setCaptionUploadNotice(
+                                  count > 0
+                                    ? `Loaded ${count} cues`
+                                    : 'No captions found'
+                                );
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => captionInputRef.current?.click()}
+                              className="px-2 py-0.5 rounded bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-[10.5px] font-medium text-cyan-300 transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                            >
+                              <Upload className="w-3 h-3" />
+                              <span>Upload .lrc / .srt</span>
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </>

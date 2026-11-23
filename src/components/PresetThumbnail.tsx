@@ -115,8 +115,19 @@ export function PresetThumbnail({ settings }: PresetThumbnailProps) {
         particles,
         isExport: true,
         albumRotationRef,
-        beatBurst: settings.beatDetection || settings.lyricBeatSync ? 0.68 : 0,
-        beatTriggered: (settings.beatDetection || Boolean(settings.lyricBeatSync)) && s === 0,
+        beatBurst:
+          settings.beatDetection ||
+          settings.lyricBeatSync ||
+          settings.beatFlash ||
+          settings.danceEnabled
+            ? 0.68
+            : 0,
+        beatTriggered:
+          (settings.beatDetection ||
+            Boolean(settings.lyricBeatSync) ||
+            Boolean(settings.beatFlash) ||
+            Boolean(settings.danceEnabled)) &&
+          s === 0,
         beatShockwaves: sampleShockwaves,
         motionBlurState,
       });

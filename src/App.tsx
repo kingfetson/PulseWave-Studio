@@ -25,6 +25,7 @@ import {
   ExportProfile,
   ExportProgressState,
   LyricLine,
+  MocapClipData,
   MotionBlurState,
   Particle,
   SavedPreset,
@@ -45,6 +46,7 @@ import {
   stepBeatDetector,
 } from './utils/audioEngine';
 import { computeAutoArrangeFraming } from './utils/autoArrange';
+import { parseMocapFile } from './utils/bvhParser';
 import { renderVisualizerFrame } from './utils/canvasRenderer';
 import { resolveAutoCycledColors } from './utils/colorHarmony';
 import {
@@ -62,7 +64,7 @@ import {
   loadCustomExportProfiles,
   persistCustomExportProfiles,
 } from './utils/exportProfiles';
-import { createLyricId } from './utils/lrcParser';
+import { createLyricId, parseCaptionsFile } from './utils/lrcParser';
 import {
   applyMidiSignalToMappings,
   createMappingFromSignal,
@@ -110,6 +112,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   lyricsOnly: false,
   lyricsOnlyLayout: 'full-verse',
   lyricStyle: 'karaoke',
+  lyricFont: 'auto',
   themePreset: 'cyberpunk',
   primaryColor: THEME_PRESETS[0].primaryColor,
   secondaryColor: THEME_PRESETS[0].secondaryColor,
@@ -130,6 +133,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   bassShake: 0,
   visualizerScale: 1,
   lyricPosition: 80,
+  lyricLetterSpacing: 0,
   lyricShadowIntensity: 1,
   lyricBeatSync: false,
   lyricPulseIntensity: 1,
@@ -161,6 +165,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   showSafeZone: false,
   beatDetection: false,
   beatSensitivity: 1.25,
+  beatFlash: false,
   sceneTransitionType: 'crossfade',
   sceneTransitionDuration: 0.45,
   sceneTransitionTarget: 'both',
@@ -169,6 +174,20 @@ const DEFAULT_SETTINGS: StudioSettings = {
   particleVelocity: 1.0,
   particleLifespan: 1.2,
   particleFlowMap: createEmptyParticleFlowMap(),
+  danceEnabled: false,
+  danceStyle: 'hip-hop',
+  avatarStyle: 'human-dancer',
+  danceAvatarStyle: 'human-dancer',
+  dancePlacement: 'center',
+  danceCount: 1,
+  danceScale: 1,
+  danceEnergy: 1,
+  danceLyricSync: true,
+  danceStrobe: 0,
+  danceMirror: false,
+  danceSpotlightIntensity: 1,
+  danceRimColor: 'auto',
+  danceShadow: true,
 };
 
 const INITIAL_EXPORT_STATE: ExportProgressState = {
@@ -230,9 +249,10 @@ export default function App() {
   } | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
 
-  // Image overlays
+  // Image overlays & motion capture clip
   const [bgImageName, setBgImageName] = useState<string | null>(null);
   const [albumImageName, setAlbumImageName] = useState<string | null>(null);
+  const [mocapClip, setMocapClip] = useState<MocapClipData | null>(null);
 
   // Export modal & batch queue state
   const [exportState, setExportState] = useState<ExportProgressState>(INITIAL_EXPORT_STATE);
@@ -307,6 +327,8 @@ export default function App() {
   settingsRef.current = settings;
   const lyricsRef = useRef(lyrics);
   lyricsRef.current = lyrics;
+  const mocapClipRef = useRef<MocapClipData | null>(null);
+  mocapClipRef.current = mocapClip;
   const trimRef = useRef({ trimStart, trimEnd, loopClip });
   trimRef.current = { trimStart, trimEnd, loopClip };
   const isPlayingRef = useRef(isPlaying);
@@ -546,6 +568,7 @@ export default function App() {
         'bassShake',
         'visualizerScale',
         'lyricPosition',
+        'lyricLetterSpacing',
         'lyricShadowIntensity',
         'lyricPulseIntensity',
         'videoBitrateMbps',
@@ -782,6 +805,26 @@ export default function App() {
     [commitHistory]
   );
 
+  const handleUploadCaptionsFile = useCallback(
+    async (file: File): Promise<number> => {
+      try {
+        const text = await file.text();
+        const parsed = parseCaptionsFile(
+          text,
+          file.name,
+          duration > 0 ? duration : undefined
+        );
+        if (parsed.length > 0) {
+          handleLyricsChange(parsed);
+        }
+        return parsed.length;
+      } catch {
+        return 0;
+      }
+    },
+    [duration, handleLyricsChange]
+  );
+
   const handleAudioFileSelect = useCallback(
     async (file: File) => {
       setAudioError(null);
@@ -1011,6 +1054,44 @@ export default function App() {
     };
     img.src = url;
   }, []);
+
+  const handleMocapFileSelect = useCallback(
+    async (
+      file: File
+    ): Promise<{ ok: true; clip: MocapClipData } | { ok: false; error: string }> => {
+      try {
+        const text = await file.text();
+        const clip = parseMocapFile(text, file.name);
+        setMocapClip(clip);
+        commitHistory((prev) => ({
+          ...prev,
+          settings: {
+            ...prev.settings,
+            danceEnabled: true,
+            danceStyle: 'mocap-custom',
+          },
+        }));
+        return { ok: true, clip };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Unable to parse motion capture file.',
+        };
+      }
+    },
+    [commitHistory]
+  );
+
+  const handleClearMocapClip = useCallback(() => {
+    setMocapClip(null);
+    commitHistory((prev) => ({
+      ...prev,
+      settings:
+        prev.settings.danceStyle === 'mocap-custom'
+          ? { ...prev.settings, danceStyle: 'hip-hop' }
+          : prev.settings,
+    }));
+  }, [commitHistory]);
 
   const loadProjectIntoStudio = useCallback(
     async (record: StudioProjectRecord) => {
@@ -1719,6 +1800,8 @@ export default function App() {
 
       const needsBeatDetector =
         activeSettings.beatDetection ||
+        Boolean(activeSettings.beatFlash) ||
+        Boolean(activeSettings.danceEnabled) ||
         (activeSettings.glitchIntensity ?? 0) > 0 ||
         (activeSettings.bassShake ?? 0) > 0 ||
         (Boolean(activeSettings.lyricBeatSync) &&
@@ -1768,6 +1851,7 @@ export default function App() {
             lyrics: lyricsRef.current,
             bgImage: bgImageRef.current,
             albumImage: albumImageRef.current,
+            mocapClip: mocapClipRef.current,
             particles: particlesRef.current,
             isExport: false,
             albumRotationRef: albumRotationRef.current,
@@ -1834,6 +1918,7 @@ export default function App() {
           lyrics,
           bgImage: bgImageRef.current,
           albumImage: albumImageRef.current,
+          mocapClip: mocapClipRef.current,
           signal: controller.signal,
           onProgress: (next) => setExportState(next),
         });
@@ -2154,6 +2239,7 @@ export default function App() {
             lyrics: lyricsRef.current,
             bgImage: bgImageRef.current,
             albumImage: albumImageRef.current,
+            mocapClip: mocapClipRef.current,
             signal: controller.signal,
             autoDownload: autoDownloadBatchRef.current,
             customFileName,
@@ -2502,6 +2588,7 @@ export default function App() {
           lyrics: lyricsRef.current,
           bgImage: bgImageRef.current,
           albumImage: albumImageRef.current,
+          mocapClip: mocapClipRef.current,
           particles,
           isExport: true,
           albumRotationRef: rotRef,
@@ -2787,6 +2874,9 @@ export default function App() {
           midiMappingBadges={midiMappingBadges}
           onOpenMidiMapping={() => setIsMidiModalOpen(true)}
           onPreviewSceneTransition={handlePreviewSceneTransition}
+          mocapClip={mocapClip}
+          onMocapFileSelect={handleMocapFileSelect}
+          onClearMocapClip={handleClearMocapClip}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -2808,6 +2898,13 @@ export default function App() {
               audioInputRef.current?.click();
             }}
             onLoadDemo={() => void handleLoadDemo()}
+            lyrics={lyrics}
+            currentTime={currentTime}
+            duration={duration}
+            isGeneratingCaptions={isGeneratingCaptions}
+            onLyricsChange={handleLyricsChange}
+            onAutoGenerateCaptions={() => void handleAutoGenerateCaptions()}
+            onOpenLyricsTab={() => setActiveTab('lyrics')}
           />
 
           <TransportBar
@@ -2888,6 +2985,8 @@ export default function App() {
         onStartSingleExport={() => void handleStartExport()}
         onShareSingle={() => handleOpenShareModal('latest-single-export')}
         onShareBatchJob={(job) => handleOpenShareModal(job.id)}
+        lyricsCount={lyrics.length}
+        onUploadCaptionsFile={handleUploadCaptionsFile}
       />
 
       <ShareModal

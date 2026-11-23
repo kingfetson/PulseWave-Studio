@@ -32,11 +32,16 @@ import {
   BloomPresetKey,
   CoverCardPosition,
   CoverCardSource,
+  DanceAvatarStyle,
+  DancePlacement,
+  DanceStyleKey,
   ExportResolution,
   FadeType,
+  LyricFontKey,
   LyricLine,
   LyricsOnlyLayout,
   LyricStyle,
+  MocapClipData,
   MotionBlurPresetKey,
   resolveExportDimensions,
   SavedPreset,
@@ -44,6 +49,15 @@ import {
   StudioSettings,
   VisualizerMode,
 } from '../types/studio';
+import {
+  DANCE_AVATAR_OPTIONS,
+  DANCE_STYLE_OPTIONS,
+} from '../utils/danceRenderer';
+import {
+  BUILT_IN_MOCAP_LIBRARY,
+  downloadBuiltInMocapBvh,
+  isBuiltInMocapStyle,
+} from '../utils/builtInMocapLibrary';
 import {
   BLOOM_PRESETS,
   DEFAULT_BLOOM_SHADER_PARAMS,
@@ -59,12 +73,17 @@ import {
   createLyricId,
   formatLrcTimestamp,
   formatShortTime,
-  parseLrc,
+  parseCaptionsFile,
   parseTimeInput,
   serializeLrc,
 } from '../utils/lrcParser';
 import {
+  LYRIC_FONT_OPTIONS,
+  resolveLyricFontFamily,
+} from '../utils/lyricDisplayRenderer';
+import {
   analyzeBeatsFromAudioBuffer,
+  autoAlignLyricsToAmplitudePeaks,
   BeatDetectionAnalysis,
   LyricBeatSuggestion,
   suggestBeatSyncedTimestamps,
@@ -126,6 +145,11 @@ interface ControlSidebarProps {
   midiMappingBadges?: Partial<Record<MidiMappableParamKey, string>>;
   onOpenMidiMapping?: () => void;
   onPreviewSceneTransition?: () => void;
+  mocapClip?: MocapClipData | null;
+  onMocapFileSelect?: (
+    file: File
+  ) => Promise<{ ok: true; clip: MocapClipData } | { ok: false; error: string }>;
+  onClearMocapClip?: () => void;
 }
 
 const TABS: Array<{ id: SidebarTab; label: string; icon: typeof Sliders }> = [
@@ -645,10 +669,15 @@ export function ControlSidebar({
   midiMappingBadges,
   onOpenMidiMapping,
   onPreviewSceneTransition,
+  mocapClip = null,
+  onMocapFileSelect,
+  onClearMocapClip,
 }: ControlSidebarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
   const albumInputRef = useRef<HTMLInputElement>(null);
   const lrcInputRef = useRef<HTMLInputElement>(null);
+  const mediaCaptionInputRef = useRef<HTMLInputElement>(null);
+  const mocapInputRef = useRef<HTMLInputElement>(null);
   const presetJsonInputRef = useRef<HTMLInputElement>(null);
   const autoCaptionsSectionRef = useRef<HTMLElement>(null);
 
@@ -670,8 +699,13 @@ export function ControlSidebar({
     setEndInput(formatShortTime(trimEnd));
   }, [trimEnd]);
 
-  // Tap-to-Sync State
+  // Tap-to-Sync & Caption Upload State
   const [rawLyricsText, setRawLyricsText] = useState('');
+  const [quickMediaCaption, setQuickMediaCaption] = useState('');
+  const [captionUploadNotice, setCaptionUploadNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const [tapMode, setTapMode] = useState(false);
   const [tapLines, setTapLines] = useState<string[]>([]);
   const [tapIndex, setTapIndex] = useState(0);
@@ -690,6 +724,10 @@ export function ControlSidebar({
     'clean-cover' | 'full-stage' | 'project-thumb' | null
   >(null);
   const [isSettingProjectThumb, setIsSettingProjectThumb] = useState(false);
+  const [mocapNotice, setMocapNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   // Beat Auto-Sync State
   const [autoSyncPreview, setAutoSyncPreview] = useState<{
@@ -737,12 +775,51 @@ export function ControlSidebar({
   };
 
   const handleLrcUpload = async (file: File) => {
-    const text = await file.text();
-    const parsed = parseLrc(text);
-    if (parsed.length > 0) {
-      onLyricsChange(parsed);
-      setTapMode(false);
+    try {
+      const text = await file.text();
+      const parsed = parseCaptionsFile(
+        text,
+        file.name,
+        duration > 0 ? duration : undefined
+      );
+      if (parsed.length > 0) {
+        onLyricsChange(parsed);
+        setTapMode(false);
+        setCaptionUploadNotice({
+          type: 'success',
+          text: `Loaded ${parsed.length} cues from ${file.name}`,
+        });
+      } else {
+        setCaptionUploadNotice({
+          type: 'error',
+          text: `No readable lyrics or captions found in ${file.name}.`,
+        });
+      }
+    } catch {
+      setCaptionUploadNotice({
+        type: 'error',
+        text: 'Unable to read that caption file.',
+      });
     }
+  };
+
+  const handleQuickAddMediaCaption = () => {
+    const cleaned = quickMediaCaption.trim();
+    if (!cleaned) return;
+    const next = [
+      ...lyrics,
+      {
+        id: createLyricId(),
+        time: Number(currentTime.toFixed(2)),
+        text: cleaned,
+      },
+    ].sort((a, b) => a.time - b.time);
+    onLyricsChange(next);
+    setQuickMediaCaption('');
+    setCaptionUploadNotice({
+      type: 'success',
+      text: `Added cue at [${formatLrcTimestamp(currentTime)}]`,
+    });
   };
 
   const startTapToSync = () => {
@@ -823,6 +900,26 @@ export function ControlSidebar({
       snapWindowSec,
       beatsPerLine: 2,
     });
+  };
+
+  const runAutoAlignAll = () => {
+    if (!audioBuffer || lyrics.length === 0) return;
+    setAutoSyncPreview(null);
+    const result = autoAlignLyricsToAmplitudePeaks(lyrics, audioBuffer, {
+      beatSensitivity: settings.beatSensitivity,
+      maxSnapSec: 0.55,
+    });
+    onLyricsChange(result.alignedLyrics);
+    const bpmText = result.estimatedBpm ? ` (~${result.estimatedBpm} BPM)` : '';
+    if (result.alignedCount > 0) {
+      setAutoSyncNotice(
+        `Auto-aligned ${result.alignedCount} of ${result.totalCount} lyric cues to nearest high-energy beats${bpmText}.`
+      );
+    } else {
+      setAutoSyncNotice(
+        `All ${result.totalCount} lyric cues are already aligned with high-energy beat peaks${bpmText}.`
+      );
+    }
   };
 
   const runAutoSyncPlainText = (beatsPerLine: 1 | 2 | 4 = 2) => {
@@ -969,11 +1066,11 @@ export function ControlSidebar({
         {activeTab === 'media' && (
           <>
             <section className="space-y-2.5">
-              <h2 className="text-xs font-semibold text-slate-200">Audio Track</h2>
+              <h2 className="text-xs font-semibold text-slate-200">Audio &amp; Video Track</h2>
               <input
                 ref={audioInputRef}
                 type="file"
-                accept=".mp3,.wav,.ogg,.m4a,audio/*"
+                accept=".mp3,.wav,.ogg,.m4a,.mp4,.webm,.mov,audio/*,video/*"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -988,7 +1085,7 @@ export function ControlSidebar({
                   className="px-3 py-2.5 rounded-lg text-xs font-medium bg-[#090b10] hover:bg-white/[0.05] text-slate-200 border border-white/[0.09] transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
                 >
                   <Upload className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Upload Audio</span>
+                  <span>Upload Audio / Video</span>
                 </button>
                 <button
                   type="button"
@@ -1001,7 +1098,9 @@ export function ControlSidebar({
                 </button>
               </div>
               <p className="text-[11px] text-slate-400 truncate">
-                {audioFileName ? `Loaded: ${audioFileName}` : 'Supports .mp3, .wav, .ogg, .m4a'}
+                {audioFileName
+                  ? `Loaded: ${audioFileName}`
+                  : 'Supports .mp3, .wav, .ogg, .m4a, .mp4, .webm, .mov'}
               </p>
             </section>
 
@@ -1112,6 +1211,107 @@ export function ControlSidebar({
                   {FADE_TYPES.find((f) => f.id === settings.fadeType)?.desc}
                 </p>
               </div>
+            </section>
+
+            <hr className="border-white/[0.07]" />
+
+            <section className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold text-slate-200">
+                  Video Lyrics &amp; Captions
+                </h2>
+                <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                  {lyrics.length} {lyrics.length === 1 ? 'cue' : 'cues'}
+                </span>
+              </div>
+              <input
+                ref={mediaCaptionInputRef}
+                type="file"
+                accept=".lrc,.srt,.vtt,.txt"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleLrcUpload(f);
+                  e.target.value = '';
+                }}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => mediaCaptionInputRef.current?.click()}
+                  className="px-2.5 py-2 rounded-lg text-xs font-medium bg-[#090b10] hover:bg-white/[0.05] text-slate-200 border border-white/[0.09] transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Upload className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span>Upload Captions</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onAutoGenerateCaptions}
+                  disabled={!hasAudio || isGeneratingCaptions}
+                  className="px-2.5 py-2 rounded-lg text-xs font-medium bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-400/30 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {isGeneratingCaptions ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <Captions className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>{isGeneratingCaptions ? 'Working...' : 'Auto-Captions'}</span>
+                </button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={quickMediaCaption}
+                  onChange={(e) => setQuickMediaCaption(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleQuickAddMediaCaption();
+                    }
+                  }}
+                  placeholder={`Add lyric at [${formatLrcTimestamp(currentTime)}]...`}
+                  aria-label="Quick add video lyric or caption"
+                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/60"
+                />
+                <button
+                  type="button"
+                  disabled={!quickMediaCaption.trim()}
+                  onClick={handleQuickAddMediaCaption}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-white/[0.08] hover:bg-white/[0.14] text-slate-100 border border-white/[0.09] transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Add</span>
+                </button>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-[10.5px] text-slate-500">
+                <span>Supports .lrc, .srt, .vtt, .txt</span>
+                <button
+                  type="button"
+                  onClick={() => onTabChange('lyrics')}
+                  className="text-cyan-400 hover:text-cyan-300 font-medium cursor-pointer whitespace-nowrap"
+                >
+                  Open Lyrics Studio →
+                </button>
+              </div>
+              {captionUploadNotice && (
+                <div
+                  role="status"
+                  className={`px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center justify-between gap-2 ${
+                    captionUploadNotice.type === 'error'
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                  }`}
+                >
+                  <span className="truncate">{captionUploadNotice.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setCaptionUploadNotice(null)}
+                    className="text-[10px] opacity-75 hover:opacity-100 shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
             </section>
 
             <hr className="border-white/[0.07]" />
@@ -2518,7 +2718,37 @@ export function ControlSidebar({
                 </button>
               </div>
 
-              {settings.beatDetection ? (
+              {/* Beat Flash Toggle */}
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/[0.06]">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-slate-200">Beat Flash</div>
+                  <p className="text-[10.5px] text-slate-400 leading-snug">
+                    Briefly invert and flash the background with primary/secondary colors on each beat trigger.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Beat Flash"
+                  aria-checked={Boolean(settings.beatFlash)}
+                  onClick={() =>
+                    onUpdateSettings({
+                      beatFlash: !settings.beatFlash,
+                    })
+                  }
+                  className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                    settings.beatFlash ? 'bg-cyan-500' : 'bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`block w-4 h-4 rounded-full bg-white transition-transform ${
+                      settings.beatFlash ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {settings.beatDetection || settings.beatFlash ? (
                 <div className="space-y-3 pt-0.5">
                   <div>
                     <div className="flex justify-between text-[11px] mb-1">
@@ -2563,13 +2793,13 @@ export function ControlSidebar({
 
                   <p className="text-[11px] leading-relaxed text-slate-400">
                     Routes audio through a secondary 140 Hz low-pass filter node to isolate bass
-                    drum peaks and trigger shockwave &amp; particle bursts.
+                    drum peaks and trigger shockwave, burst &amp; flash animations.
                   </p>
                 </div>
               ) : (
                 <p className="text-[11px] leading-relaxed text-slate-400">
                   Enable to track kick-drum peaks via a secondary 140 Hz low-pass filter and fire
-                  shockwave &amp; burst animations.
+                  shockwave, burst &amp; background flash animations.
                 </p>
               )}
             </section>
@@ -2580,6 +2810,734 @@ export function ControlSidebar({
               settings={settings}
               onUpdateSettings={onUpdateSettings}
             />
+
+            <hr className="border-white/[0.07]" />
+
+            {/* Dance & Motion Capture */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                    <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span>Dance &amp; Motion Capture</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Built-in .bvh mocap animations &amp; beat-synced choreography
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(settings.danceEnabled)}
+                  aria-label="Character Dance Animation"
+                  onClick={() =>
+                    onUpdateSettings({ danceEnabled: !settings.danceEnabled })
+                  }
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                    settings.danceEnabled
+                      ? 'bg-cyan-500/35 border-cyan-400/60'
+                      : 'bg-white/[0.07] border-white/[0.12]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                      settings.danceEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {settings.danceEnabled ? (
+                <div className="space-y-3 pt-1">
+                  {/* Built-In Motion Capture Library */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-medium text-slate-300">
+                        Built-In Mocap Library (.bvh){' '}
+                        <span className="text-slate-500 font-normal">
+                          · {BUILT_IN_MOCAP_LIBRARY.length}
+                        </span>
+                      </span>
+                      {isBuiltInMocapStyle(settings.danceStyle) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            downloadBuiltInMocapBvh(settings.danceStyle as typeof BUILT_IN_MOCAP_LIBRARY[number]['id'])
+                          }
+                          className="inline-flex items-center gap-1 text-[11px] text-cyan-300 hover:text-cyan-200 whitespace-nowrap transition-colors cursor-pointer"
+                          title="Download active built-in BVH motion capture file"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Save .bvh</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                      {BUILT_IN_MOCAP_LIBRARY.map((entry) => {
+                        const active = settings.danceStyle === entry.id;
+                        return (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({ danceStyle: entry.id })
+                            }
+                            className={`text-left px-2.5 py-2 rounded-md border transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-cyan-500/18 border-cyan-400/60 text-slate-100'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05] hover:border-white/[0.15]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="text-[11px] font-semibold truncate">
+                                {entry.title}
+                              </span>
+                              {active && (
+                                <Check className="w-3 h-3 text-cyan-300 shrink-0" />
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5 truncate font-mono tabular-nums">
+                              {entry.genre} · {entry.bpmLabel}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="dance-style-select"
+                      className="block text-[11px] text-slate-400 mb-1"
+                    >
+                      All Animation Styles (Mocap &amp; Procedural)
+                    </label>
+                    <select
+                      id="dance-style-select"
+                      value={settings.danceStyle ?? 'hip-hop'}
+                      onChange={(e) =>
+                        onUpdateSettings({
+                          danceStyle: e.target.value as DanceStyleKey,
+                        })
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-md bg-[#090b10] border border-white/[0.1] text-xs text-slate-200 focus:outline-none focus:border-cyan-400/60"
+                    >
+                      <optgroup label="Built-In Motion Capture (.bvh)">
+                        {DANCE_STYLE_OPTIONS.filter(
+                          (opt) => opt.category === 'mocap-library'
+                        ).map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="Procedural Beat Choreography">
+                        {DANCE_STYLE_OPTIONS.filter(
+                          (opt) => opt.category === 'procedural'
+                        ).map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="Custom File">
+                        {DANCE_STYLE_OPTIONS.filter(
+                          (opt) => opt.category === 'custom'
+                        ).map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {!mocapClip
+                              ? `${opt.label} — Upload below`
+                              : `${opt.label} (${mocapClip.name})`}
+                          </option>
+                        ))}
+                      </optgroup>
+                    </select>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      {
+                        DANCE_STYLE_OPTIONS.find(
+                          (opt) => opt.id === (settings.danceStyle ?? 'hip-hop')
+                        )?.desc
+                      }
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-medium text-slate-300">
+                        Dancer Character
+                      </span>
+                      <span className="text-[10.5px] font-mono tabular-nums text-cyan-400">
+                        {DANCE_AVATAR_OPTIONS.find(
+                          (opt) =>
+                            opt.id ===
+                            (settings.avatarStyle ?? settings.danceAvatarStyle ?? 'human-dancer')
+                        )?.label ?? 'Studio Pop'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {DANCE_AVATAR_OPTIONS.filter(
+                        (opt) => opt.category === 'human'
+                      ).map((opt) => {
+                        const active =
+                          (settings.avatarStyle ??
+                            settings.danceAvatarStyle ??
+                            'human-dancer') === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({
+                                avatarStyle: opt.id as DanceAvatarStyle,
+                                danceAvatarStyle: opt.id as DanceAvatarStyle,
+                              })
+                            }
+                            className={`text-left px-2.5 py-1.5 rounded-md border transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-100'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-[11px] font-semibold truncate">
+                                {opt.label}
+                              </span>
+                              {active && (
+                                <Check className="w-3 h-3 text-cyan-300 shrink-0" />
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                              {opt.desc}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <span className="block text-[11px] text-slate-400 pt-0.5">
+                      Skeleton &amp; Mocap Rigs
+                    </span>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {DANCE_AVATAR_OPTIONS.filter(
+                        (opt) => opt.category === 'rig'
+                      ).map((opt) => {
+                        const active =
+                          (settings.avatarStyle ??
+                            settings.danceAvatarStyle ??
+                            'human-dancer') === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({
+                                avatarStyle: opt.id as DanceAvatarStyle,
+                                danceAvatarStyle: opt.id as DanceAvatarStyle,
+                              })
+                            }
+                            className={`px-2 py-1.5 rounded-md border text-[11px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                            }`}
+                            title={opt.desc}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="block text-[11px] text-slate-400 mb-1.5">
+                      Stage Placement
+                    </span>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(['left', 'center', 'right'] as DancePlacement[]).map((pos) => {
+                        const active = (settings.dancePlacement ?? 'center') === pos;
+                        return (
+                          <button
+                            key={pos}
+                            type="button"
+                            onClick={() => onUpdateSettings({ dancePlacement: pos })}
+                            className={`px-2 py-1.5 rounded-md border text-[11px] font-medium capitalize whitespace-nowrap transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            {pos}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <label htmlFor="dance-count-slider" className="text-slate-400">
+                        Dancer Count
+                      </label>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {Math.max(1, Math.min(3, Math.round(settings.danceCount ?? 1)))}{' '}
+                        {Math.round(settings.danceCount ?? 1) === 1
+                          ? 'Dancer'
+                          : Math.round(settings.danceCount ?? 1) === 2
+                          ? 'Duo'
+                          : 'Crew'}
+                      </span>
+                    </div>
+                    <input
+                      id="dance-count-slider"
+                      type="range"
+                      min={1}
+                      max={3}
+                      step={1}
+                      aria-label="Dancer Count"
+                      value={Math.max(1, Math.min(3, Math.round(settings.danceCount ?? 1)))}
+                      onChange={(e) =>
+                        onUpdateSettings({ danceCount: parseInt(e.target.value, 10) })
+                      }
+                      className="studio-range w-full"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-500 mt-0.5 font-mono tabular-nums">
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ danceCount: 1 })}
+                        className="hover:text-slate-300 cursor-pointer"
+                      >
+                        1 Solo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ danceCount: 2 })}
+                        className="hover:text-slate-300 cursor-pointer"
+                      >
+                        2 Duo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ danceCount: 3 })}
+                        className="hover:text-slate-300 cursor-pointer"
+                      >
+                        3 Crew
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-1">
+                        <span className="text-slate-400">Size</span>
+                        <span className="font-mono tabular-nums text-slate-300">
+                          {(settings.danceScale ?? 1).toFixed(2)}×
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={1.6}
+                        step={0.05}
+                        value={settings.danceScale ?? 1}
+                        onChange={(e) =>
+                          onUpdateSettings({ danceScale: parseFloat(e.target.value) })
+                        }
+                        className="studio-range w-full"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-1">
+                        <span className="text-slate-400">Energy</span>
+                        <span className="font-mono tabular-nums text-slate-300">
+                          {(settings.danceEnergy ?? 1).toFixed(2)}×
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.3}
+                        max={2.0}
+                        step={0.05}
+                        value={settings.danceEnergy ?? 1}
+                        onChange={(e) =>
+                          onUpdateSettings({ danceEnergy: parseFloat(e.target.value) })
+                        }
+                        className="studio-range w-full"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <label htmlFor="dance-strobe-slider" className="text-slate-400">
+                        Dancer Strobe
+                      </label>
+                      <span className="font-mono tabular-nums text-slate-300">
+                        {(settings.danceStrobe ?? 0) <= 0.005
+                          ? 'Off'
+                          : `${Math.round((settings.danceStrobe ?? 0) * 100)}%`}
+                      </span>
+                    </div>
+                    <input
+                      id="dance-strobe-slider"
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      aria-label="Dancer Strobe"
+                      value={settings.danceStrobe ?? 0}
+                      onChange={(e) =>
+                        onUpdateSettings({ danceStrobe: parseFloat(e.target.value) })
+                      }
+                      className="studio-range w-full"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Rapidly dims and brightens dancing avatars on beat detection peaks
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 py-1">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-slate-200">
+                        Sync Hits to Lyric Cues
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Accentuate arm hits &amp; poses when each lyric line drops
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.danceLyricSync ?? true}
+                      aria-label="Sync Hits to Lyric Cues"
+                      onClick={() =>
+                        onUpdateSettings({
+                          danceLyricSync: !(settings.danceLyricSync ?? true),
+                        })
+                      }
+                      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                        (settings.danceLyricSync ?? true)
+                          ? 'bg-cyan-500/35 border-cyan-400/60'
+                          : 'bg-white/[0.07] border-white/[0.12]'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                          (settings.danceLyricSync ?? true)
+                            ? 'translate-x-4'
+                            : 'translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 py-1">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-slate-200">
+                        Mirror Dancers
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Horizontally flip avatars for a symmetric stage formation
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={Boolean(settings.danceMirror)}
+                      aria-label="Mirror Dancers"
+                      onClick={() =>
+                        onUpdateSettings({
+                          danceMirror: !settings.danceMirror,
+                        })
+                      }
+                      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                        settings.danceMirror
+                          ? 'bg-cyan-500/35 border-cyan-400/60'
+                          : 'bg-white/[0.07] border-white/[0.12]'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                          settings.danceMirror ? 'translate-x-4' : 'translate-x-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="border-t border-white/[0.07] pt-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-200">
+                        Dancer Lighting
+                      </span>
+                      {((settings.danceSpotlightIntensity ?? 1) !== 1 ||
+                        (settings.danceRimColor ?? 'auto') !== 'auto') && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({
+                              danceSpotlightIntensity: 1,
+                              danceRimColor: 'auto',
+                            })
+                          }
+                          className="text-[10.5px] font-medium text-slate-400 hover:text-cyan-300 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                        >
+                          Reset Lighting
+                        </button>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-1">
+                        <label htmlFor="dance-spotlight-slider" className="text-slate-400">
+                          Spotlight Intensity
+                        </label>
+                        <span className="font-mono tabular-nums text-slate-300">
+                          {(settings.danceSpotlightIntensity ?? 1) <= 0.005
+                            ? 'Off'
+                            : `${Math.round((settings.danceSpotlightIntensity ?? 1) * 100)}%`}
+                        </span>
+                      </div>
+                      <input
+                        id="dance-spotlight-slider"
+                        type="range"
+                        min={0}
+                        max={2}
+                        step={0.05}
+                        aria-label="Spotlight Intensity"
+                        value={settings.danceSpotlightIntensity ?? 1}
+                        onChange={(e) =>
+                          onUpdateSettings({
+                            danceSpotlightIntensity: parseFloat(e.target.value),
+                          })
+                        }
+                        className="studio-range w-full"
+                      />
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Controls overhead stage beam, floor light pool, and key illumination
+                      </p>
+                    </div>
+
+                    {(() => {
+                      const rawRim = (settings.danceRimColor ?? 'auto').trim();
+                      const isAutoRim =
+                        !rawRim || rawRim.toLowerCase() === 'auto';
+                      const toHex6 = (hex: string, fallback = '#22d3ee') => {
+                        const clean = hex.trim();
+                        if (/^#[0-9a-fA-F]{6}$/.test(clean)) return clean;
+                        if (/^#[0-9a-fA-F]{3}$/.test(clean)) {
+                          return `#${clean[1]}${clean[1]}${clean[2]}${clean[2]}${clean[3]}${clean[3]}`;
+                        }
+                        return fallback;
+                      };
+                      const resolvedRimHex = isAutoRim
+                        ? toHex6(settings.primaryColor, '#22d3ee')
+                        : toHex6(rawRim, '#22d3ee');
+                      const secHex = toHex6(settings.secondaryColor, '#a855f7');
+                      const isSecondaryRim =
+                        !isAutoRim &&
+                        resolvedRimHex.toLowerCase() === secHex.toLowerCase();
+                      const isWhiteRim =
+                        !isAutoRim && resolvedRimHex.toLowerCase() === '#f8fafc';
+
+                      return (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <label
+                              htmlFor="dance-rim-color-picker"
+                              className="text-slate-400"
+                            >
+                              Rim Light Color
+                            </label>
+                            <span className="font-mono tabular-nums text-slate-300 uppercase">
+                              {isAutoRim ? 'Theme Auto' : resolvedRimHex}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <label className="flex items-center gap-2 px-2 py-1 rounded-md bg-[#090b10] border border-white/[0.09] hover:border-white/[0.18] transition-colors cursor-pointer shrink-0">
+                              <input
+                                id="dance-rim-color-picker"
+                                type="color"
+                                aria-label="Rim Light Color"
+                                value={resolvedRimHex}
+                                onChange={(e) =>
+                                  onUpdateSettings({ danceRimColor: e.target.value })
+                                }
+                                className="w-4 h-4 rounded cursor-pointer bg-transparent border-0 p-0"
+                              />
+                              <span className="text-[10.5px] font-mono tabular-nums text-slate-300 uppercase">
+                                {resolvedRimHex}
+                              </span>
+                            </label>
+                            <div className="grid grid-cols-3 gap-1 flex-1 min-w-0">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({ danceRimColor: 'auto' })
+                                }
+                                className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                  isAutoRim
+                                    ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                    : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                                }`}
+                                title="Automatically follow active visualizer theme colors"
+                              >
+                                Theme
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({ danceRimColor: secHex })
+                                }
+                                className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                  isSecondaryRim
+                                    ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                    : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                                }`}
+                                title="Use visualizer secondary theme color for rim separation"
+                              >
+                                Accent
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateSettings({ danceRimColor: '#f8fafc' })
+                                }
+                                className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                  isWhiteRim
+                                    ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                    : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                                }`}
+                                title="Use neutral studio white rim light"
+                              >
+                                White
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    <div className="flex items-center justify-between gap-3 pt-1">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-slate-200">
+                          Dancer Shadow
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          Floor-mapped drop shadow reacting to stage lighting position
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={settings.danceShadow ?? true}
+                        aria-label="Dancer Shadow"
+                        onClick={() =>
+                          onUpdateSettings({
+                            danceShadow: !(settings.danceShadow ?? true),
+                          })
+                        }
+                        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
+                          (settings.danceShadow ?? true)
+                            ? 'bg-cyan-500/35 border-cyan-400/60'
+                            : 'bg-white/[0.07] border-white/[0.12]'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                            (settings.danceShadow ?? true)
+                              ? 'translate-x-4'
+                              : 'translate-x-0.5'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-[#090b10] border border-white/[0.08] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-medium text-slate-300">
+                        Motion Capture File (.bvh / .json)
+                      </span>
+                      <input
+                        ref={mocapInputRef}
+                        type="file"
+                        accept=".bvh,.json,application/json,text/plain"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!file || !onMocapFileSelect) return;
+                          setMocapNotice(null);
+                          const res = await onMocapFileSelect(file);
+                          if (res.ok) {
+                            setMocapNotice({
+                              type: 'success',
+                              text: `Loaded ${res.clip.name} (${res.clip.frames.length} frames @ ${res.clip.fps} fps)`,
+                            });
+                          } else {
+                            setMocapNotice({
+                              type: 'error',
+                              text: res.error,
+                            });
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => mocapInputRef.current?.click()}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.06] hover:bg-white/[0.11] border border-white/[0.12] text-[11px] font-medium text-slate-200 whitespace-nowrap transition-colors cursor-pointer"
+                      >
+                        <Upload className="w-3 h-3 text-cyan-400" />
+                        <span>Upload Mocap</span>
+                      </button>
+                    </div>
+
+                    {mocapClip ? (
+                      <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px]">
+                        <span className="text-slate-300 truncate font-mono tabular-nums">
+                          {mocapClip.name} · {mocapClip.frames.length}f · {mocapClip.fps}fps
+                        </span>
+                        {onClearMocapClip && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMocapNotice(null);
+                              onClearMocapClip();
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-white/[0.1] text-slate-400 hover:text-rose-300 hover:border-rose-400/40 whitespace-nowrap transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Clear</span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Optional: import standard <span className="font-mono text-slate-300">.bvh</span> or skeleton{' '}
+                        <span className="font-mono text-slate-300">.json</span> mocap clips. Without a file, procedural choreography dances on every beat.
+                      </p>
+                    )}
+
+                    {mocapNotice && (
+                      <p
+                        className={`text-[11px] leading-snug ${
+                          mocapNotice.type === 'success'
+                            ? 'text-emerald-300'
+                            : 'text-rose-300'
+                        }`}
+                      >
+                        {mocapNotice.text}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-slate-400">
+                  Enable to add a 3D animated dancer that reacts to bass beats, audio energy, and lyric drops—or upload your own <span className="font-mono text-slate-300">.bvh</span> motion-capture clip.
+                </p>
+              )}
+            </section>
 
             <hr className="border-white/[0.07]" />
 
@@ -2715,6 +3673,120 @@ export function ControlSidebar({
                   );
                 })}
               </div>
+            </section>
+
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="lyric-font-select"
+                  className="text-xs font-semibold text-slate-200"
+                >
+                  Lyric Font
+                </label>
+                <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                  {LYRIC_FONT_OPTIONS.find((f) => f.id === (settings.lyricFont ?? 'auto'))
+                    ?.shortLabel ?? 'Default'}
+                </span>
+              </div>
+              <select
+                id="lyric-font-select"
+                aria-label="Lyric Font"
+                value={settings.lyricFont ?? 'auto'}
+                onChange={(e) =>
+                  onUpdateSettings({ lyricFont: e.target.value as LyricFontKey })
+                }
+                className="w-full px-2.5 py-2 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs font-medium text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+              >
+                {LYRIC_FONT_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id} className="bg-[#090b10] text-slate-100">
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <div
+                className="px-3 py-2 rounded-lg bg-[#090b10] border border-white/[0.07] text-xs text-slate-200 truncate"
+                style={{
+                  fontFamily: resolveLyricFontFamily(settings.lyricFont),
+                  letterSpacing: `${(settings.lyricLetterSpacing ?? 0).toFixed(2)}em`,
+                }}
+              >
+                Midnight rhythm · Live caption preview
+              </div>
+              <p className="text-[10.5px] text-slate-500 leading-relaxed">
+                {LYRIC_FONT_OPTIONS.find((f) => f.id === (settings.lyricFont ?? 'auto'))?.desc}
+              </p>
+            </section>
+
+            {/* Letter Spacing / Kerning */}
+            <section className="space-y-2.5">
+              {(() => {
+                const spacingVal = settings.lyricLetterSpacing ?? 0;
+                const formatted =
+                  Math.abs(spacingVal) < 0.005
+                    ? 'Normal'
+                    : `${spacingVal > 0 ? '+' : ''}${spacingVal.toFixed(2)}em`;
+                return (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <label
+                        htmlFor="lyric-letter-spacing-slider"
+                        className="text-xs font-semibold text-slate-200"
+                      >
+                        Letter Spacing
+                      </label>
+                      <span className="text-[11px] font-mono tabular-nums text-cyan-400">
+                        {formatted}
+                      </span>
+                    </div>
+                    <input
+                      id="lyric-letter-spacing-slider"
+                      type="range"
+                      aria-label="Letter Spacing"
+                      min={-0.06}
+                      max={0.3}
+                      step={0.01}
+                      value={spacingVal}
+                      onChange={(e) =>
+                        onUpdateSettings({
+                          lyricLetterSpacing: parseFloat(e.target.value),
+                        })
+                      }
+                      className="studio-range w-full"
+                    />
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {(
+                        [
+                          { label: 'Tight', val: -0.04 },
+                          { label: 'Normal', val: 0 },
+                          { label: 'Wide', val: 0.1 },
+                          { label: 'Cinema', val: 0.22 },
+                        ] as const
+                      ).map((preset) => {
+                        const active = Math.abs(spacingVal - preset.val) < 0.008;
+                        return (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() =>
+                              onUpdateSettings({ lyricLetterSpacing: preset.val })
+                            }
+                            className={`px-2 py-1 rounded-md text-[10.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+                              active
+                                ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                                : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10.5px] text-slate-500 leading-relaxed">
+                      Adjust horizontal tracking between characters to refine display, serif, or uppercase typography.
+                    </p>
+                  </>
+                );
+              })()}
             </section>
 
             <section className="space-y-2.5">
@@ -2991,12 +4063,14 @@ export function ControlSidebar({
             <hr className="border-white/[0.07]" />
 
             <section className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xs font-semibold text-slate-200">Import .LRC or Tap-to-Sync</h2>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold text-slate-200">
+                  Import Captions or Tap-to-Sync
+                </h2>
                 <input
                   ref={lrcInputRef}
                   type="file"
-                  accept=".lrc,.txt"
+                  accept=".lrc,.srt,.vtt,.txt"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
@@ -3007,12 +4081,31 @@ export function ControlSidebar({
                 <button
                   type="button"
                   onClick={() => lrcInputRef.current?.click()}
-                  className="text-[11px] font-medium text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+                  className="text-[11px] font-medium text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer whitespace-nowrap"
                 >
                   <FileText className="w-3 h-3" />
-                  <span>Upload .lrc</span>
+                  <span>Upload .lrc / .srt / .vtt</span>
                 </button>
               </div>
+              {captionUploadNotice && (
+                <div
+                  role="status"
+                  className={`px-3 py-2 rounded-lg border text-[11px] flex items-center justify-between gap-2 ${
+                    captionUploadNotice.type === 'error'
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+                  }`}
+                >
+                  <span className="leading-snug">{captionUploadNotice.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setCaptionUploadNotice(null)}
+                    className="text-[10px] opacity-75 hover:opacity-100 shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
 
               {!tapMode ? (
                 <div className="space-y-2">
@@ -3106,18 +4199,6 @@ export function ControlSidebar({
                   {lyrics.length > 0 && (
                     <button
                       type="button"
-                      disabled={!hasAudio}
-                      onClick={() => runAutoSyncExisting(0.45)}
-                      title="Align existing lyric cues to detected kick/drum beats"
-                      className="px-2 py-1 rounded-md text-[10.5px] font-medium bg-cyan-500/12 hover:bg-cyan-500/22 text-cyan-300 border border-cyan-400/30 transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 whitespace-nowrap"
-                    >
-                      <Activity className="w-3 h-3" />
-                      <span>Auto-Sync</span>
-                    </button>
-                  )}
-                  {lyrics.length > 0 && (
-                    <button
-                      type="button"
                       onClick={handleDownloadLrc}
                       className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer whitespace-nowrap"
                     >
@@ -3143,6 +4224,29 @@ export function ControlSidebar({
                     <span>Add Cue</span>
                   </button>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={!hasAudio || lyrics.length === 0}
+                  onClick={runAutoAlignAll}
+                  title="Use audio amplitude peaks to snap all lyric cues to the nearest high-energy beats"
+                  className="py-1.5 px-2.5 rounded-lg text-[11px] font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/35 transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  <AudioWaveform className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span>Auto-Align</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!hasAudio || lyrics.length === 0}
+                  onClick={() => runAutoSyncExisting(0.45)}
+                  title="Preview and adjust beat alignment suggestions per lyric cue"
+                  className="py-1.5 px-2.5 rounded-lg text-[11px] font-medium bg-white/[0.06] hover:bg-white/[0.11] text-slate-200 border border-white/[0.1] transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  <Activity className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                  <span>Review Beats</span>
+                </button>
               </div>
 
               {autoSyncNotice && (

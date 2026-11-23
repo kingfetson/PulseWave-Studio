@@ -3,6 +3,7 @@ import { ArrayBufferTarget as WebmArrayBufferTarget, Muxer as WebmMuxer } from '
 import {
   ExportProgressState,
   LyricLine,
+  MocapClipData,
   MotionBlurState,
   Particle,
   resolveExportDimensions,
@@ -46,6 +47,7 @@ export interface StartWorkerExportPayload {
   bgBitmap: ImageBitmap | null;
   albumBitmap: ImageBitmap | null;
   fonts: WorkerFontDescriptor[];
+  mocapClip?: MocapClipData | null;
 }
 
 export type WorkerIncomingMessage = StartWorkerExportPayload | { type: 'cancel' };
@@ -115,6 +117,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     bgBitmap,
     albumBitmap,
     fonts,
+    mocapClip,
   } = payload;
 
   if (
@@ -342,6 +345,8 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     const analyzer = new OfflineAudioAnalyzer(pcmInput, 2048);
     const needsBeatDetector =
       settings.beatDetection ||
+      Boolean(settings.beatFlash) ||
+      Boolean(settings.danceEnabled) ||
       (settings.glitchIntensity ?? 0) > 0 ||
       (settings.bassShake ?? 0) > 0 ||
       (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
@@ -417,6 +422,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration: trackDurationForCycle,
+        mocapClip,
       });
 
       const timestampUs = Math.round(localTime * 1_000_000);
