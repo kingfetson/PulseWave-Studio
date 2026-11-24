@@ -513,11 +513,12 @@ function getInputChannels(buffer: AudioBuffer | PcmAudioInput): {
 }
 
 /**
- * Fast mathematical Radix-2 FFT Analyzer for deterministic offline frame-by-frame
- * frequency & waveform extraction matching Web Audio API AnalyserNode behavior.
+ * Fast mathematical N/2-packed Real-to-Complex Radix-2 FFT Analyzer for deterministic
+ * offline frame-by-frame frequency & waveform extraction matching Web Audio API AnalyserNode.
  */
 export class OfflineAudioAnalyzer {
   private readonly fftSize: number;
+  private readonly halfN: number;
   private readonly binCount: number;
   private readonly monoSamples: Float32Array;
   private readonly sampleRate: number;
@@ -525,12 +526,18 @@ export class OfflineAudioAnalyzer {
   private readonly real: Float32Array;
   private readonly imag: Float32Array;
   private readonly prevMagnitudes: Float32Array;
+  private readonly bitRev: Uint16Array;
+  private readonly stageCos: Float32Array[];
+  private readonly stageSin: Float32Array[];
+  private readonly unpackCos: Float32Array;
+  private readonly unpackSin: Float32Array;
   private readonly minDecibels = -100;
   private readonly maxDecibels = -28;
 
   constructor(buffer: AudioBuffer | PcmAudioInput, fftSize = 2048) {
     this.fftSize = fftSize;
-    this.binCount = fftSize / 2;
+    this.halfN = fftSize >> 1;
+    this.binCount = this.halfN;
 
     const { sampleRate, length, ch0, ch1 } = getInputChannels(buffer);
     this.sampleRate = sampleRate;
@@ -550,9 +557,49 @@ export class OfflineAudioAnalyzer {
       this.hannWindow[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (fftSize - 1)));
     }
 
-    this.real = new Float32Array(fftSize);
-    this.imag = new Float32Array(fftSize);
+    // Half-size complex buffers for N-point real FFT via N/2 complex FFT
+    const M = this.halfN;
+    this.real = new Float32Array(M);
+    this.imag = new Float32Array(M);
     this.prevMagnitudes = new Float32Array(this.binCount);
+
+    // Precompute bit-reversal table for M-point complex FFT
+    this.bitRev = new Uint16Array(M);
+    const logM = Math.round(Math.log2(M));
+    for (let i = 0; i < M; i++) {
+      let x = i;
+      let rev = 0;
+      for (let b = 0; b < logM; b++) {
+        rev = (rev << 1) | (x & 1);
+        x >>= 1;
+      }
+      this.bitRev[i] = rev;
+    }
+
+    // Precompute butterfly twiddle tables per stage
+    this.stageCos = [];
+    this.stageSin = [];
+    for (let len = 2; len <= M; len <<= 1) {
+      const half = len >> 1;
+      const cosArr = new Float32Array(half);
+      const sinArr = new Float32Array(half);
+      const step = (-2 * Math.PI) / len;
+      for (let k = 0; k < half; k++) {
+        cosArr[k] = Math.cos(step * k);
+        sinArr[k] = Math.sin(step * k);
+      }
+      this.stageCos.push(cosArr);
+      this.stageSin.push(sinArr);
+    }
+
+    // Precompute unpack twiddle factors for N-point real spectrum extraction
+    this.unpackCos = new Float32Array(M);
+    this.unpackSin = new Float32Array(M);
+    for (let k = 0; k < M; k++) {
+      const ang = (-2 * Math.PI * k) / fftSize;
+      this.unpackCos[k] = Math.cos(ang);
+      this.unpackSin[k] = Math.sin(ang);
+    }
   }
 
   public analyzeAt(
@@ -562,93 +609,123 @@ export class OfflineAudioAnalyzer {
     outWave: Uint8Array
   ): void {
     const N = this.fftSize;
+    const M = this.halfN;
+    const mono = this.monoSamples;
+    const monoLen = mono.length;
+    const hann = this.hannWindow;
+    const reArr = this.real;
+    const imArr = this.imag;
     const centerSample = Math.floor(timeSec * this.sampleRate);
-    const startSample = centerSample - Math.floor(N / 2);
+    const startSample = centerSample - M;
+    const waveLen = outWave.length;
 
-    // 1. Fill time-domain & windowed FFT input
-    for (let i = 0; i < N; i++) {
-      const idx = startSample + i;
-      const sample = idx >= 0 && idx < this.monoSamples.length ? this.monoSamples[idx] : 0;
+    // 1. Fill time-domain bytes & pack real signal (even -> real, odd -> imag)
+    for (let k = 0; k < M; k++) {
+      const i0 = k << 1;
+      const i1 = i0 + 1;
+      const idx0 = startSample + i0;
+      const idx1 = startSample + i1;
+      const s0 = idx0 >= 0 && idx0 < monoLen ? mono[idx0] : 0;
+      const s1 = idx1 >= 0 && idx1 < monoLen ? mono[idx1] : 0;
 
-      // Time-domain byte (0..255, center 128)
-      if (i < outWave.length) {
-        const clamped = Math.max(-1, Math.min(1, sample));
-        outWave[i] = Math.round((clamped * 0.5 + 0.5) * 255);
+      if (i0 < waveLen) {
+        const c0 = s0 < -1 ? -1 : s0 > 1 ? 1 : s0;
+        outWave[i0] = ((c0 * 0.5 + 0.5) * 255 + 0.5) | 0;
+      }
+      if (i1 < waveLen) {
+        const c1 = s1 < -1 ? -1 : s1 > 1 ? 1 : s1;
+        outWave[i1] = ((c1 * 0.5 + 0.5) * 255 + 0.5) | 0;
       }
 
-      this.real[i] = sample * this.hannWindow[i];
-      this.imag[i] = 0;
+      reArr[k] = s0 * hann[i0];
+      imArr[k] = s1 * hann[i1];
     }
 
-    // 2. In-place Cooley-Tukey Radix-2 FFT
-    this.fftInPlace(this.real, this.imag);
-
-    // 3. Convert magnitudes to smoothed dB-scaled 0..255 bins
-    const invN = 1 / N;
-    const rangeDb = this.maxDecibels - this.minDecibels;
-    const smooth = Math.max(0, Math.min(0.95, smoothing));
-    const bins = Math.min(this.binCount, outFreq.length);
-
-    for (let k = 0; k < bins; k++) {
-      const re = this.real[k];
-      const im = this.imag[k];
-      const mag = Math.sqrt(re * re + im * im) * invN * 2;
-
-      const smoothedMag = smooth * this.prevMagnitudes[k] + (1 - smooth) * mag;
-      this.prevMagnitudes[k] = smoothedMag;
-
-      const db = smoothedMag > 1e-7 ? 20 * Math.log10(smoothedMag) : this.minDecibels;
-      const norm = Math.max(0, Math.min(1, (db - this.minDecibels) / rangeDb));
-      outFreq[k] = Math.round(norm * 255);
-    }
-  }
-
-  private fftInPlace(real: Float32Array, imag: Float32Array): void {
-    const n = real.length;
-    let j = 0;
-    for (let i = 1; i < n; i++) {
-      let bit = n >> 1;
-      while (j & bit) {
-        j ^= bit;
-        bit >>= 1;
-      }
-      j ^= bit;
+    // 2. M-point in-place Radix-2 FFT using precomputed bit-reversal & twiddle tables
+    const bitRev = this.bitRev;
+    for (let i = 0; i < M; i++) {
+      const j = bitRev[i];
       if (i < j) {
-        const tr = real[i];
-        real[i] = real[j];
-        real[j] = tr;
-        const ti = imag[i];
-        imag[i] = imag[j];
-        imag[j] = ti;
+        const tr = reArr[i];
+        reArr[i] = reArr[j];
+        reArr[j] = tr;
+        const ti = imArr[i];
+        imArr[i] = imArr[j];
+        imArr[j] = ti;
       }
     }
 
-    for (let len = 2; len <= n; len <<= 1) {
+    let stageIdx = 0;
+    for (let len = 2; len <= M; len <<= 1) {
       const half = len >> 1;
-      const angle = (-2 * Math.PI) / len;
-      const wStepRe = Math.cos(angle);
-      const wStepIm = Math.sin(angle);
+      const cosArr = this.stageCos[stageIdx];
+      const sinArr = this.stageSin[stageIdx];
+      stageIdx++;
 
-      for (let i = 0; i < n; i += len) {
-        let wRe = 1;
-        let wIm = 0;
+      for (let i = 0; i < M; i += len) {
         for (let k = 0; k < half; k++) {
           const evenIdx = i + k;
           const oddIdx = evenIdx + half;
+          const wRe = cosArr[k];
+          const wIm = sinArr[k];
 
-          const oddRe = real[oddIdx] * wRe - imag[oddIdx] * wIm;
-          const oddIm = real[oddIdx] * wIm + imag[oddIdx] * wRe;
+          const oddRe = reArr[oddIdx] * wRe - imArr[oddIdx] * wIm;
+          const oddIm = reArr[oddIdx] * wIm + imArr[oddIdx] * wRe;
 
-          real[oddIdx] = real[evenIdx] - oddRe;
-          imag[oddIdx] = imag[evenIdx] - oddIm;
-          real[evenIdx] += oddRe;
-          imag[evenIdx] += oddIm;
-
-          const nextWRe = wRe * wStepRe - wIm * wStepIm;
-          wIm = wRe * wStepIm + wIm * wStepRe;
-          wRe = nextWRe;
+          reArr[oddIdx] = reArr[evenIdx] - oddRe;
+          imArr[oddIdx] = imArr[evenIdx] - oddIm;
+          reArr[evenIdx] += oddRe;
+          imArr[evenIdx] += oddIm;
         }
       }
+    }
+
+    // 3. Unpack N-point real FFT bins [0 .. M-1] and convert to smoothed dB-scaled bytes
+    const invN2 = 2 / N;
+    const minDb = this.minDecibels;
+    const invRangeDb = 1 / (this.maxDecibels - minDb);
+    const smooth = smoothing < 0 ? 0 : smoothing > 0.95 ? 0.95 : smoothing;
+    const oneMinusSmooth = 1 - smooth;
+    const bins = M < outFreq.length ? M : outFreq.length;
+    const prevMags = this.prevMagnitudes;
+    const uCos = this.unpackCos;
+    const uSin = this.unpackSin;
+    const log10Scale = 20 * Math.LOG10E;
+
+    // Bin 0 (DC): F[0] = Z_re[0] + Z_im[0]
+    if (bins > 0) {
+      const mag0 = Math.abs(reArr[0] + imArr[0]) * invN2;
+      const sm0 = smooth * prevMags[0] + oneMinusSmooth * mag0;
+      prevMags[0] = sm0;
+      const db0 = sm0 > 1e-7 ? log10Scale * Math.log(sm0) : minDb;
+      const norm0 = (db0 - minDb) * invRangeDb;
+      outFreq[0] = norm0 <= 0 ? 0 : norm0 >= 1 ? 255 : (norm0 * 255 + 0.5) | 0;
+    }
+
+    for (let k = 1; k < bins; k++) {
+      const mk = M - k;
+      const zkRe = reArr[k];
+      const zkIm = imArr[k];
+      const zmkRe = reArr[mk];
+      const zmkIm = imArr[mk];
+
+      const evenRe = 0.5 * (zkRe + zmkRe);
+      const evenIm = 0.5 * (zkIm - zmkIm);
+      const oddRe = 0.5 * (zkIm + zmkIm);
+      const oddIm = 0.5 * (zmkRe - zkRe);
+
+      const c = uCos[k];
+      const s = uSin[k];
+      const re = evenRe + (c * oddRe - s * oddIm);
+      const im = evenIm + (c * oddIm + s * oddRe);
+
+      const mag = Math.sqrt(re * re + im * im) * invN2;
+      const smoothedMag = smooth * prevMags[k] + oneMinusSmooth * mag;
+      prevMags[k] = smoothedMag;
+
+      const db = smoothedMag > 1e-7 ? log10Scale * Math.log(smoothedMag) : minDb;
+      const norm = (db - minDb) * invRangeDb;
+      outFreq[k] = norm <= 0 ? 0 : norm >= 1 ? 255 : (norm * 255 + 0.5) | 0;
     }
   }
 }
@@ -819,6 +896,9 @@ export function stepBeatDetector(
 export class OfflineLowPassBeatTracker {
   private readonly filteredMono: Float32Array;
   private readonly sampleRate: number;
+  private prevStart = -1;
+  private prevWindowSize = 0;
+  private prevSumSq = 0;
 
   constructor(buffer: AudioBuffer | PcmAudioInput, cutoffHz = 140, q = 1.2) {
     const { sampleRate, length: len, ch0, ch1 } = getInputChannels(buffer);
@@ -849,26 +929,71 @@ export class OfflineLowPassBeatTracker {
     let y1 = 0;
     let y2 = 0;
 
-    for (let i = 0; i < len; i++) {
-      const x0 = ch1 ? 0.5 * (ch0[i] + ch1[i]) : ch0[i];
-      const y0 = nb0 * x0 + nb1 * x1 + nb2 * x2 - na1 * y1 - na2 * y2;
-      this.filteredMono[i] = y0;
-      x2 = x1;
-      x1 = x0;
-      y2 = y1;
-      y1 = y0;
+    if (ch1) {
+      for (let i = 0; i < len; i++) {
+        const x0 = 0.5 * (ch0[i] + ch1[i]);
+        const y0 = nb0 * x0 + nb1 * x1 + nb2 * x2 - na1 * y1 - na2 * y2;
+        this.filteredMono[i] = y0;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+      }
+    } else {
+      for (let i = 0; i < len; i++) {
+        const x0 = ch0[i];
+        const y0 = nb0 * x0 + nb1 * x1 + nb2 * x2 - na1 * y1 - na2 * y2;
+        this.filteredMono[i] = y0;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+      }
     }
   }
 
   public getLowPassRmsAt(timeSec: number, windowSize = 1024): number {
+    const arr = this.filteredMono;
+    const len = arr.length;
     const center = Math.floor(timeSec * this.sampleRate);
-    const start = center - Math.floor(windowSize / 2);
-    let sumSq = 0;
+    const start = center - (windowSize >> 1);
+    const end = start + windowSize;
 
-    for (let i = 0; i < windowSize; i++) {
-      const idx = start + i;
-      const sample = idx >= 0 && idx < this.filteredMono.length ? this.filteredMono[idx] : 0;
-      sumSq += sample * sample;
+    let sumSq = 0;
+    if (
+      this.prevWindowSize === windowSize &&
+      start >= this.prevStart &&
+      start < this.prevStart + windowSize &&
+      start - this.prevStart <= (windowSize >> 1) &&
+      start >= 0 &&
+      end <= len
+    ) {
+      // Incremental sliding-window update when advancing monotonically inside bounds
+      sumSq = this.prevSumSq;
+      for (let idx = this.prevStart; idx < start; idx++) {
+        const v = arr[idx];
+        sumSq -= v * v;
+      }
+      for (let idx = this.prevStart + windowSize; idx < end; idx++) {
+        const v = arr[idx];
+        sumSq += v * v;
+      }
+      if (sumSq < 0) sumSq = 0;
+    } else {
+      const clampedStart = start > 0 ? start : 0;
+      const clampedEnd = end < len ? end : len;
+      for (let idx = clampedStart; idx < clampedEnd; idx++) {
+        const sample = arr[idx];
+        sumSq += sample * sample;
+      }
+    }
+
+    if (start >= 0 && end <= len) {
+      this.prevStart = start;
+      this.prevWindowSize = windowSize;
+      this.prevSumSq = sumSq;
+    } else {
+      this.prevStart = -1;
     }
 
     return Math.min(1, Math.sqrt(sumSq / windowSize) * 1.45);

@@ -8,6 +8,7 @@ import {
   CoverCardSource,
   createEmptyParticleFlowMap,
   DanceAvatarStyle,
+  DanceMedleyTriggerMode,
   DancePlacement,
   DanceStyleKey,
   ExportBitratePreset,
@@ -82,6 +83,41 @@ const VALID_VISUALIZERS: VisualizerMode[] = [
   'sound-curtain',
   'cyber-compass',
   'nebula-clouds',
+  'torus-3d',
+  'icosahedron-3d',
+  'octahedron-3d',
+  'sphere-dots-3d',
+  'cylinder-eq-3d',
+  'helix-double-3d',
+  'terrain-mesh-3d',
+  'prism-stack-3d',
+  'dodecahedron-3d',
+  'saturn-rings-3d',
+  'cube-lattice-3d',
+  'ribbon-mobius-3d',
+  'cone-vortex-3d',
+  'diamond-cut-3d',
+  'city-blocks-3d',
+  'wave-tunnel-3d',
+  'atom-cage-3d',
+  'ribbon-helix-3d',
+  'star-poly-3d',
+  'arch-bridge-3d',
+  'dna-spiral-3d',
+  'crystal-cluster-3d',
+  'radar-dome-3d',
+  'portal-gate-3d',
+  'hypercube-4d',
+  'origami-fold',
+  'vinyl-turntable',
+  'pendulum-clockwork',
+  'aurora-curtains',
+  'seismic-circular',
+  'bioluminescent-jelly',
+  'stained-glass',
+  'sonar-ripples',
+  'magnetic-ferrofluid',
+  'kaleido-tunnels',
 ];
 const VALID_PARTICLE_SHAPES: ParticleShape[] = [
   'circle',
@@ -152,6 +188,10 @@ const VALID_THEME_PRESETS: Array<ThemePresetKey | 'custom'> = [
 ];
 const VALID_BLOOM_PRESETS: BloomPresetKey[] = [
   'off',
+  'soft',
+  'glow',
+  'intense',
+  'cinematic',
   'subtle-glow',
   'dreamy-haze',
   'neon-bloom',
@@ -196,6 +236,17 @@ const VALID_DANCE_STYLES: DanceStyleKey[] = [
   'mocap-disco',
   'mocap-waltz',
   'mocap-custom',
+];
+const VALID_DANCE_MEDLEY_TRIGGERS: DanceMedleyTriggerMode[] = [
+  'beats',
+  'seconds',
+  'lyrics',
+];
+const DEFAULT_DANCE_MEDLEY_STYLES: DanceStyleKey[] = [
+  'hip-hop',
+  'mocap-salsa',
+  'mocap-kpop',
+  'mocap-breakdance',
 ];
 const VALID_DANCE_AVATARS: DanceAvatarStyle[] = [
   'robot',
@@ -333,6 +384,9 @@ export function validateAndNormalizeSettings(
     colorCycleSpeed: Number(
       clampNumber(obj.colorCycleSpeed, 0.25, 8, fallback.colorCycleSpeed ?? 1).toFixed(2)
     ),
+    globalHueRotation: Math.round(
+      clampNumber(obj.globalHueRotation, 0, 360, fallback.globalHueRotation ?? 0)
+    ),
     sensitivity: Number(clampNumber(obj.sensitivity, 0.5, 2.5, fallback.sensitivity).toFixed(2)),
     barCount,
     smoothing: Number(clampNumber(obj.smoothing, 0.1, 0.95, fallback.smoothing).toFixed(2)),
@@ -363,12 +417,28 @@ export function validateAndNormalizeSettings(
     bloomSaturation: Number(
       clampNumber(obj.bloomSaturation, 0.7, 1.8, fallback.bloomSaturation ?? 1.05).toFixed(2)
     ),
+    globalGlow: Number(
+      clampNumber(obj.globalGlow, 0, 1, fallback.globalGlow ?? 0).toFixed(2)
+    ),
     glitchIntensity: Number(
       clampNumber(obj.glitchIntensity, 0, 1, fallback.glitchIntensity).toFixed(2)
     ),
     bassShake: Number(
       clampNumber(obj.bassShake, 0, 1, fallback.bassShake ?? 0).toFixed(2)
     ),
+    beatShake: Number(
+      clampNumber(obj.beatShake, 0, 1, fallback.beatShake ?? 0).toFixed(2)
+    ),
+    scanlineIntensity: Number(
+      clampNumber(obj.scanlineIntensity, 0, 1, fallback.scanlineIntensity ?? 0).toFixed(2)
+    ),
+    scanlineColor:
+      typeof obj.scanlineColor === 'string' &&
+      (obj.scanlineColor.trim().toLowerCase() === 'auto' || isHexColor(obj.scanlineColor))
+        ? obj.scanlineColor.trim().toLowerCase() === 'auto'
+          ? 'auto'
+          : obj.scanlineColor.trim()
+        : fallback.scanlineColor ?? 'auto',
     beatDetection:
       typeof obj.beatDetection === 'boolean' ? obj.beatDetection : fallback.beatDetection,
     beatSensitivity: Number(
@@ -378,6 +448,19 @@ export function validateAndNormalizeSettings(
       typeof obj.beatFlash === 'boolean'
         ? obj.beatFlash
         : fallback.beatFlash ?? false,
+    beatColorMappingEnabled:
+      typeof obj.beatColorMappingEnabled === 'boolean'
+        ? obj.beatColorMappingEnabled
+        : fallback.beatColorMappingEnabled ?? false,
+    beatColorLow: isHexColor(obj.beatColorLow)
+      ? obj.beatColorLow.trim()
+      : fallback.beatColorLow ?? '#f43f5e',
+    beatColorMid: isHexColor(obj.beatColorMid)
+      ? obj.beatColorMid.trim()
+      : fallback.beatColorMid ?? '#a855f7',
+    beatColorHigh: isHexColor(obj.beatColorHigh)
+      ? obj.beatColorHigh.trim()
+      : fallback.beatColorHigh ?? '#22d3ee',
     danceEnabled:
       typeof obj.danceEnabled === 'boolean'
         ? obj.danceEnabled
@@ -385,6 +468,50 @@ export function validateAndNormalizeSettings(
     danceStyle: VALID_DANCE_STYLES.includes(obj.danceStyle as DanceStyleKey)
       ? (obj.danceStyle as DanceStyleKey)
       : fallback.danceStyle ?? 'hip-hop',
+    danceMedleyEnabled:
+      typeof obj.danceMedleyEnabled === 'boolean'
+        ? obj.danceMedleyEnabled
+        : fallback.danceMedleyEnabled ?? false,
+    danceMedleyStyles: Array.isArray(obj.danceMedleyStyles)
+      ? Array.from(
+          new Set(
+            obj.danceMedleyStyles.filter((s): s is DanceStyleKey =>
+              VALID_DANCE_STYLES.includes(s as DanceStyleKey)
+            )
+          )
+        )
+      : Array.isArray(fallback.danceMedleyStyles)
+      ? [...fallback.danceMedleyStyles]
+      : [...DEFAULT_DANCE_MEDLEY_STYLES],
+    danceMedleyTrigger: VALID_DANCE_MEDLEY_TRIGGERS.includes(
+      obj.danceMedleyTrigger as DanceMedleyTriggerMode
+    )
+      ? (obj.danceMedleyTrigger as DanceMedleyTriggerMode)
+      : fallback.danceMedleyTrigger ?? 'beats',
+    danceMedleyIntervalBeats: Math.round(
+      clampNumber(
+        obj.danceMedleyIntervalBeats,
+        2,
+        32,
+        fallback.danceMedleyIntervalBeats ?? 8
+      )
+    ),
+    danceMedleyIntervalSeconds: Number(
+      clampNumber(
+        obj.danceMedleyIntervalSeconds,
+        2,
+        30,
+        fallback.danceMedleyIntervalSeconds ?? 8
+      ).toFixed(1)
+    ),
+    danceMedleyBlendDuration: Number(
+      clampNumber(
+        obj.danceMedleyBlendDuration,
+        0.15,
+        1.5,
+        fallback.danceMedleyBlendDuration ?? 0.45
+      ).toFixed(2)
+    ),
     avatarStyle: VALID_DANCE_AVATARS.includes(obj.avatarStyle as DanceAvatarStyle)
       ? (obj.avatarStyle as DanceAvatarStyle)
       : VALID_DANCE_AVATARS.includes(obj.danceAvatarStyle as DanceAvatarStyle)
@@ -715,6 +842,41 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'sound-curtain': 'Acoustic Curtain',
     'cyber-compass': 'HUD Compass',
     'nebula-clouds': 'Cosmic Nebula',
+    'torus-3d': '3D Torus Matrix',
+    'icosahedron-3d': '3D Icosahedron',
+    'octahedron-3d': '3D Dual Octahedron',
+    'sphere-dots-3d': '3D Fibonacci Sphere',
+    'cylinder-eq-3d': '3D Cylinder EQ',
+    'helix-double-3d': '3D Double Helix',
+    'terrain-mesh-3d': '3D Audio Terrain',
+    'prism-stack-3d': '3D Prism Cascade',
+    'dodecahedron-3d': '3D Dodecahedron',
+    'saturn-rings-3d': '3D Planetary Rings',
+    'cube-lattice-3d': '3D Voxel Matrix',
+    'ribbon-mobius-3d': '3D Mobius Ribbon',
+    'cone-vortex-3d': '3D Funnel Vortex',
+    'diamond-cut-3d': '3D Faceted Diamond',
+    'city-blocks-3d': '3D Skyline Towers',
+    'wave-tunnel-3d': '3D Hex Tunnel',
+    'atom-cage-3d': '3D Gyro Cage',
+    'ribbon-helix-3d': '3D Spiral Ribbon',
+    'star-poly-3d': '3D Stellated Star',
+    'arch-bridge-3d': '3D Archway Tunnel',
+    'dna-spiral-3d': '3D Twisted Ladder',
+    'crystal-cluster-3d': '3D Quartz Cluster',
+    'radar-dome-3d': '3D Radar Dome',
+    'portal-gate-3d': '3D Dimensional Gate',
+    'hypercube-4d': '4D Tesseract 3D',
+    'origami-fold': 'Origami Fold',
+    'vinyl-turntable': 'Spinning Turntable',
+    'pendulum-clockwork': 'Clockwork Gears',
+    'aurora-curtains': 'Polar Aurora',
+    'seismic-circular': 'Circular Seismograph',
+    'bioluminescent-jelly': 'Bioluminescent Jelly',
+    'stained-glass': 'Rose Stained Glass',
+    'sonar-ripples': 'Echolocation Arcs',
+    'magnetic-ferrofluid': 'Ferrofluid Spikes',
+    'kaleido-tunnels': 'Kaleido Fractals',
   };
   if (settings.lyricsOnly) {
     const layoutLabels: Record<LyricsOnlyLayout, string> = {

@@ -351,7 +351,7 @@ export function MidiMappingModal({
               const mapping = mappings.find((m) => m.targetParam === spec.key);
               const isLearning = learningParam === spec.key;
               const isExpanded = expandedParam === spec.key && Boolean(mapping);
-              const currentValue = settings[spec.key];
+              const currentValue = settings[spec.key] ?? spec.defaultValue;
               const pct = Math.max(
                 0,
                 Math.min(100, ((currentValue - spec.min) / (spec.max - spec.min)) * 100)

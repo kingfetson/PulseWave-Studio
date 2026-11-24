@@ -1,4 +1,8 @@
-import { StudioProjectRecord, StudioProjectSummary } from '../types/studio';
+import {
+  normalizeProjectTags,
+  StudioProjectRecord,
+  StudioProjectSummary,
+} from '../types/studio';
 
 const DB_NAME = 'pulsewave_studio_projects_v1';
 const DB_VERSION = 1;
@@ -74,8 +78,11 @@ function toSummary(rec: StudioProjectRecord): StudioProjectSummary {
     name: rec.name,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
+    status: rec.status,
+    completedAt: rec.completedAt,
     lastExportedAt: rec.lastExportedAt,
     exportCount: rec.exportCount,
+    tags: normalizeProjectTags(rec.tags),
     settings: rec.settings,
     lyrics: rec.lyrics,
     trimStart: rec.trimStart,
@@ -153,6 +160,39 @@ export async function renameProjectRecord(id: string, name: string): Promise<voi
   });
 }
 
+export async function setProjectCompletionStatus(
+  id: string,
+  completed: boolean
+): Promise<StudioProjectRecord | null> {
+  const existing = await getProjectRecord(id);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  const updated: StudioProjectRecord = {
+    ...existing,
+    status: completed ? 'completed' : 'in-progress',
+    completedAt: completed ? existing.completedAt ?? now : undefined,
+    updatedAt: now,
+  };
+  await saveProjectRecord(updated);
+  return updated;
+}
+
+export async function updateProjectTags(
+  id: string,
+  tags: string[]
+): Promise<StudioProjectRecord | null> {
+  const existing = await getProjectRecord(id);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  const updated: StudioProjectRecord = {
+    ...existing,
+    tags: normalizeProjectTags(tags),
+    updatedAt: now,
+  };
+  await saveProjectRecord(updated);
+  return updated;
+}
+
 export async function duplicateProjectRecord(
   id: string
 ): Promise<StudioProjectRecord | null> {
@@ -165,6 +205,11 @@ export async function duplicateProjectRecord(
     name: `${existing.name} (Copy)`,
     createdAt: now,
     updatedAt: now,
+    status: 'in-progress',
+    completedAt: undefined,
+    lastExportedAt: undefined,
+    exportCount: 0,
+    tags: normalizeProjectTags(existing.tags),
   };
   await saveProjectRecord(copy);
   return copy;

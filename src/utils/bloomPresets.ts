@@ -1,7 +1,9 @@
 import { BloomPresetKey, StudioSettings } from '../types/studio';
 
+export type PrimaryBloomPresetKey = 'off' | 'soft' | 'glow' | 'intense' | 'cinematic';
+
 export interface BloomPresetConfig {
-  key: Exclude<BloomPresetKey, 'custom'>;
+  key: PrimaryBloomPresetKey;
   name: string;
   description: string;
   bloomIntensity: number;
@@ -20,50 +22,62 @@ export const DEFAULT_BLOOM_SHADER_PARAMS = {
 export const BLOOM_PRESETS: BloomPresetConfig[] = [
   {
     key: 'off',
-    name: 'Off (Crisp)',
-    description: 'Zero post-blur passes; pure sharp vector & bar edges.',
+    name: 'Off',
+    description: 'Zero post-blur passes; pure crisp vector and bar edges.',
     bloomIntensity: 0,
     bloomRadius: 1.0,
     bloomSpread: 0.5,
     bloomSaturation: 1.0,
   },
   {
-    key: 'subtle-glow',
-    name: 'Subtle Glow',
-    description: 'Tight core rim glow preserving clean foreground contrast.',
+    key: 'soft',
+    name: 'Soft',
+    description: 'Tight gentle rim glow preserving sharp foreground contrast.',
     bloomIntensity: 0.35,
-    bloomRadius: 0.72,
-    bloomSpread: 0.25,
+    bloomRadius: 0.78,
+    bloomSpread: 0.28,
     bloomSaturation: 1.05,
   },
   {
-    key: 'dreamy-haze',
-    name: 'Dreamy Haze',
-    description: 'Wide velvety atmospheric diffusion across outer mist layers.',
-    bloomIntensity: 0.8,
-    bloomRadius: 1.9,
-    bloomSpread: 0.9,
-    bloomSaturation: 0.92,
-  },
-  {
-    key: 'neon-bloom',
-    name: 'Neon Bloom',
-    description: 'High-chroma electric core with vivid mid-band halation.',
-    bloomIntensity: 0.95,
+    key: 'glow',
+    name: 'Glow',
+    description: 'Balanced neon halation with luminous mid-band radiance.',
+    bloomIntensity: 0.75,
     bloomRadius: 1.15,
     bloomSpread: 0.52,
-    bloomSaturation: 1.48,
+    bloomSaturation: 1.28,
   },
   {
-    key: 'aggressive-flare',
-    name: 'Aggressive Flare',
-    description: 'Overdriven wide specular flare tuned for heavy bass drops.',
-    bloomIntensity: 1.4,
-    bloomRadius: 1.68,
-    bloomSpread: 0.78,
-    bloomSaturation: 1.72,
+    key: 'intense',
+    name: 'Intense',
+    description: 'Overdriven electric specular flare tuned for heavy drops.',
+    bloomIntensity: 1.3,
+    bloomRadius: 1.55,
+    bloomSpread: 0.72,
+    bloomSaturation: 1.62,
+  },
+  {
+    key: 'cinematic',
+    name: 'Cinematic',
+    description: 'Wide velvety atmospheric diffusion with filmic highlight roll-off.',
+    bloomIntensity: 0.9,
+    bloomRadius: 1.95,
+    bloomSpread: 0.92,
+    bloomSaturation: 0.94,
   },
 ];
+
+const LEGACY_BLOOM_PRESET_MAP: Partial<Record<BloomPresetKey, PrimaryBloomPresetKey>> = {
+  'subtle-glow': 'soft',
+  'neon-bloom': 'glow',
+  'aggressive-flare': 'intense',
+  'dreamy-haze': 'cinematic',
+};
+
+export function normalizeBloomPresetKey(key: BloomPresetKey | undefined): BloomPresetKey {
+  if (!key) return 'off';
+  return LEGACY_BLOOM_PRESET_MAP[key] ?? key;
+}
 
 function approxEqual(a: number | undefined, b: number, fallback: number, eps = 0.025): boolean {
   const val = typeof a === 'number' && Number.isFinite(a) ? a : fallback;
@@ -98,7 +112,8 @@ export function resolveActiveBloomPreset(settings: StudioSettings): BloomPresetK
 export function getBloomPresetPatch(
   presetKey: Exclude<BloomPresetKey, 'custom'>
 ): Partial<StudioSettings> {
-  const preset = BLOOM_PRESETS.find((p) => p.key === presetKey) ?? BLOOM_PRESETS[0];
+  const normalized = normalizeBloomPresetKey(presetKey);
+  const preset = BLOOM_PRESETS.find((p) => p.key === normalized) ?? BLOOM_PRESETS[0];
   return {
     bloomPreset: preset.key,
     bloomIntensity: preset.bloomIntensity,

@@ -3,6 +3,7 @@ export type MidiMappableParamKey =
   | 'bloomIntensity'
   | 'glitchIntensity'
   | 'bassShake'
+  | 'beatShake'
   | 'visualizerScale'
   | 'motionBlur'
   | 'smoothing'

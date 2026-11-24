@@ -24,10 +24,13 @@ import {
   createEmptyParticleFlowMap,
   ExportProfile,
   ExportProgressState,
+  isProjectCompleted,
   LyricLine,
   MocapClipData,
   MotionBlurState,
+  normalizeProjectTags,
   Particle,
+  ProjectStatus,
   SavedPreset,
   SceneTransitionState,
   ShareableVideoAsset,
@@ -99,6 +102,8 @@ import {
   renameProjectRecord,
   saveProjectRecord,
   setLastActiveProjectId,
+  setProjectCompletionStatus,
+  updateProjectTags,
 } from './utils/projectStorage';
 import {
   computeTapTempoCalibration,
@@ -119,6 +124,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   bgColor: THEME_PRESETS[0].bgColor,
   autoCycleColor: false,
   colorCycleSpeed: 1,
+  globalHueRotation: 0,
   sensitivity: 1.2,
   barCount: 72,
   smoothing: 0.78,
@@ -129,8 +135,12 @@ const DEFAULT_SETTINGS: StudioSettings = {
   bloomRadius: 1.0,
   bloomSpread: 0.5,
   bloomSaturation: 1.05,
+  globalGlow: 0,
   glitchIntensity: 0,
   bassShake: 0,
+  beatShake: 0,
+  scanlineIntensity: 0,
+  scanlineColor: 'auto',
   visualizerScale: 1,
   lyricPosition: 80,
   lyricLetterSpacing: 0,
@@ -166,6 +176,10 @@ const DEFAULT_SETTINGS: StudioSettings = {
   beatDetection: false,
   beatSensitivity: 1.25,
   beatFlash: false,
+  beatColorMappingEnabled: false,
+  beatColorLow: '#f43f5e',
+  beatColorMid: '#a855f7',
+  beatColorHigh: '#22d3ee',
   sceneTransitionType: 'crossfade',
   sceneTransitionDuration: 0.45,
   sceneTransitionTarget: 'both',
@@ -176,6 +190,12 @@ const DEFAULT_SETTINGS: StudioSettings = {
   particleFlowMap: createEmptyParticleFlowMap(),
   danceEnabled: false,
   danceStyle: 'hip-hop',
+  danceMedleyEnabled: false,
+  danceMedleyStyles: ['hip-hop', 'mocap-salsa', 'mocap-kpop', 'mocap-breakdance'],
+  danceMedleyTrigger: 'beats',
+  danceMedleyIntervalBeats: 8,
+  danceMedleyIntervalSeconds: 8,
+  danceMedleyBlendDuration: 0.45,
   avatarStyle: 'human-dancer',
   danceAvatarStyle: 'human-dancer',
   dancePlacement: 'center',
@@ -220,6 +240,7 @@ export default function App() {
   const [projects, setProjects] = useState<StudioProjectSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeProjectName, setActiveProjectName] = useState('Untitled Project');
+  const [activeProjectCompleted, setActiveProjectCompleted] = useState(false);
   const [autoSaveProjects, setAutoSaveProjects] = useState<boolean>(() =>
     loadAutoSaveProjects()
   );
@@ -238,6 +259,7 @@ export default function App() {
   const [trimEnd, setTrimEnd] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [loopClip, setLoopClip] = useState(true);
+  const [previewTrimLoop, setPreviewTrimLoop] = useState(false);
   const [volume, setVolume] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -329,8 +351,8 @@ export default function App() {
   lyricsRef.current = lyrics;
   const mocapClipRef = useRef<MocapClipData | null>(null);
   mocapClipRef.current = mocapClip;
-  const trimRef = useRef({ trimStart, trimEnd, loopClip });
-  trimRef.current = { trimStart, trimEnd, loopClip };
+  const trimRef = useRef({ trimStart, trimEnd, loopClip, previewTrimLoop });
+  trimRef.current = { trimStart, trimEnd, loopClip, previewTrimLoop };
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
   const currentTimeRef = useRef(currentTime);
@@ -368,14 +390,20 @@ export default function App() {
     id: string | null;
     name: string;
     createdAt: string;
+    status?: ProjectStatus;
+    completedAt?: string;
     lastExportedAt?: string;
     exportCount?: number;
+    tags?: string[];
   }>({
     id: activeProjectId,
     name: activeProjectName,
     createdAt: new Date().toISOString(),
+    status: 'in-progress',
+    completedAt: undefined,
     lastExportedAt: undefined,
     exportCount: 0,
+    tags: [],
   });
   activeProjectRef.current.id = activeProjectId;
   activeProjectRef.current.name = activeProjectName;
@@ -397,8 +425,12 @@ export default function App() {
     audioElRef.current = audio;
 
     const handleEnded = () => {
-      const { loopClip: shouldLoop, trimStart: start } = trimRef.current;
-      if (shouldLoop) {
+      const {
+        loopClip: shouldLoop,
+        previewTrimLoop: shouldPreviewTrimLoop,
+        trimStart: start,
+      } = trimRef.current;
+      if (shouldLoop || shouldPreviewTrimLoop) {
         audio.currentTime = start;
         void audio.play().catch(() => setIsPlaying(false));
       } else {
@@ -564,8 +596,11 @@ export default function App() {
         'bloomRadius',
         'bloomSpread',
         'bloomSaturation',
+        'globalGlow',
         'glitchIntensity',
         'bassShake',
+        'beatShake',
+        'globalHueRotation',
         'visualizerScale',
         'lyricPosition',
         'lyricLetterSpacing',
@@ -582,6 +617,9 @@ export default function App() {
         'particleVelocity',
         'particleLifespan',
         'particleFlowMap',
+        'danceMedleyIntervalBeats',
+        'danceMedleyIntervalSeconds',
+        'danceMedleyBlendDuration',
       ]);
       const mergeKey =
         keys.length === 1 && coalescedKeys.has(keys[0])
@@ -853,11 +891,15 @@ export default function App() {
             id: null,
             name: 'Untitled Project',
             createdAt: new Date().toISOString(),
+            status: 'in-progress',
+            completedAt: undefined,
             lastExportedAt: undefined,
             exportCount: 0,
+            tags: [],
           };
           setActiveProjectId(null);
           setActiveProjectName('Untitled Project');
+          setActiveProjectCompleted(false);
           setLastActiveProjectId(null);
         }
 
@@ -921,11 +963,15 @@ export default function App() {
           id: null,
           name: 'Untitled Project',
           createdAt: new Date().toISOString(),
+          status: 'in-progress',
+          completedAt: undefined,
           lastExportedAt: undefined,
           exportCount: 0,
+          tags: [],
         };
         setActiveProjectId(null);
         setActiveProjectName('Untitled Project');
+        setActiveProjectCompleted(false);
         setLastActiveProjectId(null);
       }
 
@@ -1212,12 +1258,16 @@ export default function App() {
 
         setActiveProjectId(record.id);
         setActiveProjectName(record.name);
+        setActiveProjectCompleted(isProjectCompleted(record));
         activeProjectRef.current = {
           id: record.id,
           name: record.name,
           createdAt: record.createdAt,
+          status: record.status ?? (isProjectCompleted(record) ? 'completed' : 'in-progress'),
+          completedAt: record.completedAt,
           lastExportedAt: record.lastExportedAt,
           exportCount: record.exportCount ?? 0,
+          tags: normalizeProjectTags(record.tags),
         };
         setLastActiveProjectId(record.id);
         setIsProjectDirty(false);
@@ -1236,7 +1286,8 @@ export default function App() {
     const meta = mediaMetaRef.current;
     const s = settingsRef.current;
     return Boolean(
-      audioBlobRef.current ||
+      activeProjectRef.current.id ||
+        audioBlobRef.current ||
         meta.audioFileName ||
         bgBlobRef.current ||
         meta.bgImageName ||
@@ -1253,8 +1304,11 @@ export default function App() {
       id: string,
       name: string,
       createdAt: string,
+      status: ProjectStatus,
+      completedAt?: string,
       lastExportedAt?: string,
-      exportCount?: number
+      exportCount?: number,
+      tags?: string[]
     ): StudioProjectRecord => {
       const now = new Date().toISOString();
       const meta = mediaMetaRef.current;
@@ -1264,8 +1318,11 @@ export default function App() {
         name,
         createdAt,
         updatedAt: now,
+        status,
+        completedAt,
         lastExportedAt,
         exportCount,
+        tags: normalizeProjectTags(tags),
         settings: { ...settingsRef.current },
         lyrics: lyricsRef.current.map((l) => ({ ...l })),
         trimStart: trim.trimStart,
@@ -1320,13 +1377,23 @@ export default function App() {
           const exportCount = opts?.exported
             ? (proj.exportCount ?? 0) + 1
             : proj.exportCount;
+          const status: ProjectStatus = opts?.exported
+            ? 'completed'
+            : proj.status ?? (isProjectCompleted({ status: proj.status, lastExportedAt, exportCount }) ? 'completed' : 'in-progress');
+          const completedAt =
+            status === 'completed' ? proj.completedAt ?? now : undefined;
+
+          const tags = normalizeProjectTags(proj.tags);
 
           const record = buildCurrentProjectRecord(
             id,
             name,
             createdAt,
+            status,
+            completedAt,
             lastExportedAt,
-            exportCount
+            exportCount,
+            tags
           );
           await saveProjectRecord(record);
 
@@ -1334,11 +1401,15 @@ export default function App() {
             id,
             name,
             createdAt,
+            status,
+            completedAt,
             lastExportedAt,
             exportCount,
+            tags,
           };
           setActiveProjectId(id);
           setActiveProjectName(name);
+          setActiveProjectCompleted(status === 'completed');
           setLastActiveProjectId(id);
           setIsProjectDirty(false);
           await refreshProjectsList();
@@ -1358,7 +1429,7 @@ export default function App() {
   saveCurrentProjectRef.current = saveCurrentProject;
 
   const handleSaveAsNewProject = useCallback(
-    (requestedName: string): Promise<void> => {
+    (requestedName: string, requestedTags?: string[]): Promise<void> => {
       const task = saveChainRef.current.then(async () => {
         setIsSavingProject(true);
         try {
@@ -1369,17 +1440,31 @@ export default function App() {
             settingsRef.current.trackTitle.trim() ||
             mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
             'Untitled Project';
-          const record = buildCurrentProjectRecord(id, finalName, now, undefined, 0);
+          const normalizedTags = normalizeProjectTags(requestedTags);
+          const record = buildCurrentProjectRecord(
+            id,
+            finalName,
+            now,
+            'in-progress',
+            undefined,
+            undefined,
+            0,
+            normalizedTags
+          );
           await saveProjectRecord(record);
           activeProjectRef.current = {
             id,
             name: finalName,
             createdAt: now,
+            status: 'in-progress',
+            completedAt: undefined,
             lastExportedAt: undefined,
             exportCount: 0,
+            tags: normalizedTags,
           };
           setActiveProjectId(id);
           setActiveProjectName(finalName);
+          setActiveProjectCompleted(false);
           setLastActiveProjectId(id);
           setIsProjectDirty(false);
           await refreshProjectsList();
@@ -1438,6 +1523,30 @@ export default function App() {
     [refreshProjectsList]
   );
 
+  const handleToggleProjectCompleted = useCallback(
+    async (id: string, completed: boolean) => {
+      const updated = await setProjectCompletionStatus(id, completed);
+      if (updated && activeProjectRef.current.id === id) {
+        activeProjectRef.current.status = updated.status;
+        activeProjectRef.current.completedAt = updated.completedAt;
+        setActiveProjectCompleted(completed);
+      }
+      await refreshProjectsList();
+    },
+    [refreshProjectsList]
+  );
+
+  const handleUpdateProjectTags = useCallback(
+    async (id: string, tags: string[]) => {
+      const updated = await updateProjectTags(id, tags);
+      if (updated && activeProjectRef.current.id === id) {
+        activeProjectRef.current.tags = normalizeProjectTags(updated.tags);
+      }
+      await refreshProjectsList();
+    },
+    [refreshProjectsList]
+  );
+
   const handleDeleteProject = useCallback(
     async (id: string) => {
       await deleteProjectRecord(id);
@@ -1446,11 +1555,15 @@ export default function App() {
           id: null,
           name: 'Untitled Project',
           createdAt: new Date().toISOString(),
+          status: 'in-progress',
+          completedAt: undefined,
           lastExportedAt: undefined,
           exportCount: 0,
+          tags: [],
         };
         setActiveProjectId(null);
         setActiveProjectName('Untitled Project');
+        setActiveProjectCompleted(false);
         setLastActiveProjectId(null);
         setIsProjectDirty(true);
       }
@@ -1524,11 +1637,15 @@ export default function App() {
         id: null,
         name: 'Untitled Project',
         createdAt: new Date().toISOString(),
+        status: 'in-progress',
+        completedAt: undefined,
         lastExportedAt: undefined,
         exportCount: 0,
+        tags: [],
       };
       setActiveProjectId(null);
       setActiveProjectName('Untitled Project');
+      setActiveProjectCompleted(false);
       setLastActiveProjectId(null);
       setIsProjectDirty(false);
       setIsProjectsModalOpen(false);
@@ -1619,9 +1736,19 @@ export default function App() {
     try {
       await ensureAudioGraph();
       audio.playbackRate = playbackRateRef.current;
-      const { trimStart: start, trimEnd: end, loopClip: shouldLoop } = trimRef.current;
-      if (shouldLoop && (audio.currentTime < start || audio.currentTime >= end - 0.05)) {
+      const {
+        trimStart: start,
+        trimEnd: end,
+        loopClip: shouldLoop,
+        previewTrimLoop: shouldPreviewTrimLoop,
+      } = trimRef.current;
+      if (
+        (shouldLoop || shouldPreviewTrimLoop) &&
+        end > start &&
+        (audio.currentTime < start || audio.currentTime >= end - 0.02)
+      ) {
         audio.currentTime = start;
+        setCurrentTime(start);
       }
       await audio.play();
     } catch (err) {
@@ -1629,18 +1756,56 @@ export default function App() {
     }
   }, [audioBuffer, ensureAudioGraph]);
 
-  const handleSeek = useCallback((time: number) => {
-    const audio = audioElRef.current;
-    const clamped = Math.max(0, Math.min(time, duration || time));
-    setCurrentTime(clamped);
-    if (audio && audio.src) {
-      audio.currentTime = clamped;
-    }
-  }, [duration]);
+  const handleSeek = useCallback(
+    (time: number) => {
+      const audio = audioElRef.current;
+      const { trimStart: start, trimEnd: end, previewTrimLoop: strictTrim } = trimRef.current;
+      let clamped = Math.max(0, Math.min(time, duration || time));
+      if (strictTrim && end > start) {
+        clamped = Math.max(start, Math.min(end, clamped));
+      }
+      setCurrentTime(clamped);
+      if (audio && audio.src) {
+        audio.currentTime = clamped;
+      }
+    },
+    [duration]
+  );
 
   const handleTrimChange = useCallback((start: number, end: number) => {
     setTrimStart(start);
     setTrimEnd(end);
+    if (trimRef.current.previewTrimLoop && end > start) {
+      const audio = audioElRef.current;
+      const cur = audio && audio.src ? audio.currentTime : currentTimeRef.current;
+      if (cur < start || cur >= end) {
+        const nextPos = !audio?.paused && cur >= end ? start : Math.max(start, Math.min(end, cur));
+        setCurrentTime(nextPos);
+        if (audio && audio.src) {
+          audio.currentTime = nextPos;
+        }
+      }
+    }
+  }, []);
+
+  const handleTogglePreviewTrimLoop = useCallback(() => {
+    setPreviewTrimLoop((prev) => {
+      const next = !prev;
+      if (next) {
+        const { trimStart: start, trimEnd: end } = trimRef.current;
+        const audio = audioElRef.current;
+        if (end > start) {
+          const cur = audio && audio.src ? audio.currentTime : currentTimeRef.current;
+          if (cur < start || cur >= end) {
+            setCurrentTime(start);
+            if (audio && audio.src) {
+              audio.currentTime = start;
+            }
+          }
+        }
+      }
+      return next;
+    });
   }, []);
 
   const handlePreviewSceneTransition = useCallback(() => {
@@ -1749,13 +1914,23 @@ export default function App() {
       const canvas = previewCanvasRef.current;
       const activeSettings = settingsRef.current;
 
-      // Enforce Loop Clip boundaries during playback
+      // Enforce Loop Clip & Preview Trim Loop boundaries during playback
       let trackTime = audio ? audio.currentTime : 0;
       if (audio && !audio.paused) {
-        const { loopClip: shouldLoop, trimStart: start, trimEnd: end } = trimRef.current;
-        if (shouldLoop && end > start && trackTime >= end) {
-          audio.currentTime = start;
-          trackTime = start;
+        const {
+          loopClip: shouldLoop,
+          previewTrimLoop: strictTrimLoop,
+          trimStart: start,
+          trimEnd: end,
+        } = trimRef.current;
+        if (end > start) {
+          if (strictTrimLoop && trackTime < start) {
+            audio.currentTime = start;
+            trackTime = start;
+          } else if ((strictTrimLoop || shouldLoop) && trackTime >= end) {
+            audio.currentTime = start;
+            trackTime = start;
+          }
         }
         setCurrentTime(trackTime);
       }
@@ -1804,6 +1979,7 @@ export default function App() {
         Boolean(activeSettings.danceEnabled) ||
         (activeSettings.glitchIntensity ?? 0) > 0 ||
         (activeSettings.bassShake ?? 0) > 0 ||
+        (activeSettings.beatShake ?? 0) > 0 ||
         (Boolean(activeSettings.lyricBeatSync) &&
           (activeSettings.lyricPulseIntensity ?? 1) > 0);
       if (needsBeatDetector) {
@@ -1949,7 +2125,7 @@ export default function App() {
           createdAt: new Date().toISOString(),
         });
 
-        if (autoSaveProjectsRef.current) {
+        if (autoSaveProjectsRef.current || activeProjectRef.current.id) {
           void saveCurrentProject({ exported: true, forceCreate: true });
         }
       } catch (err) {
@@ -2317,7 +2493,7 @@ export default function App() {
         }
       }
 
-      if (completedCount > 0 && autoSaveProjectsRef.current) {
+      if (completedCount > 0 && (autoSaveProjectsRef.current || activeProjectRef.current.id)) {
         void saveCurrentProject({ exported: true, forceCreate: true });
       }
 
@@ -2619,6 +2795,8 @@ export default function App() {
       showSafeZone: false,
       glitchIntensity: 0,
       bassShake: 0,
+      beatShake: 0,
+      scanlineIntensity: 0,
       motionBlur: 0,
       motionBlurPreset: 'none',
     };
@@ -2791,6 +2969,7 @@ export default function App() {
         shareableCount={shareableAssets.length}
         activeProjectId={activeProjectId}
         activeProjectName={activeProjectName}
+        activeProjectCompleted={activeProjectCompleted}
         projectCount={projects.length}
         autoSaveProjects={autoSaveProjects}
         isProjectDirty={isProjectDirty}
@@ -2916,6 +3095,7 @@ export default function App() {
             trimEnd={trimEnd}
             isPlaying={isPlaying}
             loopClip={loopClip}
+            previewTrimLoop={previewTrimLoop}
             volume={volume}
             isMuted={isMuted}
             playbackRate={playbackRate}
@@ -2932,6 +3112,7 @@ export default function App() {
             onSeek={handleSeek}
             onTrimChange={handleTrimChange}
             onToggleLoop={() => setLoopClip((v) => !v)}
+            onTogglePreviewTrimLoop={handleTogglePreviewTrimLoop}
             onTapTempo={handleTapTempo}
             onVolumeChange={(v) => {
               setVolume(v);
@@ -3029,6 +3210,8 @@ export default function App() {
         onOpenProject={handleOpenProject}
         onRenameProject={handleRenameProject}
         onDuplicateProject={handleDuplicateProject}
+        onToggleProjectCompleted={handleToggleProjectCompleted}
+        onUpdateProjectTags={handleUpdateProjectTags}
         onDeleteProject={handleDeleteProject}
         onNewBlankProject={handleNewBlankProject}
       />

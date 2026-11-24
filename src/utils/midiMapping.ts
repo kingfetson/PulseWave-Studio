@@ -53,6 +53,16 @@ export const MIDI_MAPPABLE_PARAMS: MidiParameterSpec[] = [
     formatValue: (v) => (v === 0 ? 'Off' : `${Math.round(v * 100)}%`),
   },
   {
+    key: 'beatShake',
+    label: 'Beat Shake',
+    category: 'Audio & Visuals',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => (v === 0 ? 'Off' : `${Math.round(v * 100)}%`),
+  },
+  {
     key: 'visualizerScale',
     label: 'Visualizer Scale',
     category: 'Audio & Visuals',

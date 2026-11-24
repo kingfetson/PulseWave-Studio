@@ -30,6 +30,7 @@ interface TopBarProps {
   shareableCount: number;
   activeProjectId: string | null;
   activeProjectName: string;
+  activeProjectCompleted: boolean;
   projectCount: number;
   autoSaveProjects: boolean;
   isProjectDirty: boolean;
@@ -62,6 +63,7 @@ export function TopBar({
   shareableCount,
   activeProjectId,
   activeProjectName,
+  activeProjectCompleted,
   projectCount,
   autoSaveProjects,
   isProjectDirty,
@@ -93,22 +95,32 @@ export function TopBar({
           PulseWave Studio
         </span>
 
-        {/* Active Project Selector + Quick Save */}
+        {/* Projects Library Selector + Quick Save */}
         <div className="flex items-center gap-1.5 pl-2.5 border-l border-white/[0.08] min-w-0">
           <button
             type="button"
             onClick={onOpenProjects}
             disabled={isExporting}
-            title="Open saved projects"
+            title={`Projects — Completed & Non-Completed (${activeProjectName})`}
             className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-[#090b10] hover:bg-white/[0.07] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 min-w-0 cursor-pointer disabled:opacity-40"
           >
             <FolderOpen className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-            <span className="truncate max-w-[130px]">{activeProjectName}</span>
+            <span className="font-semibold text-slate-100 shrink-0">Projects</span>
             {projectCount > 0 && (
-              <span className="font-mono tabular-nums text-[10px] text-slate-400 shrink-0">
-                ({projectCount})
+              <span className="font-mono tabular-nums text-[10px] text-cyan-300 bg-cyan-500/12 border border-cyan-400/25 rounded px-1 py-0.2 shrink-0">
+                {projectCount}
               </span>
             )}
+            <span className="hidden md:inline text-slate-500 shrink-0">·</span>
+            <span
+              className={`hidden md:inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+                activeProjectCompleted ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+              title={activeProjectCompleted ? 'Completed project' : 'Non-completed project'}
+            />
+            <span className="hidden md:inline truncate max-w-[110px] text-slate-300">
+              {activeProjectName}
+            </span>
           </button>
 
           <button

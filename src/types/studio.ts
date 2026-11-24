@@ -82,7 +82,42 @@ export type VisualizerMode =
   | 'chromatic-rings'
   | 'sound-curtain'
   | 'cyber-compass'
-  | 'nebula-clouds';
+  | 'nebula-clouds'
+  | 'torus-3d'
+  | 'icosahedron-3d'
+  | 'octahedron-3d'
+  | 'sphere-dots-3d'
+  | 'cylinder-eq-3d'
+  | 'helix-double-3d'
+  | 'terrain-mesh-3d'
+  | 'prism-stack-3d'
+  | 'dodecahedron-3d'
+  | 'saturn-rings-3d'
+  | 'cube-lattice-3d'
+  | 'ribbon-mobius-3d'
+  | 'cone-vortex-3d'
+  | 'diamond-cut-3d'
+  | 'city-blocks-3d'
+  | 'wave-tunnel-3d'
+  | 'atom-cage-3d'
+  | 'ribbon-helix-3d'
+  | 'star-poly-3d'
+  | 'arch-bridge-3d'
+  | 'dna-spiral-3d'
+  | 'crystal-cluster-3d'
+  | 'radar-dome-3d'
+  | 'portal-gate-3d'
+  | 'hypercube-4d'
+  | 'origami-fold'
+  | 'vinyl-turntable'
+  | 'pendulum-clockwork'
+  | 'aurora-curtains'
+  | 'seismic-circular'
+  | 'bioluminescent-jelly'
+  | 'stained-glass'
+  | 'sonar-ripples'
+  | 'magnetic-ferrofluid'
+  | 'kaleido-tunnels';
 
 export type ParticleShape =
   | 'circle'
@@ -163,6 +198,8 @@ export type DanceAvatarStyle =
 
 export type DancePlacement = 'left' | 'center' | 'right';
 
+export type DanceMedleyTriggerMode = 'beats' | 'seconds' | 'lyrics';
+
 export interface MocapClipData {
   name: string;
   fps: number;
@@ -194,6 +231,10 @@ export type SceneTransitionTarget = 'both' | 'lyrics' | 'visualizer';
 
 export type BloomPresetKey =
   | 'off'
+  | 'soft'
+  | 'glow'
+  | 'intense'
+  | 'cinematic'
   | 'subtle-glow'
   | 'dreamy-haze'
   | 'neon-bloom'
@@ -360,6 +401,7 @@ export interface StudioSettings {
   bgColor: string;
   autoCycleColor?: boolean;
   colorCycleSpeed?: number; // 0.25 - 8.0 rotations across track progress
+  globalHueRotation?: number; // 0 - 360 degrees global palette hue shift
   sensitivity: number; // 0.5 - 2.5
   barCount: number; // 32 - 160
   smoothing: number; // 0.1 - 0.95
@@ -371,13 +413,27 @@ export interface StudioSettings {
   bloomRadius?: number; // 0.5 - 2.2 (multi-pass blur kernel multiplier)
   bloomSpread?: number; // 0 - 1 (core vs atmospheric haze balance)
   bloomSaturation?: number; // 0.7 - 1.8 (bloom extraction color saturation & brightness)
+  globalGlow?: number; // 0 - 1 (uniform scene-wide emission glow intensity)
   glitchIntensity: number; // 0 - 1 (beat-triggered frame drop & chromatic aberration)
   bassShake: number; // 0 - 1 (beat-triggered camera oscillation on bass hits)
+  beatShake?: number; // 0 - 1 (rapid, subtle screen-shake on every detected beat)
+  scanlineIntensity?: number; // 0 - 1 (brightness-reactive vintage CRT scanline texture)
+  scanlineColor?: string; // 'auto' (follows active theme) or custom hex CRT tint color
   beatDetection: boolean;
   beatSensitivity: number; // 0.8 - 2.0
   beatFlash?: boolean; // briefly invert/flash background on beat triggers
+  beatColorMappingEnabled?: boolean; // interpolate visualizer colors across low/mid/high ranges on beat energy
+  beatColorLow?: string; // hex color for low-frequency beat range
+  beatColorMid?: string; // hex color for mid-frequency beat range
+  beatColorHigh?: string; // hex color for high-frequency beat range
   danceEnabled?: boolean;
   danceStyle?: DanceStyleKey;
+  danceMedleyEnabled?: boolean; // Auto-cycle through multiple dance moves during a song
+  danceMedleyStyles?: DanceStyleKey[]; // Ordered rotation of dance/mocap styles
+  danceMedleyTrigger?: DanceMedleyTriggerMode; // 'beats' | 'seconds' | 'lyrics'
+  danceMedleyIntervalBeats?: number; // 2 - 32 beats before switching move
+  danceMedleyIntervalSeconds?: number; // 2 - 30 seconds before switching move
+  danceMedleyBlendDuration?: number; // 0.15 - 1.5 seconds smooth 3D pose crossfade
   avatarStyle?: DanceAvatarStyle;
   danceAvatarStyle?: DanceAvatarStyle;
   dancePlacement?: DancePlacement;
@@ -530,13 +586,40 @@ export interface ShareableVideoAsset {
   createdAt: string;
 }
 
+export type ProjectStatus = 'completed' | 'in-progress';
+
+export const DEFAULT_PROJECT_TAGS = ['Work', 'Personal', 'Draft', 'Client', 'Social'] as const;
+
+export function normalizeProjectTag(raw: string): string {
+  return raw.trim().replace(/\s+/g, ' ').slice(0, 24);
+}
+
+export function normalizeProjectTags(tags?: string[]): string[] {
+  if (!Array.isArray(tags)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of tags) {
+    if (typeof item !== 'string') continue;
+    const clean = normalizeProjectTag(item);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+  return result;
+}
+
 export interface StudioProjectSummary {
   id: string;
   name: string;
   createdAt: string;
   updatedAt: string;
+  status?: ProjectStatus;
+  completedAt?: string;
   lastExportedAt?: string;
   exportCount?: number;
+  tags?: string[];
   settings: StudioSettings;
   lyrics: LyricLine[];
   trimStart: number;
@@ -548,6 +631,14 @@ export interface StudioProjectSummary {
   albumImageName: string | null;
   thumbnailDataUrl: string | null;
   hasAudioBlob: boolean;
+}
+
+export function isProjectCompleted(
+  project: Pick<StudioProjectSummary, 'status' | 'lastExportedAt' | 'exportCount'>
+): boolean {
+  if (project.status === 'completed') return true;
+  if (project.status === 'in-progress') return false;
+  return Boolean(project.lastExportedAt) || (project.exportCount ?? 0) > 0;
 }
 
 export interface StudioProjectRecord extends StudioProjectSummary {

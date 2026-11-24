@@ -9,12 +9,14 @@ export interface ResolvedVideoConfig {
   codecLabel: string;
 }
 
-async function isVideoConfigUsable(config: VideoEncoderConfig): Promise<VideoEncoderConfig | null> {
+const resolvedVideoConfigCache = new Map<string, ResolvedVideoConfig>();
+
+async function checkConfigSupport(config: VideoEncoderConfig): Promise<VideoEncoderConfig | null> {
   if (typeof VideoEncoder === 'undefined') return null;
   try {
     const support = await VideoEncoder.isConfigSupported(config);
     if (!support.supported) return null;
-    const candidate = support.config
+    return support.config
       ? {
           ...config,
           ...support.config,
@@ -23,14 +25,20 @@ async function isVideoConfigUsable(config: VideoEncoderConfig): Promise<VideoEnc
           height: support.config.height || config.height,
         }
       : config;
+  } catch {
+    return null;
+  }
+}
 
+function canInstantiateVideoEncoder(candidate: VideoEncoderConfig): boolean {
+  try {
     const probe = new VideoEncoder({
       output: () => {},
       error: () => {},
     });
     try {
       probe.configure(candidate);
-      return candidate;
+      return true;
     } finally {
       try {
         if (probe.state !== 'closed') probe.close();
@@ -39,7 +47,7 @@ async function isVideoConfigUsable(config: VideoEncoderConfig): Promise<VideoEnc
       }
     }
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -53,6 +61,15 @@ export async function resolveSupportedVideoConfigForContainer(
   if (typeof VideoEncoder === 'undefined') return null;
 
   const pixelArea = width * height;
+  const defaultBitrate = pixelArea > 1_000_000 ? 8_000_000 : 5_000_000;
+  const bitrate = Math.round(
+    Math.max(1_500_000, Math.min(45_000_000, videoBitrateBps ?? defaultBitrate))
+  );
+
+  const cacheKey = `${container}:${width}x${height}:${fps}:${bitrate}`;
+  const cached = resolvedVideoConfigCache.get(cacheKey);
+  if (cached) return cached;
+
   const needsLevel5 = pixelArea > 2_100_000 || (pixelArea >= 2_000_000 && fps >= 60);
   const avcCandidates = needsLevel5
     ? [
@@ -122,11 +139,6 @@ export async function resolveSupportedVideoConfigForContainer(
           },
         ];
 
-  const defaultBitrate = pixelArea > 1_000_000 ? 8_000_000 : 5_000_000;
-  const bitrate = Math.round(
-    Math.max(1_500_000, Math.min(45_000_000, videoBitrateBps ?? defaultBitrate))
-  );
-
   const modes: Array<{
     hardwareAcceleration: HardwareAcceleration;
     latencyMode?: LatencyMode;
@@ -138,26 +150,32 @@ export async function resolveSupportedVideoConfigForContainer(
     { hardwareAcceleration: 'prefer-software' },
   ];
 
+  // Fast-path check the top preferred codec/mode first, then probe each mode's codec list in parallel
   for (const tier of codecTiers) {
     for (const mode of modes) {
-      for (const codec of tier.codecs) {
-        const config: VideoEncoderConfig = {
-          codec,
-          width,
-          height,
-          bitrate,
-          framerate: fps,
-          hardwareAcceleration: mode.hardwareAcceleration,
-          ...(mode.latencyMode ? { latencyMode: mode.latencyMode } : {}),
-        };
-        const usable = await isVideoConfigUsable(config);
-        if (usable) {
-          return {
-            encoderConfig: usable,
+      const results = await Promise.all(
+        tier.codecs.map((codec) =>
+          checkConfigSupport({
+            codec,
+            width,
+            height,
+            bitrate,
+            framerate: fps,
+            hardwareAcceleration: mode.hardwareAcceleration,
+            ...(mode.latencyMode ? { latencyMode: mode.latencyMode } : {}),
+          })
+        )
+      );
+      for (const candidate of results) {
+        if (candidate && canInstantiateVideoEncoder(candidate)) {
+          const resolved: ResolvedVideoConfig = {
+            encoderConfig: candidate,
             muxerCodec: tier.muxerCodec,
             webmMuxerCodec: tier.webmMuxerCodec,
             codecLabel: tier.codecLabel,
           };
+          resolvedVideoConfigCache.set(cacheKey, resolved);
+          return resolved;
         }
       }
     }

@@ -5,6 +5,7 @@ import {
   Download,
   Layers,
   Loader2,
+  Lock,
   Maximize2,
   Pause,
   Play,
@@ -27,6 +28,7 @@ interface TransportBarProps {
   trimEnd: number;
   isPlaying: boolean;
   loopClip: boolean;
+  previewTrimLoop: boolean;
   volume: number;
   isMuted: boolean;
   playbackRate: number;
@@ -43,6 +45,7 @@ interface TransportBarProps {
   onSeek: (time: number) => void;
   onTrimChange: (start: number, end: number) => void;
   onToggleLoop: () => void;
+  onTogglePreviewTrimLoop: () => void;
   onTapTempo: () => void;
   onVolumeChange: (volume: number) => void;
   onToggleMute: () => void;
@@ -85,6 +88,7 @@ export function TransportBar({
   trimEnd,
   isPlaying,
   loopClip,
+  previewTrimLoop,
   volume,
   isMuted,
   playbackRate,
@@ -101,6 +105,7 @@ export function TransportBar({
   onSeek,
   onTrimChange,
   onToggleLoop,
+  onTogglePreviewTrimLoop,
   onTapTempo,
   onVolumeChange,
   onToggleMute,
@@ -876,7 +881,11 @@ export function TransportBar({
               {/* Active clip top/bottom hairline */}
               {clampedEndPct > clampedStartPct && (
                 <div
-                  className="pointer-events-none absolute top-[16px] bottom-0 border-y border-cyan-400/50"
+                  className={`pointer-events-none absolute top-[16px] bottom-0 border-y transition-colors ${
+                    previewTrimLoop
+                      ? 'border-emerald-400/75 bg-emerald-400/[0.04]'
+                      : 'border-cyan-400/50'
+                  }`}
                   style={{
                     left: `${clampedStartPct}%`,
                     width: `${Math.max(0, clampedEndPct - clampedStartPct)}%`,
@@ -1052,6 +1061,26 @@ export function TransportBar({
           >
             <Repeat className="w-3.5 h-3.5" />
             <span>Loop Clip</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onTogglePreviewTrimLoop}
+            disabled={!hasAudio}
+            aria-pressed={previewTrimLoop}
+            title={
+              previewTrimLoop
+                ? 'Preview Trim Loop enabled: playback & scrubbing are strictly locked between In and Out trim points'
+                : 'Constrain & loop preview playback strictly between the current trim start and end points'
+            }
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40 ${
+              previewTrimLoop
+                ? 'bg-emerald-500/15 border-emerald-400/45 text-emerald-300'
+                : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Lock className="w-3.5 h-3.5" />
+            <span>Preview Trim Loop</span>
           </button>
 
           <button

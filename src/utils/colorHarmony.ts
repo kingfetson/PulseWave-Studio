@@ -440,57 +440,156 @@ export function pickRandomPaletteIndex(length: number, currentIndex: number): nu
   return next;
 }
 
+const rotateHexHueCache = new Map<string, string>();
+
 export function rotateHexHue(hex: string, hueShiftDeg: number): string {
   const normalized = normalizeHex(hex);
   const shift = ((hueShiftDeg % 360) + 360) % 360;
   if (shift < 0.05 || shift > 359.95) {
     return normalized;
   }
+  const cacheKey = `${normalized}|${Math.round(shift * 20)}`;
+  const cached = rotateHexHueCache.get(cacheKey);
+  if (cached) return cached;
+
   const { r, g, b } = hexToRgb(normalized);
   const { h, s, l } = rgbToHsl(r, g, b);
-  return hslToHex(h + shift, s, l);
+  const rotated = hslToHex(h + shift, s, l);
+  if (rotateHexHueCache.size > 512) rotateHexHueCache.clear();
+  rotateHexHueCache.set(cacheKey, rotated);
+  return rotated;
 }
 
 export interface AutoCycledColorResult {
   primaryColor: string;
   secondaryColor: string;
+  bgColor: string;
+  danceRimColor?: string;
+  scanlineColor?: string;
   hueShiftDeg: number;
+  globalHueRotationDeg: number;
+  cycleHueShiftDeg: number;
   progress: number;
 }
+
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/;
 
 export function resolveAutoCycledColors(
   settings: {
     primaryColor: string;
     secondaryColor: string;
+    bgColor?: string;
     autoCycleColor?: boolean;
     colorCycleSpeed?: number;
+    globalHueRotation?: number;
+    danceRimColor?: string;
+    scanlineColor?: string;
   },
   currentTime: number,
   trackDuration?: number
 ): AutoCycledColorResult {
-  if (!settings.autoCycleColor) {
-    return {
-      primaryColor: settings.primaryColor,
-      secondaryColor: settings.secondaryColor,
-      hueShiftDeg: 0,
-      progress: 0,
-    };
+  const globalHueRotationDeg =
+    ((Number.isFinite(settings.globalHueRotation) ? settings.globalHueRotation ?? 0 : 0) % 360 +
+      360) %
+    360;
+
+  let cycleHueShiftDeg = 0;
+  let progress = 0;
+
+  if (settings.autoCycleColor) {
+    const speed = Math.max(0.25, Math.min(8, settings.colorCycleSpeed ?? 1));
+    const hasDuration =
+      typeof trackDuration === 'number' && Number.isFinite(trackDuration) && trackDuration > 0.1;
+    const cycleSpan = hasDuration ? trackDuration : 30;
+    progress = hasDuration
+      ? Math.max(0, Math.min(1, currentTime / cycleSpan))
+      : (Math.max(0, currentTime) % cycleSpan) / cycleSpan;
+    cycleHueShiftDeg = (progress * speed * 360) % 360;
   }
 
-  const speed = Math.max(0.25, Math.min(8, settings.colorCycleSpeed ?? 1));
-  const hasDuration =
-    typeof trackDuration === 'number' && Number.isFinite(trackDuration) && trackDuration > 0.1;
-  const cycleSpan = hasDuration ? trackDuration : 30;
-  const progress = hasDuration
-    ? Math.max(0, Math.min(1, currentTime / cycleSpan))
-    : (Math.max(0, currentTime) % cycleSpan) / cycleSpan;
+  const hueShiftDeg = (globalHueRotationDeg + cycleHueShiftDeg) % 360;
+  const baseBg = settings.bgColor ?? '#090b10';
+  const rawRim = typeof settings.danceRimColor === 'string' ? settings.danceRimColor.trim() : '';
+  const rawScan = typeof settings.scanlineColor === 'string' ? settings.scanlineColor.trim() : '';
 
-  const hueShiftDeg = (progress * speed * 360) % 360;
   return {
     primaryColor: rotateHexHue(settings.primaryColor, hueShiftDeg),
     secondaryColor: rotateHexHue(settings.secondaryColor, hueShiftDeg),
+    bgColor: rotateHexHue(baseBg, globalHueRotationDeg),
+    danceRimColor: HEX_COLOR_RE.test(rawRim)
+      ? rotateHexHue(rawRim, hueShiftDeg)
+      : settings.danceRimColor,
+    scanlineColor: HEX_COLOR_RE.test(rawScan)
+      ? rotateHexHue(rawScan, hueShiftDeg)
+      : settings.scanlineColor,
     hueShiftDeg,
+    globalHueRotationDeg,
+    cycleHueShiftDeg,
     progress,
   };
 }
 
+export const resolveThemeColors = resolveAutoCycledColors;
+
+export function interpolateHexColors(hexA: string, hexB: string, t: number): string {
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0));
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  const r = Math.round(a.r + (b.r - a.r) * clamped);
+  const g = Math.round(a.g + (b.g - a.g) * clamped);
+  const bl = Math.round(a.b + (b.b - a.b) * clamped);
+  const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(bl)}`;
+}
+
+export function resolveBeatMappedColors(params: {
+  lowColor: string;
+  midColor: string;
+  highColor: string;
+  bass: number;
+  mid: number;
+  treble: number;
+  beatEnergy: number;
+  hueShiftDeg?: number;
+}): { primaryColor: string; secondaryColor: string } {
+  const shift = params.hueShiftDeg ?? 0;
+  const low = shift !== 0 ? rotateHexHue(params.lowColor, shift) : normalizeHex(params.lowColor);
+  const midC = shift !== 0 ? rotateHexHue(params.midColor, shift) : normalizeHex(params.midColor);
+  const high = shift !== 0 ? rotateHexHue(params.highColor, shift) : normalizeHex(params.highColor);
+
+  const bass = Math.max(0, params.bass);
+  const mid = Math.max(0, params.mid);
+  const treble = Math.max(0, params.treble);
+  const energy = Math.max(0, Math.min(1, params.beatEnergy));
+
+  // Weighted 3-band spectral blend (bass -> low, mid -> mid, treble -> high)
+  const wLow = bass * 1.15 + 0.05;
+  const wMid = mid * 1.05 + 0.05;
+  const wHigh = treble * 1.2 + 0.05;
+  const total = wLow + wMid + wHigh;
+
+  const aLow = hexToRgb(low);
+  const aMid = hexToRgb(midC);
+  const aHigh = hexToRgb(high);
+
+  const toHex = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  const freqBlend = `#${toHex((aLow.r * wLow + aMid.r * wMid + aHigh.r * wHigh) / total)}${toHex(
+    (aLow.g * wLow + aMid.g * wMid + aHigh.g * wHigh) / total
+  )}${toHex((aLow.b * wLow + aMid.b * wMid + aHigh.b * wHigh) / total)}`;
+
+  // Beat-energy 3-stop sweep: low -> mid -> high as beat energy surges
+  const beatSweep =
+    energy < 0.5
+      ? interpolateHexColors(low, midC, energy * 2)
+      : interpolateHexColors(midC, high, (energy - 0.5) * 2);
+
+  const primaryColor = interpolateHexColors(freqBlend, beatSweep, 0.35 + 0.55 * energy);
+  const secondaryTarget = energy < 0.5 ? high : low;
+  const secondaryColor = interpolateHexColors(
+    midC,
+    secondaryTarget,
+    Math.max(0.18, Math.min(0.95, treble * 0.55 + energy * 0.65))
+  );
+
+  return { primaryColor, secondaryColor };
+}

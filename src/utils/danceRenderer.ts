@@ -24,11 +24,13 @@ let danceShadowCanvas: DanceScratchCanvas | null = null;
 function ensureScratchCanvas(
   existing: DanceScratchCanvas | null,
   width: number,
-  height: number
+  height: number,
+  skipClear = false
 ): { canvas: DanceScratchCanvas; ctx: DanceRenderCtx } | null {
   const w = Math.max(1, Math.round(width));
   const h = Math.max(1, Math.round(height));
   let target = existing;
+  let justReset = false;
   if (!target) {
     if (typeof document !== 'undefined') {
       const c = document.createElement('canvas');
@@ -40,15 +42,19 @@ function ensureScratchCanvas(
     } else {
       return null;
     }
+    justReset = true;
   } else if (target.width !== w || target.height !== h) {
     target.width = w;
     target.height = h;
+    justReset = true;
   }
 
   const sCtx = target.getContext('2d') as DanceRenderCtx | null;
   if (!sCtx) return null;
   sCtx.setTransform(1, 0, 0, 1, 0, 0);
-  sCtx.clearRect(0, 0, w, h);
+  if (!skipClear && !justReset) {
+    sCtx.clearRect(0, 0, w, h);
+  }
   return { canvas: target, ctx: sCtx };
 }
 
@@ -65,7 +71,7 @@ function ensureDanceShadowCanvas(
   width: number,
   height: number
 ): { canvas: DanceScratchCanvas; ctx: DanceRenderCtx } | null {
-  const res = ensureScratchCanvas(danceShadowCanvas, width, height);
+  const res = ensureScratchCanvas(danceShadowCanvas, width, height, true);
   if (res) danceShadowCanvas = res.canvas;
   return res;
 }
@@ -144,6 +150,40 @@ export const DANCE_AVATAR_OPTIONS: Array<{
   { id: 'minimal-rig', label: 'Studio Rig', desc: 'Clean matte rig', category: 'rig' },
 ];
 
+export interface DanceMedleyPreset {
+  id: string;
+  label: string;
+  desc: string;
+  styles: DanceStyleKey[];
+}
+
+export const DANCE_MEDLEY_PRESETS: DanceMedleyPreset[] = [
+  {
+    id: 'street-mix',
+    label: 'Street Mix',
+    desc: 'Hip-Hop, Breakdance, Moonwalk & Shuffle',
+    styles: ['hip-hop', 'mocap-breakdance', 'mocap-moonwalk', 'mocap-shuffle'],
+  },
+  {
+    id: 'club-edm',
+    label: 'Club & EDM',
+    desc: 'House Jack, Melbourne Shuffle, Disco & Robot',
+    styles: ['mocap-house', 'mocap-shuffle', 'mocap-disco', 'robot'],
+  },
+  {
+    id: 'pop-idol',
+    label: 'Pop Showcase',
+    desc: 'K-Pop, Afrobeat, Salsa & Smooth Groove',
+    styles: ['mocap-kpop', 'mocap-afrobeat', 'mocap-salsa', 'groove'],
+  },
+  {
+    id: 'ballroom-flow',
+    label: 'Ballroom & Flow',
+    desc: 'Contemporary, Ballet, Tango & Waltz',
+    styles: ['mocap-contemporary', 'mocap-ballet', 'mocap-tango', 'mocap-waltz'],
+  },
+];
+
 export interface RenderDanceParams {
   ctx: DanceRenderCtx;
   width: number;
@@ -151,11 +191,13 @@ export interface RenderDanceParams {
   minDim: number;
   isPortrait: boolean;
   currentTime: number;
+  dt?: number;
   bass: number;
   mid: number;
   treble: number;
   beatBurst: number;
   beatTriggered: boolean;
+  isExport?: boolean;
   settings: StudioSettings;
   lyrics: LyricLine[];
   mocapClip?: MocapClipData | null;
@@ -674,6 +716,290 @@ function sampleMocapSkeleton(
   return out;
 }
 
+interface EvaluatedPose {
+  joints3D: Vec3[];
+  bones: Array<[number, number]>;
+  headIdx: number;
+  useMocap: boolean;
+  jointNames: string[] | null;
+}
+
+function evaluateStylePose(
+  style: DanceStyleKey,
+  currentTime: number,
+  bass: number,
+  mid: number,
+  treble: number,
+  beatDrive: number,
+  danceEnergy: number,
+  lyricAccent: number,
+  activeLyricIdx: number,
+  mocapClip: MocapClipData | null | undefined
+): EvaluatedPose {
+  const activeMocapClip: MocapClipData | null = isBuiltInMocapStyle(style)
+    ? getBuiltInMocapClip(style)
+    : style === 'mocap-custom' && mocapClip && mocapClip.frameCount > 0
+    ? mocapClip
+    : null;
+  const useMocap = Boolean(activeMocapClip && activeMocapClip.frameCount > 0);
+  const proceduralFallbackStyle: Exclude<DanceStyleKey, 'mocap-custom' | BuiltInMocapStyleKey> =
+    style === 'mocap-custom' || isBuiltInMocapStyle(style) ? 'hip-hop' : style;
+
+  const joints3D =
+    useMocap && activeMocapClip
+      ? sampleMocapSkeleton(activeMocapClip, currentTime, beatDrive, danceEnergy, lyricAccent)
+      : solveProceduralSkeleton(
+          proceduralFallbackStyle,
+          currentTime,
+          bass,
+          mid,
+          treble,
+          beatDrive,
+          danceEnergy,
+          lyricAccent,
+          activeLyricIdx
+        );
+
+  return {
+    joints3D,
+    bones: useMocap && activeMocapClip ? activeMocapClip.bones : HUMANOID_BONES,
+    headIdx: useMocap && activeMocapClip ? activeMocapClip.headJointIndex : J_HEAD,
+    useMocap,
+    jointNames: useMocap && activeMocapClip ? activeMocapClip.jointNames : null,
+  };
+}
+
+function toCanonical17Joints(pose: EvaluatedPose): Vec3[] | null {
+  if (!pose.useMocap && pose.joints3D.length === 17) {
+    return pose.joints3D;
+  }
+  const idx = resolveHumanoidIndices(pose.jointNames, pose.joints3D.length);
+  if (!idx) return null;
+  const get = (i: number, fallback: Vec3): Vec3 => pose.joints3D[i] ?? fallback;
+  const pelvis = get(idx.pelvis, [0, 0.9, 0]);
+  const chest = get(idx.chest, [0, 1.3, 0]);
+  const spine = get(idx.spine, [
+    (pelvis[0] + chest[0]) * 0.5,
+    (pelvis[1] + chest[1]) * 0.5,
+    (pelvis[2] + chest[2]) * 0.5,
+  ]);
+  const neck = get(idx.neck, [chest[0], chest[1] + 0.11, chest[2]]);
+  const head = get(idx.head, [neck[0], neck[1] + 0.14, neck[2]]);
+  const out: Vec3[] = new Array(17);
+  out[J_PELVIS] = pelvis;
+  out[J_SPINE] = spine;
+  out[J_CHEST] = chest;
+  out[J_NECK] = neck;
+  out[J_HEAD] = head;
+  out[J_L_SHOULDER] = get(idx.lShoulder, [chest[0] - 0.2, chest[1] + 0.04, chest[2]]);
+  out[J_L_ELBOW] = get(idx.lElbow, [chest[0] - 0.36, chest[1] - 0.12, chest[2]]);
+  out[J_L_WRIST] = get(idx.lWrist, [chest[0] - 0.38, chest[1] - 0.34, chest[2]]);
+  out[J_R_SHOULDER] = get(idx.rShoulder, [chest[0] + 0.2, chest[1] + 0.04, chest[2]]);
+  out[J_R_ELBOW] = get(idx.rElbow, [chest[0] + 0.36, chest[1] - 0.12, chest[2]]);
+  out[J_R_WRIST] = get(idx.rWrist, [chest[0] + 0.38, chest[1] - 0.34, chest[2]]);
+  out[J_L_HIP] = get(idx.lHip, [pelvis[0] - 0.115, pelvis[1] - 0.04, pelvis[2]]);
+  out[J_L_KNEE] = get(idx.lKnee, [pelvis[0] - 0.15, pelvis[1] * 0.52, pelvis[2]]);
+  out[J_L_ANKLE] = get(idx.lAnkle, [pelvis[0] - 0.18, 0.05, pelvis[2]]);
+  out[J_R_HIP] = get(idx.rHip, [pelvis[0] + 0.115, pelvis[1] - 0.04, pelvis[2]]);
+  out[J_R_KNEE] = get(idx.rKnee, [pelvis[0] + 0.15, pelvis[1] * 0.52, pelvis[2]]);
+  out[J_R_ANKLE] = get(idx.rAnkle, [pelvis[0] + 0.18, 0.05, pelvis[2]]);
+  return out;
+}
+
+function blendEvaluatedPoses(poseA: EvaluatedPose, poseB: EvaluatedPose, rawT: number): EvaluatedPose {
+  const t = Math.max(0, Math.min(1, rawT));
+  const eased = t * t * (3 - 2 * t); // cubic smoothstep for natural easing
+  if (eased <= 0.001) return poseA;
+  if (eased >= 0.999) return poseB;
+
+  if (
+    poseA.joints3D.length === poseB.joints3D.length &&
+    poseA.bones.length === poseB.bones.length &&
+    poseA.headIdx === poseB.headIdx
+  ) {
+    const joints3D: Vec3[] = poseA.joints3D.map((ja, idx) => {
+      const jb = poseB.joints3D[idx] ?? ja;
+      return [
+        lerp(ja[0], jb[0], eased),
+        lerp(ja[1], jb[1], eased),
+        lerp(ja[2], jb[2], eased),
+      ];
+    });
+    return {
+      joints3D,
+      bones: eased < 0.5 ? poseA.bones : poseB.bones,
+      headIdx: poseB.headIdx,
+      useMocap: eased < 0.5 ? poseA.useMocap : poseB.useMocap,
+      jointNames: eased < 0.5 ? poseA.jointNames : poseB.jointNames,
+    };
+  }
+
+  const canonA = toCanonical17Joints(poseA);
+  const canonB = toCanonical17Joints(poseB);
+  if (canonA && canonB) {
+    const joints3D: Vec3[] = canonA.map((ja, idx) => {
+      const jb = canonB[idx] ?? ja;
+      return [
+        lerp(ja[0], jb[0], eased),
+        lerp(ja[1], jb[1], eased),
+        lerp(ja[2], jb[2], eased),
+      ];
+    });
+    return {
+      joints3D,
+      bones: HUMANOID_BONES,
+      headIdx: J_HEAD,
+      useMocap: eased < 0.5 ? poseA.useMocap : poseB.useMocap,
+      jointNames: null,
+    };
+  }
+
+  return eased < 0.5 ? poseA : poseB;
+}
+
+interface MedleyBeatTrackerState {
+  lastTime: number;
+  lastIsExport: boolean;
+  movesKey: string;
+  intervalBeats: number;
+  beatCount: number;
+  activeIdx: number;
+  fromStyle: DanceStyleKey | null;
+  blendElapsed: number;
+}
+
+const medleyBeatTracker: MedleyBeatTrackerState = {
+  lastTime: -1,
+  lastIsExport: false,
+  movesKey: '',
+  intervalBeats: 8,
+  beatCount: 0,
+  activeIdx: 0,
+  fromStyle: null,
+  blendElapsed: 0,
+};
+
+function resolveMedleyTransition(
+  settings: StudioSettings,
+  currentTime: number,
+  dt: number,
+  beatTriggered: boolean,
+  isExport: boolean,
+  activeLyricIdx: number,
+  lyrics: LyricLine[],
+  mocapClip: MocapClipData | null | undefined
+): {
+  primaryStyle: DanceStyleKey;
+  fromStyle: DanceStyleKey | null;
+  blendAlpha: number;
+} {
+  const fallbackStyle: DanceStyleKey = settings.danceStyle ?? 'hip-hop';
+  if (!settings.danceMedleyEnabled) {
+    return { primaryStyle: fallbackStyle, fromStyle: null, blendAlpha: 1 };
+  }
+
+  const hasCustomMocap = Boolean(mocapClip && mocapClip.frameCount > 0);
+  const rawMoves = (settings.danceMedleyStyles ?? []).filter(
+    (s) => s !== 'mocap-custom' || hasCustomMocap
+  );
+  if (rawMoves.length === 0) {
+    return { primaryStyle: fallbackStyle, fromStyle: null, blendAlpha: 1 };
+  }
+  if (rawMoves.length === 1) {
+    return { primaryStyle: rawMoves[0], fromStyle: null, blendAlpha: 1 };
+  }
+
+  const trigger = settings.danceMedleyTrigger ?? 'beats';
+  const blendDuration = Math.max(0.15, Math.min(1.5, settings.danceMedleyBlendDuration ?? 0.45));
+
+  if (trigger === 'seconds') {
+    const intervalSec = Math.max(2, Math.min(30, settings.danceMedleyIntervalSeconds ?? 8));
+    const safeTime = Math.max(0, currentTime);
+    const slot = Math.floor(safeTime / intervalSec);
+    const localT = safeTime - slot * intervalSec;
+    const toIdx = slot % rawMoves.length;
+    if (slot > 0 && localT < blendDuration) {
+      const fromIdx = (slot - 1) % rawMoves.length;
+      return {
+        primaryStyle: rawMoves[toIdx],
+        fromStyle: rawMoves[fromIdx],
+        blendAlpha: localT / blendDuration,
+      };
+    }
+    return { primaryStyle: rawMoves[toIdx], fromStyle: null, blendAlpha: 1 };
+  }
+
+  if (trigger === 'lyrics') {
+    if (activeLyricIdx < 0 || lyrics.length === 0) {
+      return { primaryStyle: rawMoves[0], fromStyle: null, blendAlpha: 1 };
+    }
+    const toIdx = activeLyricIdx % rawMoves.length;
+    const cueElapsed = Math.max(0, currentTime - lyrics[activeLyricIdx].time);
+    if (activeLyricIdx > 0 && cueElapsed < blendDuration) {
+      const fromIdx = (activeLyricIdx - 1) % rawMoves.length;
+      return {
+        primaryStyle: rawMoves[toIdx],
+        fromStyle: rawMoves[fromIdx],
+        blendAlpha: cueElapsed / blendDuration,
+      };
+    }
+    return { primaryStyle: rawMoves[toIdx], fromStyle: null, blendAlpha: 1 };
+  }
+
+  // 'beats' trigger mode
+  const intervalBeats = Math.max(2, Math.min(32, Math.round(settings.danceMedleyIntervalBeats ?? 8)));
+  const movesKey = rawMoves.join('|');
+  const jumpedOrReset =
+    medleyBeatTracker.lastIsExport !== isExport ||
+    medleyBeatTracker.movesKey !== movesKey ||
+    medleyBeatTracker.intervalBeats !== intervalBeats ||
+    medleyBeatTracker.lastTime < 0 ||
+    currentTime < medleyBeatTracker.lastTime - 0.08 ||
+    Math.abs(currentTime - medleyBeatTracker.lastTime) > 1.25;
+
+  if (jumpedOrReset) {
+    medleyBeatTracker.lastIsExport = isExport;
+    medleyBeatTracker.movesKey = movesKey;
+    medleyBeatTracker.intervalBeats = intervalBeats;
+    medleyBeatTracker.beatCount = 0;
+    medleyBeatTracker.activeIdx = 0;
+    medleyBeatTracker.fromStyle = null;
+    medleyBeatTracker.blendElapsed = 0;
+  }
+
+  const safeDt = currentTime === medleyBeatTracker.lastTime ? 0 : Math.max(0, Math.min(0.25, dt));
+  medleyBeatTracker.lastTime = currentTime;
+
+  if (beatTriggered) {
+    medleyBeatTracker.beatCount += 1;
+    const nextIdx = Math.floor(medleyBeatTracker.beatCount / intervalBeats) % rawMoves.length;
+    if (nextIdx !== medleyBeatTracker.activeIdx) {
+      medleyBeatTracker.fromStyle = rawMoves[medleyBeatTracker.activeIdx] ?? rawMoves[0];
+      medleyBeatTracker.activeIdx = nextIdx;
+      medleyBeatTracker.blendElapsed = 0;
+    }
+  }
+
+  if (medleyBeatTracker.fromStyle !== null) {
+    medleyBeatTracker.blendElapsed += safeDt;
+    if (medleyBeatTracker.blendElapsed >= blendDuration) {
+      medleyBeatTracker.fromStyle = null;
+      medleyBeatTracker.blendElapsed = 0;
+    }
+  }
+
+  const activeStyle = rawMoves[medleyBeatTracker.activeIdx % rawMoves.length];
+  if (medleyBeatTracker.fromStyle && medleyBeatTracker.fromStyle !== activeStyle) {
+    return {
+      primaryStyle: activeStyle,
+      fromStyle: medleyBeatTracker.fromStyle,
+      blendAlpha: Math.max(0, Math.min(1, medleyBeatTracker.blendElapsed / blendDuration)),
+    };
+  }
+
+  return { primaryStyle: activeStyle, fromStyle: null, blendAlpha: 1 };
+}
+
 function drawTaperedCapsule(
   ctx: DanceRenderCtx,
   ax: number,
@@ -728,12 +1054,12 @@ function drawTaperedCapsule(
   ctx.fillStyle = grad;
   ctx.fill();
 
-  if (spotlightFactor !== undefined) {
+  if (spotlightFactor !== undefined && (spotlightFactor < 0.98 || spotlightFactor > 1.02)) {
     if (spotlightFactor < 0.98) {
       const dimAlpha = Math.min(0.62, (1 - spotlightFactor) * 0.62);
       ctx.fillStyle = `rgba(3, 5, 12, ${dimAlpha.toFixed(3)})`;
       ctx.fill();
-    } else if (spotlightFactor > 1.02) {
+    } else {
       const boostAlpha = Math.min(0.32, (spotlightFactor - 1) * 0.28);
       const spotGrad = ctx.createLinearGradient(
         midX - nx * maxR,
@@ -2098,11 +2424,13 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
     minDim,
     isPortrait,
     currentTime,
+    dt = 1 / 60,
     bass,
     mid,
     treble,
     beatBurst,
     beatTriggered,
+    isExport = false,
     settings,
     lyrics,
     mocapClip,
@@ -2111,7 +2439,6 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
 
   if (!settings.danceEnabled) return;
 
-  const style: DanceStyleKey = settings.danceStyle ?? 'hip-hop';
   const avatarStyle: DanceAvatarStyle =
     settings.avatarStyle ?? settings.danceAvatarStyle ?? 'human-dancer';
   const placement: DancePlacement = settings.dancePlacement ?? 'center';
@@ -2136,31 +2463,57 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
   const rawBeat = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
   const beatDrive = Math.max(rawBeat, bass * 0.45);
 
-  const activeMocapClip: MocapClipData | null = isBuiltInMocapStyle(style)
-    ? getBuiltInMocapClip(style)
-    : style === 'mocap-custom' && mocapClip && mocapClip.frameCount > 0
-    ? mocapClip
-    : null;
-  const useMocap = Boolean(activeMocapClip && activeMocapClip.frameCount > 0);
-  const proceduralFallbackStyle: Exclude<DanceStyleKey, 'mocap-custom' | BuiltInMocapStyleKey> =
-    style === 'mocap-custom' || isBuiltInMocapStyle(style) ? 'hip-hop' : style;
+  const medley = resolveMedleyTransition(
+    settings,
+    currentTime,
+    dt,
+    beatTriggered,
+    isExport,
+    activeLyricIdx,
+    lyrics,
+    mocapClip
+  );
 
-  const joints3D = useMocap && activeMocapClip
-    ? sampleMocapSkeleton(activeMocapClip, currentTime, beatDrive, danceEnergy, lyricAccent)
-    : solveProceduralSkeleton(
-        proceduralFallbackStyle,
-        currentTime,
-        bass,
-        mid,
-        treble,
-        beatDrive,
-        danceEnergy,
-        lyricAccent,
-        activeLyricIdx
-      );
+  const targetPose = evaluateStylePose(
+    medley.primaryStyle,
+    currentTime,
+    bass,
+    mid,
+    treble,
+    beatDrive,
+    danceEnergy,
+    lyricAccent,
+    activeLyricIdx,
+    mocapClip
+  );
 
-  const bones = useMocap && activeMocapClip ? activeMocapClip.bones : HUMANOID_BONES;
-  const headIdx = useMocap && activeMocapClip ? activeMocapClip.headJointIndex : J_HEAD;
+  let finalPose = targetPose;
+  let yawAmp = targetPose.useMocap ? 0.11 : 0.22;
+
+  if (medley.fromStyle && medley.blendAlpha < 1) {
+    const sourcePose = evaluateStylePose(
+      medley.fromStyle,
+      currentTime,
+      bass,
+      mid,
+      treble,
+      beatDrive,
+      danceEnergy,
+      lyricAccent,
+      activeLyricIdx,
+      mocapClip
+    );
+    finalPose = blendEvaluatedPoses(sourcePose, targetPose, medley.blendAlpha);
+    const eased =
+      medley.blendAlpha * medley.blendAlpha * (3 - 2 * medley.blendAlpha);
+    yawAmp = lerp(
+      sourcePose.useMocap ? 0.11 : 0.22,
+      targetPose.useMocap ? 0.11 : 0.22,
+      eased
+    );
+  }
+
+  const { joints3D, bones, headIdx, useMocap } = finalPose;
 
   // Compute base screen placement & responsive character height
   const baseCenterX =
@@ -2272,7 +2625,6 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
   }
 
   // Subtle 3D camera yaw so choreography reads cleanly in 3D space
-  const yawAmp = useMocap ? 0.11 : 0.22;
   const yaw =
     Math.sin(currentTime * 1.1) * yawAmp * danceEnergy +
     lyricAccent * (activeLyricIdx % 2 === 0 ? 0.16 : -0.16);
@@ -2436,10 +2788,7 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
         0.22 + Math.min(1.5, spotlightIntensity) * 0.2 + beatDrive * 0.04
       );
       const humanRigIndices = isHumanAvatarStyle(avatarStyle)
-        ? resolveHumanoidIndices(
-            useMocap && activeMocapClip ? activeMocapClip.jointNames : null,
-            shadowPoints.length
-          )
+        ? resolveHumanoidIndices(finalPose.jointNames, shadowPoints.length)
         : null;
 
       // Soft ambient ground penumbra under projected body center
@@ -2472,7 +2821,7 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
       ctx.restore();
 
       const shadowBuf = ensureDanceShadowCanvas(width, height);
-      if (shadowBuf) {
+      if (shadowBuf && shadowPoints.length > 0) {
         const { canvas: shCanvas, ctx: shCtx } = shadowBuf;
         const isWireRig = avatarStyle === 'holo-wire' || avatarStyle === 'minimal-rig';
         const baseShadowLimbW = Math.max(
@@ -2480,57 +2829,85 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
           charHeight * (isWireRig ? 0.018 : 0.028)
         );
 
-        shCtx.save();
-        shCtx.fillStyle = '#02040a';
-        shCtx.strokeStyle = '#02040a';
-        shCtx.lineCap = 'round';
-        shCtx.lineJoin = 'round';
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let i = 0; i < shadowPoints.length; i++) {
+          const sp = shadowPoints[i];
+          if (sp.x < minX) minX = sp.x;
+          if (sp.x > maxX) maxX = sp.x;
+          if (sp.y < minY) minY = sp.y;
+          if (sp.y > maxY) maxY = sp.y;
+        }
+        const sHead = shadowPoints[headIdx];
+        const headPad = sHead ? Math.max(4, charHeight * 0.058 * sHead.scale) : 0;
+        const pad = Math.ceil(Math.max(baseShadowLimbW * 2.5, headPad) + 8);
+        const bx = Math.max(0, Math.floor(minX - pad));
+        const by = Math.max(0, Math.floor(minY - pad));
+        const bx2 = Math.min(width, Math.ceil(maxX + pad));
+        const by2 = Math.min(height, Math.ceil(maxY + pad));
+        const bw = bx2 - bx;
+        const bh = by2 - by;
 
-        // Solid torso polygon on floor shadow when humanoid joints resolve
-        if (humanRigIndices) {
-          const sPelvis = shadowPoints[humanRigIndices.pelvis];
-          const sLSh = shadowPoints[humanRigIndices.lShoulder];
-          const sRSh = shadowPoints[humanRigIndices.rShoulder];
-          if (sPelvis && sLSh && sRSh) {
+        if (bw > 0 && bh > 0) {
+          shCtx.save();
+          shCtx.beginPath();
+          shCtx.rect(bx, by, bw, bh);
+          shCtx.clip();
+          shCtx.fillStyle = '#02040a';
+          shCtx.strokeStyle = '#02040a';
+          shCtx.lineCap = 'round';
+          shCtx.lineJoin = 'round';
+
+          // Solid torso polygon on floor shadow when humanoid joints resolve
+          if (humanRigIndices) {
+            const sPelvis = shadowPoints[humanRigIndices.pelvis];
+            const sLSh = shadowPoints[humanRigIndices.lShoulder];
+            const sRSh = shadowPoints[humanRigIndices.rShoulder];
+            if (sPelvis && sLSh && sRSh) {
+              shCtx.beginPath();
+              shCtx.moveTo(sLSh.x, sLSh.y);
+              shCtx.lineTo(sRSh.x, sRSh.y);
+              shCtx.lineTo(sPelvis.x, sPelvis.y);
+              shCtx.closePath();
+              shCtx.fill();
+            }
+          }
+
+          // Articulated limb & spine drop shadow segments
+          for (const [a, b] of bones) {
+            const sa = shadowPoints[a];
+            const sb = shadowPoints[b];
+            if (!sa || !sb) continue;
+            const isTorsoBone = !useMocap && a <= J_CHEST && b <= J_NECK;
+            shCtx.lineWidth =
+              baseShadowLimbW *
+              (isTorsoBone ? 1.55 : 0.95) *
+              ((sa.scale + sb.scale) * 0.5);
             shCtx.beginPath();
-            shCtx.moveTo(sLSh.x, sLSh.y);
-            shCtx.lineTo(sRSh.x, sRSh.y);
-            shCtx.lineTo(sPelvis.x, sPelvis.y);
-            shCtx.closePath();
+            shCtx.moveTo(sa.x, sa.y);
+            shCtx.lineTo(sb.x, sb.y);
+            shCtx.stroke();
+          }
+
+          // Head floor-foreshortened silhouette
+          if (sHead) {
+            const hrx = Math.max(4, charHeight * 0.058 * sHead.scale);
+            shCtx.beginPath();
+            shCtx.ellipse(sHead.x, sHead.y, hrx, hrx * 0.36, 0, 0, Math.PI * 2);
             shCtx.fill();
           }
-        }
+          shCtx.restore();
 
-        // Articulated limb & spine drop shadow segments
-        for (const [a, b] of bones) {
-          const sa = shadowPoints[a];
-          const sb = shadowPoints[b];
-          if (!sa || !sb) continue;
-          const isTorsoBone = !useMocap && a <= J_CHEST && b <= J_NECK;
-          shCtx.lineWidth =
-            baseShadowLimbW *
-            (isTorsoBone ? 1.55 : 0.95) *
-            ((sa.scale + sb.scale) * 0.5);
-          shCtx.beginPath();
-          shCtx.moveTo(sa.x, sa.y);
-          shCtx.lineTo(sb.x, sb.y);
-          shCtx.stroke();
-        }
+          ctx.save();
+          ctx.globalAlpha = shadowAlpha;
+          ctx.drawImage(shCanvas, bx, by, bw, bh, bx, by, bw, bh);
+          ctx.restore();
 
-        // Head floor-foreshortened silhouette
-        const sHead = shadowPoints[headIdx];
-        if (sHead) {
-          const hrx = Math.max(4, charHeight * 0.058 * sHead.scale);
-          shCtx.beginPath();
-          shCtx.ellipse(sHead.x, sHead.y, hrx, hrx * 0.36, 0, 0, Math.PI * 2);
-          shCtx.fill();
+          // Clear only the tight bounding rect so full-frame buffer stays spotless for next slot/frame
+          shCtx.clearRect(bx, by, bw, bh);
         }
-        shCtx.restore();
-
-        ctx.save();
-        ctx.globalAlpha = shadowAlpha;
-        ctx.drawImage(shCanvas, 0, 0, width, height);
-        ctx.restore();
       }
     }
 
@@ -2543,10 +2920,7 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
 
     // Volumetric Human Renderer for all human character styles + Silhouette
     if (isHumanAvatarStyle(avatarStyle)) {
-      const indices = resolveHumanoidIndices(
-        useMocap && activeMocapClip ? activeMocapClip.jointNames : null,
-        projected.length
-      );
+      const indices = resolveHumanoidIndices(finalPose.jointNames, projected.length);
       if (indices) {
         renderHumanVolumetricDancer({
           ctx: avatarCtx,
@@ -2627,19 +3001,32 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
         avatarCtx.stroke();
       }
 
-      for (let j = 0; j < projected.length; j++) {
-        const p = projected[j];
-        const r =
-          j === headIdx
-            ? headRadius * 0.78 * p.scale
-            : Math.max(2.5, limbBaseWidth * 0.44 * p.scale);
-        avatarCtx.fillStyle = j === headIdx ? hexToRgba(slotRimColor, 0.28) : '#f8fafc';
-        avatarCtx.strokeStyle = j === headIdx ? slotRimColor : slotSecondary;
-        avatarCtx.lineWidth = Math.max(1.2, r * 0.28);
+      if (projected.length > 0) {
+        avatarCtx.fillStyle = '#f8fafc';
+        avatarCtx.strokeStyle = slotSecondary;
+        avatarCtx.lineWidth = Math.max(1.2, limbBaseWidth * 0.44 * 0.28);
         avatarCtx.beginPath();
-        avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        for (let j = 0; j < projected.length; j++) {
+          if (j === headIdx) continue;
+          const p = projected[j];
+          const r = Math.max(2.5, limbBaseWidth * 0.44 * p.scale);
+          avatarCtx.moveTo(p.x + r, p.y);
+          avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        }
         avatarCtx.fill();
         avatarCtx.stroke();
+
+        const ph = projected[headIdx];
+        if (ph) {
+          const r = headRadius * 0.78 * ph.scale;
+          avatarCtx.fillStyle = hexToRgba(slotRimColor, 0.28);
+          avatarCtx.strokeStyle = slotRimColor;
+          avatarCtx.lineWidth = Math.max(1.2, r * 0.28);
+          avatarCtx.beginPath();
+          avatarCtx.arc(ph.x, ph.y, r, 0, Math.PI * 2);
+          avatarCtx.fill();
+          avatarCtx.stroke();
+        }
       }
       avatarCtx.restore();
       continue;
@@ -2665,15 +3052,21 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
         avatarCtx.lineTo(pb.x, pb.y);
         avatarCtx.stroke();
       }
+      avatarCtx.fillStyle = slotRimColor;
+      avatarCtx.beginPath();
       for (let j = 0; j < projected.length; j++) {
+        if (j === headIdx) continue;
         const p = projected[j];
-        const isHead = j === headIdx;
-        const r = isHead
-          ? headRadius * 0.9 * p.scale
-          : Math.max(2.5, limbBaseWidth * 0.42 * p.scale);
-        avatarCtx.fillStyle = isHead ? '#f8fafc' : slotRimColor;
-        avatarCtx.beginPath();
+        const r = Math.max(2.5, limbBaseWidth * 0.42 * p.scale);
+        avatarCtx.moveTo(p.x + r, p.y);
         avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      }
+      avatarCtx.fill();
+      const phMin = projected[headIdx];
+      if (phMin) {
+        avatarCtx.fillStyle = '#f8fafc';
+        avatarCtx.beginPath();
+        avatarCtx.arc(phMin.x, phMin.y, headRadius * 0.9 * phMin.scale, 0, Math.PI * 2);
         avatarCtx.fill();
       }
       avatarCtx.restore();
@@ -2718,17 +3111,18 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
       avatarCtx.stroke();
     }
 
+    avatarCtx.fillStyle = '#ffffff';
+    avatarCtx.shadowColor = slotRimColor;
+    avatarCtx.shadowBlur = Math.max(6, 9 * rigGlowFactor);
+    avatarCtx.beginPath();
     for (let j = 0; j < projected.length; j++) {
       if (j === headIdx) continue;
       const p = projected[j];
       const r = Math.max(2.5, limbBaseWidth * 0.42 * p.scale);
-      avatarCtx.fillStyle = '#ffffff';
-      avatarCtx.shadowColor = slotRimColor;
-      avatarCtx.shadowBlur = Math.max(6, 9 * rigGlowFactor);
-      avatarCtx.beginPath();
+      avatarCtx.moveTo(p.x + r, p.y);
       avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      avatarCtx.fill();
     }
+    avatarCtx.fill();
 
     const ph = projected[headIdx];
     if (ph) {

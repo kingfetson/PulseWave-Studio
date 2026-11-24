@@ -75,8 +75,44 @@ const workerScope = self as unknown as WorkerScopeLike;
 
 let isCancelled = false;
 
+const yieldChannel = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null;
+
 function yieldWorkerTick(): Promise<void> {
+  if (yieldChannel) {
+    return new Promise((resolve) => {
+      yieldChannel.port1.onmessage = () => resolve();
+      yieldChannel.port2.postMessage(undefined);
+    });
+  }
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function waitForEncoderDequeue(
+  encoder: VideoEncoder,
+  targetMaxQueue: number,
+  isAborted: () => boolean,
+  hasError: () => boolean
+): Promise<void> {
+  if (encoder.encodeQueueSize <= targetMaxQueue || isAborted() || hasError()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      encoder.removeEventListener?.('dequeue', onDequeue);
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+    const onDequeue = () => {
+      if (encoder.encodeQueueSize <= targetMaxQueue || isAborted() || hasError()) {
+        finish();
+      }
+    };
+    encoder.addEventListener?.('dequeue', onDequeue);
+    const safetyTimer = setTimeout(finish, 12);
+  });
 }
 
 async function ensureWorkerFonts(fonts: WorkerFontDescriptor[]): Promise<void> {
@@ -134,12 +170,6 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
   let audioEncoder: AudioEncoder | null = null;
 
   try {
-    await ensureWorkerFonts(fonts);
-    if (isCancelled) {
-      workerScope.postMessage({ type: 'cancelled' });
-      return;
-    }
-
     const { width, height } = resolveExportDimensions(
       settings.aspectRatio,
       settings.exportResolution
@@ -150,11 +180,14 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     const videoBitrateBps = Math.round((settings.videoBitrateMbps || 8) * 1_000_000);
     const audioBitrateBps = (settings.audioBitrateKbps || 192) * 1000;
 
-    const audioSelection = await resolveSupportedAudioConfig(
-      numberOfChannels,
-      sampleRate,
-      audioBitrateBps
-    );
+    const [, audioSelection] = await Promise.all([
+      ensureWorkerFonts(fonts),
+      resolveSupportedAudioConfig(numberOfChannels, sampleRate, audioBitrateBps),
+    ]);
+    if (isCancelled) {
+      workerScope.postMessage({ type: 'cancelled' });
+      return;
+    }
     if (!audioSelection) {
       throw new Error(
         'WEBCODECS_UNSUPPORTED: Neither AAC nor Opus audio encoding is supported by WebCodecs in this browser.'
@@ -291,7 +324,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     videoEncoder.configure(videoSelection.encoderConfig);
     audioEncoder.configure(audioSelection.encoderConfig);
 
-    // 1. Encode audio (AAC or Opus fallback) in 4096-sample planar f32 chunks
+    // 1. Encode audio (AAC or Opus fallback) in 4096-sample planar f32 chunks using a reused scratch buffer
     const chunkSamples = 4096;
     const encChannels = preparedAudio.channels;
     const encLength = preparedAudio.length;
@@ -299,6 +332,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     const encNumChannels = preparedAudio.numberOfChannels;
     const ch0 = encChannels[0];
     const ch1 = encNumChannels > 1 ? encChannels[1] ?? null : null;
+    const planarScratch = new Float32Array(chunkSamples * encNumChannels);
 
     for (let offset = 0; offset < encLength; offset += chunkSamples) {
       if (isCancelled) {
@@ -308,7 +342,10 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
       if (encoderError) throw encoderError;
 
       const framesInChunk = Math.min(chunkSamples, encLength - offset);
-      const planar = new Float32Array(framesInChunk * encNumChannels);
+      const planar =
+        framesInChunk === chunkSamples
+          ? planarScratch
+          : planarScratch.subarray(0, framesInChunk * encNumChannels);
       planar.set(ch0.subarray(offset, offset + framesInChunk), 0);
       if (encNumChannels > 1 && ch1) {
         planar.set(ch1.subarray(offset, offset + framesInChunk), framesInChunk);
@@ -349,6 +386,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
       Boolean(settings.danceEnabled) ||
       (settings.glitchIntensity ?? 0) > 0 ||
       (settings.bassShake ?? 0) > 0 ||
+      (settings.beatShake ?? 0) > 0 ||
       (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(pcmInput, 140, 1.2)
@@ -435,9 +473,9 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
       videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
       videoFrame.close();
 
-      // Backpressure & throttled main-thread progress updates
+      // Event-driven backpressure + throttled progress updates (zero clamped timer stalls)
       const nowMs = performance.now();
-      const needsBackpressure = videoEncoder.encodeQueueSize >= 24;
+      const needsBackpressure = videoEncoder.encodeQueueSize >= 32;
       if (needsBackpressure || nowMs - lastProgressMs >= 75 || frameIdx === totalFrames - 1) {
         const pct = Math.min(97, Math.round(((frameIdx + 1) / totalFrames) * 96));
         workerScope.postMessage({
@@ -451,13 +489,18 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
           },
         });
 
-        while (videoEncoder.encodeQueueSize >= 24 && !isCancelled && !encoderError) {
-          await new Promise((r) => setTimeout(r, 4));
+        if (needsBackpressure) {
+          while (videoEncoder.encodeQueueSize >= 20 && !isCancelled && !encoderError) {
+            await waitForEncoderDequeue(
+              videoEncoder,
+              18,
+              () => isCancelled,
+              () => Boolean(encoderError)
+            );
+          }
         }
-        // Allow cancel messages to be processed inside worker event queue
-        if (frameIdx % 16 === 0 || needsBackpressure) {
-          await yieldWorkerTick();
-        }
+        // Fast MessageChannel macrotask yield to process any cancel messages cleanly
+        await yieldWorkerTick();
         lastProgressMs = performance.now();
       }
     }

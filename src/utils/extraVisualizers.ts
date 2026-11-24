@@ -1,4 +1,5 @@
 import { StudioSettings, VisualizerMode } from '../types/studio';
+import { renderNewVisualizerMode } from './newVisualizers';
 
 export type ExtraRenderContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
@@ -85,25 +86,29 @@ export function renderExtraVisualizerMode(
 
     vCtx.lineCap = 'round';
     vCtx.lineWidth = Math.max(2, ((2 * Math.PI * outerR) / count) * 0.52);
+    const inwardGrad = vCtx.createRadialGradient(
+      cx,
+      cy,
+      outerR,
+      cx,
+      cy,
+      Math.max(1, outerR - maxLen * 0.85)
+    );
+    inwardGrad.addColorStop(0, secondary);
+    inwardGrad.addColorStop(1, primary);
+    vCtx.strokeStyle = inwardGrad;
+    applyShadow(primary, minDim * 0.012);
+    vCtx.beginPath();
     for (let i = 0; i < count; i++) {
       const val = getPerceptualBarValue(frequencyData, i % Math.ceil(count / 2), Math.ceil(count / 2), sens);
       const len = Math.max(minDim * 0.012, Math.pow(val, 1.15) * maxLen);
       const a = (i / count) * Math.PI * 2 - Math.PI * 0.5 + currentTime * 0.25;
-      const x1 = cx + Math.cos(a) * outerR;
-      const y1 = cy + Math.sin(a) * outerR;
-      const x2 = cx + Math.cos(a) * (outerR - len);
-      const y2 = cy + Math.sin(a) * (outerR - len);
-
-      const g = vCtx.createLinearGradient(x1, y1, x2, y2);
-      g.addColorStop(0, secondary);
-      g.addColorStop(1, primary);
-      vCtx.strokeStyle = g;
-      applyShadow(primary, minDim * 0.012);
-      vCtx.beginPath();
-      vCtx.moveTo(x1, y1);
-      vCtx.lineTo(x2, y2);
-      vCtx.stroke();
+      const cosA = Math.cos(a);
+      const sinA = Math.sin(a);
+      vCtx.moveTo(cx + cosA * outerR, cy + sinA * outerR);
+      vCtx.lineTo(cx + cosA * (outerR - len), cy + sinA * (outerR - len));
     }
+    vCtx.stroke();
 
     const coreR = minDim * (0.045 + bass * 0.04 + beatBoost * 0.03);
     vCtx.beginPath();
@@ -224,31 +229,67 @@ export function renderExtraVisualizerMode(
     }
 
     const linkDist = minDim * (0.19 + bass * 0.08 + beatBoost * 0.05);
-    vCtx.save();
+    const linkDistSq = linkDist * linkDist;
+    const edgeAlphas = [0.22, 0.45, 0.68, 0.88];
+    const edgeBuckets: number[][] = [[], [], [], [], [], [], [], []];
     for (let i = 0; i < nodeCount; i++) {
       for (let j = i + 1; j < nodeCount; j++) {
         const dx = nodes[i].x - nodes[j].x;
         const dy = nodes[i].y - nodes[j].y;
-        const d = Math.hypot(dx, dy);
-        if (d < linkDist) {
+        const dSq = dx * dx + dy * dy;
+        if (dSq < linkDistSq) {
+          const d = Math.sqrt(dSq);
           const alpha = (1 - d / linkDist) * (0.28 + (nodes[i].val + nodes[j].val) * 0.35);
-          vCtx.beginPath();
-          vCtx.moveTo(nodes[i].x, nodes[i].y);
-          vCtx.lineTo(nodes[j].x, nodes[j].y);
-          vCtx.strokeStyle = hexToRgba((i + j) % 2 === 0 ? primary : secondary, Math.min(0.9, alpha));
-          vCtx.lineWidth = Math.max(1, minDim * 0.0022);
-          vCtx.stroke();
+          const tier = Math.min(3, Math.max(0, Math.floor(Math.min(0.9, alpha) * 4)));
+          const colIdx = (i + j) % 2 === 0 ? 0 : 1;
+          edgeBuckets[colIdx * 4 + tier].push(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y);
         }
       }
     }
 
+    vCtx.save();
+    vCtx.lineWidth = Math.max(1, minDim * 0.0022);
+    for (let colIdx = 0; colIdx < 2; colIdx++) {
+      const col = colIdx === 0 ? primary : secondary;
+      for (let tier = 0; tier < 4; tier++) {
+        const segs = edgeBuckets[colIdx * 4 + tier];
+        if (segs.length === 0) continue;
+        vCtx.strokeStyle = hexToRgba(col, edgeAlphas[tier]);
+        vCtx.beginPath();
+        for (let k = 0; k < segs.length; k += 4) {
+          vCtx.moveTo(segs[k], segs[k + 1]);
+          vCtx.lineTo(segs[k + 2], segs[k + 3]);
+        }
+        vCtx.stroke();
+      }
+    }
+
+    const primaryNodes: Array<{ x: number; y: number; r: number }> = [];
+    const secondaryNodes: Array<{ x: number; y: number; r: number }> = [];
     for (let i = 0; i < nodeCount; i++) {
       const n = nodes[i];
       const r = Math.max(2.5, minDim * (0.005 + n.val * 0.009));
+      (i % 3 === 0 ? secondaryNodes : primaryNodes).push({ x: n.x, y: n.y, r });
+    }
+    applyShadow(primary, minDim * 0.015);
+    if (primaryNodes.length > 0) {
+      vCtx.fillStyle = primary;
       vCtx.beginPath();
-      vCtx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      vCtx.fillStyle = i % 3 === 0 ? secondary : primary;
-      applyShadow(primary, minDim * 0.015);
+      for (let k = 0; k < primaryNodes.length; k++) {
+        const n = primaryNodes[k];
+        vCtx.moveTo(n.x + n.r, n.y);
+        vCtx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      }
+      vCtx.fill();
+    }
+    if (secondaryNodes.length > 0) {
+      vCtx.fillStyle = secondary;
+      vCtx.beginPath();
+      for (let k = 0; k < secondaryNodes.length; k++) {
+        const n = secondaryNodes[k];
+        vCtx.moveTo(n.x + n.r, n.y);
+        vCtx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      }
       vCtx.fill();
     }
     vCtx.restore();
@@ -571,27 +612,30 @@ export function renderExtraVisualizerMode(
     vCtx.lineCap = 'round';
     vCtx.lineWidth = Math.max(2, ((Math.PI * innerR) / count) * 0.65);
 
+    const arcGrad = vCtx.createRadialGradient(
+      cx,
+      baseY,
+      innerR,
+      cx,
+      baseY,
+      Math.max(innerR + 1, innerR + maxLen * 0.85)
+    );
+    arcGrad.addColorStop(0, primary);
+    arcGrad.addColorStop(1, secondary);
+    vCtx.strokeStyle = arcGrad;
+    applyShadow(primary, minDim * 0.012);
+    vCtx.beginPath();
     for (let i = 0; i < count; i++) {
       const sym = i < count / 2 ? i : count - 1 - i;
       const val = getPerceptualBarValue(frequencyData, sym, Math.ceil(count / 2), sens);
       const len = Math.max(minDim * 0.01, Math.pow(val, 1.15) * maxLen);
       const angle = Math.PI + (i / (count - 1)) * Math.PI;
-
-      const x1 = cx + Math.cos(angle) * innerR;
-      const y1 = baseY + Math.sin(angle) * innerR;
-      const x2 = cx + Math.cos(angle) * (innerR + len);
-      const y2 = baseY + Math.sin(angle) * (innerR + len);
-
-      const g = vCtx.createLinearGradient(x1, y1, x2, y2);
-      g.addColorStop(0, primary);
-      g.addColorStop(1, secondary);
-      vCtx.strokeStyle = g;
-      applyShadow(primary, minDim * 0.012);
-      vCtx.beginPath();
-      vCtx.moveTo(x1, y1);
-      vCtx.lineTo(x2, y2);
-      vCtx.stroke();
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      vCtx.moveTo(cx + cosA * innerR, baseY + sinA * innerR);
+      vCtx.lineTo(cx + cosA * (innerR + len), baseY + sinA * (innerR + len));
     }
+    vCtx.stroke();
 
     // Horizon baseline
     vCtx.beginPath();
@@ -614,7 +658,10 @@ export function renderExtraVisualizerMode(
     const dotR = Math.max(2, Math.min(cellW, cellH) * 0.34);
     const botY = cy + stackH * 0.5;
 
-    vCtx.save();
+    const unlitDots: number[] = [];
+    const primaryDots: number[] = [];
+    const secondaryDots: number[] = [];
+
     for (let col = 0; col < cols; col++) {
       const val = getPerceptualBarValue(frequencyData, col, cols, sens);
       const lit = Math.max(1, Math.round(Math.pow(val, 1.05) * rows));
@@ -622,19 +669,51 @@ export function renderExtraVisualizerMode(
       for (let r = 0; r < rows; r++) {
         const y = botY - (r + 0.5) * cellH;
         const ratio = r / (rows - 1);
-        const isLit = r < lit;
-        vCtx.beginPath();
-        vCtx.arc(x, y, dotR, 0, Math.PI * 2);
-        if (isLit) {
-          const colHex = ratio > 0.65 ? secondary : primary;
-          vCtx.fillStyle = colHex;
-          applyShadow(colHex, minDim * 0.01);
+        if (r < lit) {
+          (ratio > 0.65 ? secondaryDots : primaryDots).push(x, y);
         } else {
-          vCtx.fillStyle = 'rgba(148, 163, 184, 0.1)';
-          vCtx.shadowBlur = 0;
+          unlitDots.push(x, y);
         }
-        vCtx.fill();
       }
+    }
+
+    vCtx.save();
+    if (unlitDots.length > 0) {
+      vCtx.shadowBlur = 0;
+      vCtx.fillStyle = 'rgba(148, 163, 184, 0.1)';
+      vCtx.beginPath();
+      for (let k = 0; k < unlitDots.length; k += 2) {
+        const x = unlitDots[k];
+        const y = unlitDots[k + 1];
+        vCtx.moveTo(x + dotR, y);
+        vCtx.arc(x, y, dotR, 0, Math.PI * 2);
+      }
+      vCtx.fill();
+    }
+    const dotBlur = minDim * 0.01;
+    if (primaryDots.length > 0) {
+      vCtx.fillStyle = primary;
+      applyShadow(primary, dotBlur);
+      vCtx.beginPath();
+      for (let k = 0; k < primaryDots.length; k += 2) {
+        const x = primaryDots[k];
+        const y = primaryDots[k + 1];
+        vCtx.moveTo(x + dotR, y);
+        vCtx.arc(x, y, dotR, 0, Math.PI * 2);
+      }
+      vCtx.fill();
+    }
+    if (secondaryDots.length > 0) {
+      vCtx.fillStyle = secondary;
+      applyShadow(secondary, dotBlur);
+      vCtx.beginPath();
+      for (let k = 0; k < secondaryDots.length; k += 2) {
+        const x = secondaryDots[k];
+        const y = secondaryDots[k + 1];
+        vCtx.moveTo(x + dotR, y);
+        vCtx.arc(x, y, dotR, 0, Math.PI * 2);
+      }
+      vCtx.fill();
     }
     vCtx.restore();
     return true;
@@ -687,7 +766,12 @@ export function renderExtraVisualizerMode(
     const topY = cy - totalH * 0.5;
     const gap = Math.max(2, minDim * 0.004);
 
-    vCtx.save();
+    const w = Math.max(2, tileW - gap);
+    const h = Math.max(2, tileH - gap);
+    const unlitTiles: number[] = [];
+    const tileAlphas = [0.35, 0.62, 0.88];
+    const litBuckets: number[][] = [[], [], [], [], [], []];
+
     for (let r = 0; r < rows; r++) {
       for (let col = 0; col < cols; col++) {
         const dx = Math.abs(col - (cols - 1) * 0.5) / (cols * 0.5);
@@ -698,19 +782,40 @@ export function renderExtraVisualizerMode(
 
         const x = linPadX + col * tileW + gap * 0.5;
         const y = topY + r * tileH + gap * 0.5;
-        const w = Math.max(2, tileW - gap);
-        const h = Math.max(2, tileH - gap);
 
         if (active) {
-          const mix = (col + r) % 2 === 0 ? primary : secondary;
-          vCtx.fillStyle = hexToRgba(mix, 0.25 + val * 0.7);
-          applyShadow(mix, minDim * 0.01);
+          const colIdx = (col + r) % 2 === 0 ? 0 : 1;
+          const alpha = 0.25 + val * 0.7;
+          const tier = alpha > 0.74 ? 2 : alpha > 0.48 ? 1 : 0;
+          litBuckets[colIdx * 3 + tier].push(x, y);
         } else {
-          vCtx.fillStyle = 'rgba(148, 163, 184, 0.08)';
-          vCtx.shadowBlur = 0;
+          unlitTiles.push(x, y);
         }
+      }
+    }
+
+    vCtx.save();
+    if (unlitTiles.length > 0) {
+      vCtx.shadowBlur = 0;
+      vCtx.fillStyle = 'rgba(148, 163, 184, 0.08)';
+      vCtx.beginPath();
+      for (let k = 0; k < unlitTiles.length; k += 2) {
+        vCtx.roundRect(unlitTiles[k], unlitTiles[k + 1], w, h, 3);
+      }
+      vCtx.fill();
+    }
+    const tileGlow = minDim * 0.01;
+    for (let colIdx = 0; colIdx < 2; colIdx++) {
+      const mix = colIdx === 0 ? primary : secondary;
+      applyShadow(mix, tileGlow);
+      for (let tier = 0; tier < 3; tier++) {
+        const coords = litBuckets[colIdx * 3 + tier];
+        if (coords.length === 0) continue;
+        vCtx.fillStyle = hexToRgba(mix, tileAlphas[tier]);
         vCtx.beginPath();
-        vCtx.roundRect(x, y, w, h, 3);
+        for (let k = 0; k < coords.length; k += 2) {
+          vCtx.roundRect(coords[k], coords[k + 1], w, h, 3);
+        }
         vCtx.fill();
       }
     }
@@ -758,28 +863,44 @@ export function renderExtraVisualizerMode(
     const goldenAngle = Math.PI * (3 - Math.sqrt(5));
     const maxR = minDim * 0.32 * visScale * (1 + beatBoost * 0.1);
 
-    vCtx.save();
+    const spiralAlphas = [0.55, 0.78, 0.96];
+    const spiralBuckets: number[][] = [[], [], [], [], [], []];
+
     for (let i = 0; i < count; i++) {
       const frac = i / count;
       const val = getPerceptualBarValue(frequencyData, i % 32, 32, sens);
       const a = i * goldenAngle + currentTime * 0.35;
+      const cosA = Math.cos(a);
+      const sinA = Math.sin(a);
       const dist = Math.sqrt(frac) * maxR;
-      const x = cx + Math.cos(a) * dist;
-      const y = cy + Math.sin(a) * dist;
+      const x = cx + cosA * dist;
+      const y = cy + sinA * dist;
       const len = minDim * (0.012 + val * 0.048) * visScale;
+      const x2 = x + cosA * len;
+      const y2 = y + sinA * len;
+      const colIdx = i % 2 === 0 ? 0 : 1;
+      const tier = val > 0.66 ? 2 : val > 0.33 ? 1 : 0;
+      spiralBuckets[colIdx * 3 + tier].push(x, y, x2, y2);
+    }
 
-      const x2 = x + Math.cos(a) * len;
-      const y2 = y + Math.sin(a) * len;
-      const col = i % 2 === 0 ? primary : secondary;
-
-      vCtx.strokeStyle = hexToRgba(col, 0.45 + val * 0.55);
-      vCtx.lineWidth = Math.max(2, minDim * 0.0045);
-      vCtx.lineCap = 'round';
-      applyShadow(col, minDim * 0.01);
-      vCtx.beginPath();
-      vCtx.moveTo(x, y);
-      vCtx.lineTo(x2, y2);
-      vCtx.stroke();
+    vCtx.save();
+    vCtx.lineWidth = Math.max(2, minDim * 0.0045);
+    vCtx.lineCap = 'round';
+    const spiralGlow = minDim * 0.01;
+    for (let colIdx = 0; colIdx < 2; colIdx++) {
+      const col = colIdx === 0 ? primary : secondary;
+      applyShadow(col, spiralGlow);
+      for (let tier = 0; tier < 3; tier++) {
+        const segs = spiralBuckets[colIdx * 3 + tier];
+        if (segs.length === 0) continue;
+        vCtx.strokeStyle = hexToRgba(col, spiralAlphas[tier]);
+        vCtx.beginPath();
+        for (let k = 0; k < segs.length; k += 4) {
+          vCtx.moveTo(segs[k], segs[k + 1]);
+          vCtx.lineTo(segs[k + 2], segs[k + 3]);
+        }
+        vCtx.stroke();
+      }
     }
     vCtx.restore();
     return true;
@@ -1263,6 +1384,10 @@ export function renderExtraVisualizerMode(
       vCtx.fill();
     }
     vCtx.restore();
+    return true;
+  }
+
+  if (renderNewVisualizerMode(mode, c)) {
     return true;
   }
 

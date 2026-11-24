@@ -65,15 +65,44 @@ export function sanitizeFileName(name: string): string {
   return cleaned || 'pulsewave-track';
 }
 
+const yieldChannel = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null;
+
 function yieldToEventLoop(): Promise<void> {
-  if (typeof MessageChannel !== 'undefined') {
+  if (yieldChannel) {
     return new Promise((resolve) => {
-      const channel = new MessageChannel();
-      channel.port1.onmessage = () => resolve();
-      channel.port2.postMessage(undefined);
+      yieldChannel.port1.onmessage = () => resolve();
+      yieldChannel.port2.postMessage(undefined);
     });
   }
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function waitForEncoderDequeue(
+  encoder: VideoEncoder,
+  targetMaxQueue: number,
+  signal: AbortSignal,
+  hasError: () => boolean
+): Promise<void> {
+  if (encoder.encodeQueueSize <= targetMaxQueue || signal.aborted || hasError()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      encoder.removeEventListener?.('dequeue', onDequeue);
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+    const onDequeue = () => {
+      if (encoder.encodeQueueSize <= targetMaxQueue || signal.aborted || hasError()) {
+        finish();
+      }
+    };
+    encoder.addEventListener?.('dequeue', onDequeue);
+    const safetyTimer = setTimeout(finish, 12);
+  });
 }
 
 function collectWorkerFonts(): WorkerFontDescriptor[] {
@@ -527,6 +556,7 @@ async function exportProjectOnMainThread(options: {
     const encNumChannels = preparedAudio.numberOfChannels;
     const ch0 = preparedAudio.channels[0];
     const ch1 = encNumChannels > 1 ? preparedAudio.channels[1] : null;
+    const planarScratch = new Float32Array(chunkSamples * encNumChannels);
 
     for (let offset = 0; offset < totalSamples; offset += chunkSamples) {
       if (signal.aborted) {
@@ -535,7 +565,10 @@ async function exportProjectOnMainThread(options: {
       if (encoderError) throw encoderError;
 
       const framesInChunk = Math.min(chunkSamples, totalSamples - offset);
-      const planar = new Float32Array(framesInChunk * encNumChannels);
+      const planar =
+        framesInChunk === chunkSamples
+          ? planarScratch
+          : planarScratch.subarray(0, framesInChunk * encNumChannels);
       planar.set(ch0.subarray(offset, offset + framesInChunk), 0);
       if (encNumChannels > 1 && ch1) {
         planar.set(ch1.subarray(offset, offset + framesInChunk), framesInChunk);
@@ -570,6 +603,7 @@ async function exportProjectOnMainThread(options: {
       Boolean(settings.danceEnabled) ||
       (settings.glitchIntensity ?? 0) > 0 ||
       (settings.bassShake ?? 0) > 0 ||
+      (settings.beatShake ?? 0) > 0 ||
       (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
@@ -649,7 +683,7 @@ async function exportProjectOnMainThread(options: {
       videoFrame.close();
 
       const nowMs = performance.now();
-      const needsBackpressure = videoEncoder.encodeQueueSize >= 24;
+      const needsBackpressure = videoEncoder.encodeQueueSize >= 32;
       if (needsBackpressure || nowMs - lastUiYieldMs >= 75 || frameIdx === totalFrames - 1) {
         const pct = Math.min(97, Math.round(((frameIdx + 1) / totalFrames) * 96));
         onProgress({
@@ -660,8 +694,15 @@ async function exportProjectOnMainThread(options: {
           message: `Rendering frame ${frameIdx + 1} of ${totalFrames} — ${pct}%`,
         });
 
-        while (videoEncoder.encodeQueueSize >= 24 && !signal.aborted && !encoderError) {
-          await new Promise((r) => setTimeout(r, 4));
+        if (needsBackpressure) {
+          while (videoEncoder.encodeQueueSize >= 20 && !signal.aborted && !encoderError) {
+            await waitForEncoderDequeue(
+              videoEncoder,
+              18,
+              signal,
+              () => Boolean(encoderError)
+            );
+          }
         }
         await yieldToEventLoop();
         lastUiYieldMs = performance.now();
@@ -823,6 +864,7 @@ async function exportProjectViaMediaRecorder(options: {
     Boolean(settings.danceEnabled) ||
     (settings.glitchIntensity ?? 0) > 0 ||
     (settings.bassShake ?? 0) > 0 ||
+    (settings.beatShake ?? 0) > 0 ||
     (Boolean(settings.lyricBeatSync) && (settings.lyricPulseIntensity ?? 1) > 0);
   const beatTracker = needsBeatDetector
     ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)

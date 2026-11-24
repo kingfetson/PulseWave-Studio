@@ -17,6 +17,7 @@ import {
   Mic2,
   Palette,
   Plus,
+  Repeat,
   RotateCcw,
   Scan,
   Sliders,
@@ -29,10 +30,10 @@ import {
   ASPECT_RATIOS,
   AspectRatioKey,
   BackgroundFitMode,
-  BloomPresetKey,
   CoverCardPosition,
   CoverCardSource,
   DanceAvatarStyle,
+  DanceMedleyTriggerMode,
   DancePlacement,
   DanceStyleKey,
   ExportResolution,
@@ -51,6 +52,7 @@ import {
 } from '../types/studio';
 import {
   DANCE_AVATAR_OPTIONS,
+  DANCE_MEDLEY_PRESETS,
   DANCE_STYLE_OPTIONS,
 } from '../utils/danceRenderer';
 import {
@@ -165,6 +167,7 @@ const VISUALIZER_MODES: Array<{
   id: VisualizerMode;
   name: string;
   desc: string;
+  category?: '3d' | 'unique';
 }> = [
   {
     id: 'mirrored-bars',
@@ -210,6 +213,7 @@ const VISUALIZER_MODES: Array<{
     id: 'cube-3d',
     name: '3D Cube Mesh',
     desc: 'Rotating 3D cube with frequency-reactive faces',
+    category: '3d',
   },
   {
     id: 'galaxy-spiral',
@@ -220,6 +224,7 @@ const VISUALIZER_MODES: Array<{
     id: 'cyber-tunnel',
     name: '3D Warp Tunnel',
     desc: 'Infinite perspective rings & laser rails synced to bass',
+    category: '3d',
   },
   {
     id: 'seismic-ridges',
@@ -255,11 +260,13 @@ const VISUALIZER_MODES: Array<{
     id: 'vortex-rings',
     name: '3D Torus Gyroscope',
     desc: 'Nested 3D gimbal rings with orbiting spectrum beads',
+    category: '3d',
   },
   {
     id: 'isometric-city',
     name: 'Isometric Equalizer',
     desc: '3D isometric prism skyline pulsing in depth-sorted rows',
+    category: '3d',
   },
   {
     id: 'analog-vu',
@@ -360,6 +367,7 @@ const VISUALIZER_MODES: Array<{
     id: 'pyramid-3d',
     name: '3D Wire Pyramid',
     desc: 'Spinning 3D wireframe octahedron & pyramid reactive to bass',
+    category: '3d',
   },
   {
     id: 'heartbeat-ecg',
@@ -370,6 +378,7 @@ const VISUALIZER_MODES: Array<{
     id: 'ribbon-knot',
     name: 'Toroidal Knot',
     desc: 'Continuous 3D Lissajous torus knot modulating with frequency',
+    category: '3d',
   },
   {
     id: 'starburst-rays',
@@ -415,6 +424,218 @@ const VISUALIZER_MODES: Array<{
     id: 'nebula-clouds',
     name: 'Cosmic Nebula',
     desc: 'Soft volumetric plasma clouds drifting amid sparkling starlight',
+  },
+  // 25 New 3D Visualizer Modes
+  {
+    id: 'torus-3d',
+    name: '3D Torus Knot Matrix',
+    desc: 'Spinning 3D perspective torus mesh with frequency-pulsing tube rings',
+    category: '3d',
+  },
+  {
+    id: 'icosahedron-3d',
+    name: '3D Geodesic Icosahedron',
+    desc: 'Depth-sorted 20-face polyhedron with spectrum-extruded vertices',
+    category: '3d',
+  },
+  {
+    id: 'octahedron-3d',
+    name: '3D Dual Octahedron',
+    desc: 'Counter-rotating nested 3D crystal octahedrons with beat sheen',
+    category: '3d',
+  },
+  {
+    id: 'sphere-dots-3d',
+    name: '3D Fibonacci Sphere',
+    desc: '110-node 3D spherical point cloud pulsing radially across bands',
+    category: '3d',
+  },
+  {
+    id: 'cylinder-eq-3d',
+    name: '3D Cylinder Equalizer',
+    desc: 'Rotating 3D ring of depth-sorted spectrum columns',
+    category: '3d',
+  },
+  {
+    id: 'helix-double-3d',
+    name: '3D Perspective Helix',
+    desc: 'True 3D rotating double helix ladder reactive to bass & mids',
+    category: '3d',
+  },
+  {
+    id: 'terrain-mesh-3d',
+    name: '3D Audio Terrain',
+    desc: 'Perspective wireframe heightmap landscape sculpted by audio bands',
+    category: '3d',
+  },
+  {
+    id: 'prism-stack-3d',
+    name: '3D Prism Cascade',
+    desc: 'Vertically stacked rotating 3D hexagonal prisms scaling per band',
+    category: '3d',
+  },
+  {
+    id: 'dodecahedron-3d',
+    name: '3D Dodecahedron Core',
+    desc: '12-pentagon 3D wireframe cage surrounding a pulsing energy core',
+    category: '3d',
+  },
+  {
+    id: 'saturn-rings-3d',
+    name: '3D Planetary Rings',
+    desc: 'Shaded 3D sphere orbited by tilted segmented frequency rings',
+    category: '3d',
+  },
+  {
+    id: 'cube-lattice-3d',
+    name: '3D Voxel Cube Matrix',
+    desc: '3×3×3 array of rotating 3D micro-cubes breathing in Z-depth',
+    category: '3d',
+  },
+  {
+    id: 'ribbon-mobius-3d',
+    name: '3D Mobius Ribbon',
+    desc: 'Twisted 3D perspective Möbius strip undulating with audio',
+    category: '3d',
+  },
+  {
+    id: 'cone-vortex-3d',
+    name: '3D Funnel Vortex',
+    desc: 'Descending 3D perspective spiral rings tapering into a core',
+    category: '3d',
+  },
+  {
+    id: 'diamond-cut-3d',
+    name: '3D Faceted Diamond',
+    desc: 'Spinning brilliant-cut 3D gemstone with beat-reactive glints',
+    category: '3d',
+  },
+  {
+    id: 'city-blocks-3d',
+    name: '3D Perspective Skyline',
+    desc: 'Depth-sorted 3D grid of extruded frequency towers & lit caps',
+    category: '3d',
+  },
+  {
+    id: 'wave-tunnel-3d',
+    name: '3D Hex Warp Tunnel',
+    desc: 'Perspective hexagonal tunnel gates flying continuously in Z-depth',
+    category: '3d',
+  },
+  {
+    id: 'atom-cage-3d',
+    name: '3D Orbital Gyro Cage',
+    desc: 'Multi-axis 3D gimbal rings with fast orbiting electron spheres',
+    category: '3d',
+  },
+  {
+    id: 'ribbon-helix-3d',
+    name: '3D Spiral Ribbon',
+    desc: 'Twin 3D perspective ribbons spiraling around a vertical axis',
+    category: '3d',
+  },
+  {
+    id: 'star-poly-3d',
+    name: '3D Stellated Star',
+    desc: 'Spiked 3D polyhedron shooting reactive crystal spires outward',
+    category: '3d',
+  },
+  {
+    id: 'arch-bridge-3d',
+    name: '3D Perspective Archway',
+    desc: 'Receding 3D parabolic arches scaling dynamically to spectrum',
+    category: '3d',
+  },
+  {
+    id: 'dna-spiral-3d',
+    name: '3D Twisted Ladder',
+    desc: 'Horizontal 3D perspective twisted ladder spanning the stage',
+    category: '3d',
+  },
+  {
+    id: 'crystal-cluster-3d',
+    name: '3D Quartz Cluster',
+    desc: 'Radial cluster of 3D hexagonal crystal spires growing with bass',
+    category: '3d',
+  },
+  {
+    id: 'radar-dome-3d',
+    name: '3D Wireframe Dome',
+    desc: 'Tilted 3D geodesic hemisphere with sweeping radar meridian arc',
+    category: '3d',
+  },
+  {
+    id: 'portal-gate-3d',
+    name: '3D Dimensional Gate',
+    desc: 'Nested tilting 3D octagonal portals pulsing with energy',
+    category: '3d',
+  },
+  {
+    id: 'hypercube-4d',
+    name: '4D Tesseract 3D',
+    desc: 'Four-dimensional hypercube projected into rotating 3D perspective',
+    category: '3d',
+  },
+  // 10 New Unique Visualizer Modes
+  {
+    id: 'origami-fold',
+    name: 'Origami Fold',
+    desc: 'Unique · Paper-craft triangular fans folding & blooming to beats',
+    category: 'unique',
+  },
+  {
+    id: 'vinyl-turntable',
+    name: 'Spinning Turntable',
+    desc: 'Unique · Detailed vinyl deck with strobe rim, grooves & tonearm',
+    category: 'unique',
+  },
+  {
+    id: 'pendulum-clockwork',
+    name: 'Clockwork Escapement',
+    desc: 'Unique · Interlocking mechanical gear wheels & sweeping timer hand',
+    category: 'unique',
+  },
+  {
+    id: 'aurora-curtains',
+    name: 'Polar Aurora Borealis',
+    desc: 'Unique · Shimmering vertical magnetic curtains swaying smoothly',
+    category: 'unique',
+  },
+  {
+    id: 'seismic-circular',
+    name: 'Circular Seismograph',
+    desc: 'Unique · Concentric ink-style tremor rings etched by waveform',
+    category: 'unique',
+  },
+  {
+    id: 'bioluminescent-jelly',
+    name: 'Bioluminescent Jelly',
+    desc: 'Unique · Translucent pulsing dome & undulating audio tentacles',
+    category: 'unique',
+  },
+  {
+    id: 'stained-glass',
+    name: 'Gothic Rose Window',
+    desc: 'Unique · Symmetrical cathedral rose stained-glass jewel facets',
+    category: 'unique',
+  },
+  {
+    id: 'sonar-ripples',
+    name: 'Echolocation Arcs',
+    desc: 'Unique · Dual-source acoustic sonar waves colliding mid-stage',
+    category: 'unique',
+  },
+  {
+    id: 'magnetic-ferrofluid',
+    name: 'Ferrofluid Spikes',
+    desc: 'Unique · Organic liquid-metal core sprouting magnetic spikes',
+    category: 'unique',
+  },
+  {
+    id: 'kaleido-tunnels',
+    name: 'Kaleido Fractals',
+    desc: 'Unique · Recursive hexagram star polygons spinning in opposition',
+    category: 'unique',
   },
 ];
 
@@ -717,6 +938,7 @@ export function ControlSidebar({
     text: string;
   } | null>(null);
   const [modeQuery, setModeQuery] = useState('');
+  const [modeCategory, setModeCategory] = useState<'all' | '3d' | 'unique'>('all');
   const [lyricStyleQuery, setLyricStyleQuery] = useState('');
   const [appliedPresetId, setAppliedPresetId] = useState<string | null>(null);
   const [showBloomShaderParams, setShowBloomShaderParams] = useState(false);
@@ -2198,6 +2420,40 @@ export function ControlSidebar({
                   </span>
                 </div>
               </div>
+              <div
+                role="tablist"
+                aria-label="Visualizer style categories"
+                className="grid grid-cols-3 gap-1 p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]"
+              >
+                {(
+                  [
+                    { id: 'all', label: `All (${VISUALIZER_MODES.length})` },
+                    {
+                      id: '3d',
+                      label: `3D (${VISUALIZER_MODES.filter((m) => m.category === '3d').length})`,
+                    },
+                    {
+                      id: 'unique',
+                      label: `Unique (${VISUALIZER_MODES.filter((m) => m.category === 'unique').length})`,
+                    },
+                  ] as const
+                ).map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={modeCategory === cat.id}
+                    onClick={() => setModeCategory(cat.id)}
+                    className={`py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+                      modeCategory === cat.id
+                        ? 'bg-cyan-500/15 text-cyan-200 border border-cyan-400/35'
+                        : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="search"
                 value={modeQuery}
@@ -2212,6 +2468,9 @@ export function ControlSidebar({
                 }`}
               >
                 {VISUALIZER_MODES.filter((mode) => {
+                  if (modeCategory !== 'all' && mode.category !== modeCategory) {
+                    return false;
+                  }
                   const q = modeQuery.trim().toLowerCase();
                   if (!q) return true;
                   return (
@@ -2460,43 +2719,55 @@ export function ControlSidebar({
                     <>
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
-                          <label
-                            htmlFor="bloom-presets-select"
-                            className="text-[11px] font-medium text-slate-300"
-                          >
-                            Bloom Presets
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => setShowBloomShaderParams((v) => !v)}
-                            className="text-[10.5px] font-medium text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                          >
-                            {showBloomShaderParams ? 'Hide Shader' : 'Tune Shader'}
-                          </button>
+                          <span className="text-[11px] font-medium text-slate-300">
+                            Bloom Preset
+                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {activeBloomPreset === 'custom' && (
+                              <span className="text-[10px] font-mono text-amber-300/90">
+                                Custom
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setShowBloomShaderParams((v) => !v)}
+                              className="text-[10.5px] font-medium text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer whitespace-nowrap"
+                            >
+                              {showBloomShaderParams ? 'Hide Shader' : 'Tune Shader'}
+                            </button>
+                          </div>
                         </div>
 
-                        <select
-                          id="bloom-presets-select"
-                          aria-label="Bloom Presets"
-                          value={activeBloomPreset}
-                          onChange={(e) => {
-                            const val = e.target.value as BloomPresetKey;
-                            if (val === 'custom') return;
-                            onUpdateSettings(getBloomPresetPatch(val));
-                          }}
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.09] text-xs text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                        <div
+                          role="radiogroup"
+                          aria-label="Bloom Preset"
+                          className="grid grid-cols-5 gap-1"
                         >
-                          {BLOOM_PRESETS.map((preset) => (
-                            <option key={preset.key} value={preset.key} className="bg-[#090b10]">
-                              {preset.name}
-                            </option>
-                          ))}
-                          {activeBloomPreset === 'custom' && (
-                            <option value="custom" className="bg-[#090b10]">
-                              Custom (Modified)
-                            </option>
-                          )}
-                        </select>
+                          {BLOOM_PRESETS.map((preset) => {
+                            const isSelected = activeBloomPreset === preset.key;
+                            return (
+                              <button
+                                key={preset.key}
+                                type="button"
+                                role="radio"
+                                aria-checked={isSelected}
+                                title={`${preset.name}: ${preset.description} (Intensity ${Math.round(
+                                  preset.bloomIntensity * 100
+                                )}% · Radius ${preset.bloomRadius.toFixed(
+                                  2
+                                )}× · Spread ${Math.round(preset.bloomSpread * 100)}%)`}
+                                onClick={() => onUpdateSettings(getBloomPresetPatch(preset.key))}
+                                className={`px-1 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                    : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05] hover:text-slate-100'
+                                }`}
+                              >
+                                {preset.name}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
 
                       <div>
@@ -2625,6 +2896,35 @@ export function ControlSidebar({
 
               <div>
                 <div className="flex justify-between text-[11px] mb-1">
+                  <label htmlFor="visualizer-global-glow-slider" className="text-slate-400">
+                    Global Glow
+                  </label>
+                  <span className="font-mono tabular-nums text-cyan-400">
+                    {(settings.globalGlow ?? 0) <= 0.005
+                      ? 'Off'
+                      : `${Math.round((settings.globalGlow ?? 0) * 100)}%`}
+                  </span>
+                </div>
+                <input
+                  id="visualizer-global-glow-slider"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  aria-label="Global Glow"
+                  value={settings.globalGlow ?? 0}
+                  onChange={(e) =>
+                    onUpdateSettings({ globalGlow: parseFloat(e.target.value) })
+                  }
+                  className="studio-range w-full"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Controls uniform emission and atmospheric light glow across the entire visualizer scene.
+                </p>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[11px] mb-1">
                   <span className="text-slate-400">
                     Glitch Intensity
                     {midiMappingBadges?.glitchIntensity && (
@@ -2689,6 +2989,232 @@ export function ControlSidebar({
                   Subtly oscillates and punches the canvas camera on heavy 140 Hz bass hits.
                 </p>
               </div>
+
+              <div>
+                <div className="flex justify-between text-[11px] mb-1">
+                  <label htmlFor="visualizer-beat-shake-slider" className="text-slate-400">
+                    Beat Shake
+                    {midiMappingBadges?.beatShake && (
+                      <span className="ml-1.5 font-mono text-[10px] text-cyan-400/85">
+                        · {midiMappingBadges.beatShake}
+                      </span>
+                    )}
+                  </label>
+                  <span className="font-mono tabular-nums text-cyan-400">
+                    {(settings.beatShake ?? 0) <= 0.005
+                      ? 'Off'
+                      : `${Math.round((settings.beatShake ?? 0) * 100)}%`}
+                  </span>
+                </div>
+                <input
+                  id="visualizer-beat-shake-slider"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  aria-label="Beat Shake"
+                  value={settings.beatShake ?? 0}
+                  onChange={(e) =>
+                    onUpdateSettings({ beatShake: parseFloat(e.target.value) })
+                  }
+                  className="studio-range w-full"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Triggers a rapid, subtle screen-shake on every detected beat for a kinetic feel.
+                </p>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-[11px] mb-1">
+                  <label htmlFor="visualizer-scanline-slider" className="text-slate-400">
+                    Scanline
+                  </label>
+                  <span className="font-mono tabular-nums text-cyan-400">
+                    {(settings.scanlineIntensity ?? 0) <= 0.005
+                      ? 'Off'
+                      : `${Math.round((settings.scanlineIntensity ?? 0) * 100)}%`}
+                  </span>
+                </div>
+                <input
+                  id="visualizer-scanline-slider"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  aria-label="Scanline"
+                  value={settings.scanlineIntensity ?? 0}
+                  onChange={(e) =>
+                    onUpdateSettings({ scanlineIntensity: parseFloat(e.target.value) })
+                  }
+                  className="studio-range w-full"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Overlays a vintage CRT scanline and phosphor texture that reacts to frame
+                  brightness.
+                </p>
+              </div>
+
+              {(() => {
+                const rawScanColor = (settings.scanlineColor ?? 'auto').trim();
+                const isAutoScanColor =
+                  !rawScanColor || rawScanColor.toLowerCase() === 'auto';
+                const toHex6 = (hex: string, fallback = '#22d3ee') => {
+                  const clean = hex.trim();
+                  if (/^#[0-9a-fA-F]{6}$/.test(clean)) return clean;
+                  if (/^#[0-9a-fA-F]{3}$/.test(clean)) {
+                    return `#${clean[1]}${clean[1]}${clean[2]}${clean[2]}${clean[3]}${clean[3]}`;
+                  }
+                  return fallback;
+                };
+                const resolvedScanHex = isAutoScanColor
+                  ? toHex6(settings.primaryColor, '#22d3ee')
+                  : toHex6(rawScanColor, '#22d3ee');
+                const isGreenPhosphor =
+                  !isAutoScanColor && resolvedScanHex.toLowerCase() === '#22c55e';
+                const isAmberPhosphor =
+                  !isAutoScanColor && resolvedScanHex.toLowerCase() === '#f59e0b';
+
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <label
+                        htmlFor="visualizer-scanline-color-picker"
+                        className="text-slate-400"
+                      >
+                        Scanline Color
+                      </label>
+                      <span className="font-mono tabular-nums text-slate-300 uppercase">
+                        {isAutoScanColor ? 'Theme Auto' : resolvedScanHex}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <label className="flex items-center gap-2 px-2 py-1 rounded-md bg-[#090b10] border border-white/[0.09] hover:border-white/[0.18] transition-colors cursor-pointer shrink-0">
+                        <input
+                          id="visualizer-scanline-color-picker"
+                          type="color"
+                          aria-label="Scanline Color"
+                          value={resolvedScanHex}
+                          onChange={(e) =>
+                            onUpdateSettings({ scanlineColor: e.target.value })
+                          }
+                          className="w-4 h-4 rounded cursor-pointer bg-transparent border-0 p-0"
+                        />
+                        <span className="text-[10.5px] font-mono tabular-nums text-slate-300 uppercase">
+                          {resolvedScanHex}
+                        </span>
+                      </label>
+                      <div className="grid grid-cols-3 gap-1 flex-1 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({ scanlineColor: 'auto' })
+                          }
+                          className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                            isAutoScanColor
+                              ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                              : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                          }`}
+                          title="Match active visualizer theme primary color"
+                        >
+                          Theme
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({ scanlineColor: '#22c55e' })
+                          }
+                          className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                            isGreenPhosphor
+                              ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                              : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                          }`}
+                          title="Classic P1 green phosphor CRT"
+                        >
+                          Green
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateSettings({ scanlineColor: '#f59e0b' })
+                          }
+                          className={`px-1.5 py-1.5 rounded-md border text-[10.5px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                            isAmberPhosphor
+                              ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                              : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                          }`}
+                          title="Vintage amber monochrome CRT"
+                        >
+                          Amber
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {(() => {
+                const hueRot = Math.max(0, Math.min(360, Math.round(settings.globalHueRotation ?? 0)));
+                const shiftedPalette = resolveAutoCycledColors(
+                  { ...settings, autoCycleColor: false, globalHueRotation: hueRot },
+                  0
+                );
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <label
+                        htmlFor="visualizer-global-hue-slider"
+                        className="text-slate-400"
+                      >
+                        Global Hue Rotation
+                      </label>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {hueRot > 0 && (
+                          <div className="flex items-center gap-1" aria-hidden="true">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full border border-white/25"
+                              style={{ backgroundColor: shiftedPalette.primaryColor }}
+                            />
+                            <span
+                              className="w-2.5 h-2.5 rounded-full border border-white/25"
+                              style={{ backgroundColor: shiftedPalette.secondaryColor }}
+                            />
+                          </div>
+                        )}
+                        <span className="font-mono tabular-nums text-cyan-400">
+                          {hueRot}°
+                        </span>
+                        {hueRot > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onUpdateSettings({ globalHueRotation: 0 })}
+                            className="text-[10px] font-medium text-slate-400 hover:text-cyan-300 transition-colors cursor-pointer"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <input
+                      id="visualizer-global-hue-slider"
+                      type="range"
+                      min={0}
+                      max={360}
+                      step={1}
+                      aria-label="Global Hue Rotation"
+                      value={hueRot}
+                      onChange={(e) =>
+                        onUpdateSettings({
+                          globalHueRotation: parseInt(e.target.value, 10),
+                        })
+                      }
+                      className="studio-range w-full"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Shifts all active theme palette colors around the color wheel by 0–360°.
+                    </p>
+                  </div>
+                );
+              })()}
             </section>
 
             <hr className="border-white/[0.07]" />
@@ -2795,6 +3321,146 @@ export function ControlSidebar({
                     Routes audio through a secondary 140 Hz low-pass filter node to isolate bass
                     drum peaks and trigger shockwave, burst &amp; flash animations.
                   </p>
+
+                  {settings.beatDetection && (
+                    <div className="pt-2.5 mt-1 border-t border-white/[0.06] space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                            <Palette className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                            <span>Beat Color Mapping</span>
+                          </div>
+                          <p className="text-[10.5px] text-slate-400 leading-snug mt-0.5">
+                            Interpolate visualizer colors across low, mid &amp; high frequency ranges by beat energy.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-label="Beat Color Mapping"
+                          aria-checked={Boolean(settings.beatColorMappingEnabled)}
+                          onClick={() =>
+                            onUpdateSettings({
+                              beatColorMappingEnabled: !settings.beatColorMappingEnabled,
+                            })
+                          }
+                          className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                            settings.beatColorMappingEnabled ? 'bg-cyan-500' : 'bg-slate-700'
+                          }`}
+                        >
+                          <span
+                            className={`block w-4 h-4 rounded-full bg-white transition-transform ${
+                              settings.beatColorMappingEnabled ? 'translate-x-4' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {settings.beatColorMappingEnabled && (() => {
+                        const lowColor = settings.beatColorLow ?? '#f43f5e';
+                        const midColor = settings.beatColorMid ?? '#a855f7';
+                        const highColor = settings.beatColorHigh ?? '#22d3ee';
+                        const isCustom =
+                          lowColor.toLowerCase() !== '#f43f5e' ||
+                          midColor.toLowerCase() !== '#a855f7' ||
+                          highColor.toLowerCase() !== '#22d3ee';
+
+                        return (
+                          <div className="rounded-lg bg-[#0d1118]/90 border border-white/[0.07] p-2.5 space-y-2.5">
+                            <div className="grid grid-cols-3 gap-2">
+                              <label className="flex flex-col gap-1 cursor-pointer">
+                                <span className="text-[10px] font-medium text-slate-400">
+                                  Low (Bass)
+                                </span>
+                                <div className="flex items-center gap-1.5 rounded bg-white/[0.04] border border-white/[0.08] px-1.5 py-1 hover:border-white/[0.18] transition-colors">
+                                  <input
+                                    type="color"
+                                    aria-label="Low frequency color"
+                                    value={lowColor}
+                                    onChange={(e) =>
+                                      onUpdateSettings({ beatColorLow: e.target.value })
+                                    }
+                                    className="w-5 h-5 rounded border-0 bg-transparent p-0 cursor-pointer shrink-0"
+                                  />
+                                  <span className="font-mono text-[10px] text-slate-300 uppercase truncate">
+                                    {lowColor}
+                                  </span>
+                                </div>
+                              </label>
+
+                              <label className="flex flex-col gap-1 cursor-pointer">
+                                <span className="text-[10px] font-medium text-slate-400">
+                                  Mid
+                                </span>
+                                <div className="flex items-center gap-1.5 rounded bg-white/[0.04] border border-white/[0.08] px-1.5 py-1 hover:border-white/[0.18] transition-colors">
+                                  <input
+                                    type="color"
+                                    aria-label="Mid frequency color"
+                                    value={midColor}
+                                    onChange={(e) =>
+                                      onUpdateSettings({ beatColorMid: e.target.value })
+                                    }
+                                    className="w-5 h-5 rounded border-0 bg-transparent p-0 cursor-pointer shrink-0"
+                                  />
+                                  <span className="font-mono text-[10px] text-slate-300 uppercase truncate">
+                                    {midColor}
+                                  </span>
+                                </div>
+                              </label>
+
+                              <label className="flex flex-col gap-1 cursor-pointer">
+                                <span className="text-[10px] font-medium text-slate-400">
+                                  High (Treble)
+                                </span>
+                                <div className="flex items-center gap-1.5 rounded bg-white/[0.04] border border-white/[0.08] px-1.5 py-1 hover:border-white/[0.18] transition-colors">
+                                  <input
+                                    type="color"
+                                    aria-label="High frequency color"
+                                    value={highColor}
+                                    onChange={(e) =>
+                                      onUpdateSettings({ beatColorHigh: e.target.value })
+                                    }
+                                    className="w-5 h-5 rounded border-0 bg-transparent p-0 cursor-pointer shrink-0"
+                                  />
+                                  <span className="font-mono text-[10px] text-slate-300 uppercase truncate">
+                                    {highColor}
+                                  </span>
+                                </div>
+                              </label>
+                            </div>
+
+                            <div className="space-y-1">
+                              <div
+                                className="h-2 w-full rounded-full border border-white/[0.08]"
+                                style={{
+                                  background: `linear-gradient(to right, ${lowColor}, ${midColor}, ${highColor})`,
+                                }}
+                              />
+                              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                                <span>Low → Mid → High energy blend</span>
+                                {isCustom && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateSettings({
+                                        beatColorLow: '#f43f5e',
+                                        beatColorMid: '#a855f7',
+                                        beatColorHigh: '#22d3ee',
+                                      })
+                                    }
+                                    className="inline-flex items-center gap-1 text-slate-400 hover:text-cyan-300 transition-colors cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-2.5 h-2.5" />
+                                    <span>Reset</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-[11px] leading-relaxed text-slate-400">
@@ -2961,6 +3627,318 @@ export function ControlSidebar({
                       }
                     </p>
                   </div>
+
+                  {/* Auto-Cycle / Medley Mode */}
+                  {(() => {
+                    const medleyEnabled = Boolean(settings.danceMedleyEnabled);
+                    const medleyMoves = settings.danceMedleyStyles ?? [
+                      'hip-hop',
+                      'mocap-salsa',
+                      'mocap-kpop',
+                      'mocap-breakdance',
+                    ];
+                    const medleyTrigger: DanceMedleyTriggerMode =
+                      settings.danceMedleyTrigger ?? 'beats';
+                    const intervalBeats = settings.danceMedleyIntervalBeats ?? 8;
+                    const intervalSeconds = settings.danceMedleyIntervalSeconds ?? 8;
+                    const blendDuration = settings.danceMedleyBlendDuration ?? 0.45;
+                    const selectableMoves = DANCE_STYLE_OPTIONS.filter(
+                      (opt) => opt.id !== 'mocap-custom' || Boolean(mocapClip)
+                    );
+
+                    const toggleMedleyMove = (moveId: DanceStyleKey) => {
+                      const exists = medleyMoves.includes(moveId);
+                      const next = exists
+                        ? medleyMoves.filter((id) => id !== moveId)
+                        : [...medleyMoves, moveId];
+                      onUpdateSettings({ danceMedleyStyles: next });
+                    };
+
+                    return (
+                      <div className="rounded-lg bg-[#0d1118]/90 border border-white/[0.08] p-2.5 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                              <Repeat className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                              <span>Auto-Cycle / Medley Mode</span>
+                              {medleyEnabled && (
+                                <span className="font-mono text-[10px] text-cyan-300/90">
+                                  · {medleyMoves.length}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10.5px] text-slate-400 leading-snug mt-0.5">
+                              Rotate through a set of moves with smooth 3D pose blending.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-label="Auto-Cycle / Medley Mode"
+                            aria-checked={medleyEnabled}
+                            onClick={() =>
+                              onUpdateSettings({
+                                danceMedleyEnabled: !medleyEnabled,
+                              })
+                            }
+                            className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                              medleyEnabled ? 'bg-cyan-500' : 'bg-slate-700'
+                            }`}
+                          >
+                            <span
+                              className={`block w-4 h-4 rounded-full bg-white transition-transform ${
+                                medleyEnabled ? 'translate-x-4' : 'translate-x-0'
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        {medleyEnabled && (
+                          <div className="space-y-3 pt-2 border-t border-white/[0.06]">
+                            {/* Switch Trigger Selector */}
+                            <div>
+                              <span className="block text-[10.5px] text-slate-400 mb-1">
+                                Switch Move Every
+                              </span>
+                              <div className="grid grid-cols-3 gap-1">
+                                {(
+                                  [
+                                    { id: 'beats', label: 'N Beats' },
+                                    { id: 'seconds', label: 'N Seconds' },
+                                    { id: 'lyrics', label: 'Lyric Cue' },
+                                  ] as Array<{ id: DanceMedleyTriggerMode; label: string }>
+                                ).map((opt) => {
+                                  const active = medleyTrigger === opt.id;
+                                  return (
+                                    <button
+                                      key={opt.id}
+                                      type="button"
+                                      onClick={() =>
+                                        onUpdateSettings({ danceMedleyTrigger: opt.id })
+                                      }
+                                      className={`px-2 py-1.5 rounded-md border text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                                        active
+                                          ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                          : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                                      }`}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Conditional Interval Control */}
+                            {medleyTrigger === 'beats' && (
+                              <div>
+                                <div className="flex justify-between text-[11px] mb-1">
+                                  <label
+                                    htmlFor="dance-medley-beats-slider"
+                                    className="text-slate-400"
+                                  >
+                                    Beats per Move
+                                  </label>
+                                  <span className="font-mono tabular-nums text-cyan-400">
+                                    {intervalBeats} beats
+                                  </span>
+                                </div>
+                                <input
+                                  id="dance-medley-beats-slider"
+                                  type="range"
+                                  min={2}
+                                  max={32}
+                                  step={2}
+                                  aria-label="Beats per Move"
+                                  value={intervalBeats}
+                                  onChange={(e) =>
+                                    onUpdateSettings({
+                                      danceMedleyIntervalBeats: parseInt(e.target.value, 10),
+                                    })
+                                  }
+                                  className="studio-range w-full"
+                                />
+                                <div className="flex items-center justify-between text-[10px] text-slate-500 mt-0.5 font-mono">
+                                  {[4, 8, 16, 24].map((b) => (
+                                    <button
+                                      key={b}
+                                      type="button"
+                                      onClick={() =>
+                                        onUpdateSettings({ danceMedleyIntervalBeats: b })
+                                      }
+                                      className={`cursor-pointer hover:text-cyan-300 ${
+                                        intervalBeats === b ? 'text-cyan-400' : ''
+                                      }`}
+                                    >
+                                      {b}b
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {medleyTrigger === 'seconds' && (
+                              <div>
+                                <div className="flex justify-between text-[11px] mb-1">
+                                  <label
+                                    htmlFor="dance-medley-seconds-slider"
+                                    className="text-slate-400"
+                                  >
+                                    Seconds per Move
+                                  </label>
+                                  <span className="font-mono tabular-nums text-cyan-400">
+                                    {intervalSeconds.toFixed(1).replace(/\.0$/, '')}s
+                                  </span>
+                                </div>
+                                <input
+                                  id="dance-medley-seconds-slider"
+                                  type="range"
+                                  min={2}
+                                  max={30}
+                                  step={1}
+                                  aria-label="Seconds per Move"
+                                  value={intervalSeconds}
+                                  onChange={(e) =>
+                                    onUpdateSettings({
+                                      danceMedleyIntervalSeconds: parseFloat(e.target.value),
+                                    })
+                                  }
+                                  className="studio-range w-full"
+                                />
+                                <div className="flex items-center justify-between text-[10px] text-slate-500 mt-0.5 font-mono">
+                                  {[4, 8, 12, 16].map((sec) => (
+                                    <button
+                                      key={sec}
+                                      type="button"
+                                      onClick={() =>
+                                        onUpdateSettings({ danceMedleyIntervalSeconds: sec })
+                                      }
+                                      className={`cursor-pointer hover:text-cyan-300 ${
+                                        Math.abs(intervalSeconds - sec) < 0.1
+                                          ? 'text-cyan-400'
+                                          : ''
+                                      }`}
+                                    >
+                                      {sec}s
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {medleyTrigger === 'lyrics' && (
+                              <p className="text-[10.5px] leading-snug text-slate-400">
+                                {lyrics.length > 0
+                                  ? `Advances to the next selected move on every lyric cue (${lyrics.length} cues loaded).`
+                                  : 'Add or auto-generate lyrics in the Lyrics tab so moves advance on each lyric transition.'}
+                              </p>
+                            )}
+
+                            {/* Pose Blend Smoothness */}
+                            <div>
+                              <div className="flex justify-between text-[11px] mb-1">
+                                <label
+                                  htmlFor="dance-medley-blend-slider"
+                                  className="text-slate-400"
+                                >
+                                  Pose Blend Smoothness
+                                </label>
+                                <span className="font-mono tabular-nums text-cyan-400">
+                                  {blendDuration.toFixed(2)}s
+                                </span>
+                              </div>
+                              <input
+                                id="dance-medley-blend-slider"
+                                type="range"
+                                min={0.15}
+                                max={1.5}
+                                step={0.05}
+                                aria-label="Pose Blend Smoothness"
+                                value={blendDuration}
+                                onChange={(e) =>
+                                  onUpdateSettings({
+                                    danceMedleyBlendDuration: parseFloat(e.target.value),
+                                  })
+                                }
+                                className="studio-range w-full"
+                              />
+                            </div>
+
+                            {/* Quick Mix Presets & Move Selection */}
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10.5px] font-medium text-slate-300">
+                                  Medley Move Set ({medleyMoves.length} selected)
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onUpdateSettings({
+                                      danceMedleyStyles: selectableMoves.map((m) => m.id),
+                                    })
+                                  }
+                                  className="text-[10px] text-cyan-400 hover:text-cyan-300 cursor-pointer"
+                                >
+                                  Select All
+                                </button>
+                              </div>
+
+                              <div className="flex flex-wrap gap-1">
+                                {DANCE_MEDLEY_PRESETS.map((preset) => (
+                                  <button
+                                    key={preset.id}
+                                    type="button"
+                                    title={preset.desc}
+                                    onClick={() =>
+                                      onUpdateSettings({
+                                        danceMedleyStyles: [...preset.styles],
+                                      })
+                                    }
+                                    className="px-2 py-0.5 rounded border border-white/[0.08] bg-[#090b10] text-[10px] text-slate-300 hover:border-cyan-400/50 hover:text-cyan-200 transition-colors cursor-pointer"
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-1 max-h-40 overflow-y-auto pr-0.5 pt-0.5">
+                                {selectableMoves.map((opt) => {
+                                  const orderIdx = medleyMoves.indexOf(opt.id);
+                                  const selected = orderIdx >= 0;
+                                  const shortLabel = opt.label.replace(' (Mocap)', '');
+                                  return (
+                                    <button
+                                      key={opt.id}
+                                      type="button"
+                                      onClick={() => toggleMedleyMove(opt.id)}
+                                      className={`flex items-center justify-between gap-1.5 px-2 py-1.5 rounded border text-left transition-colors cursor-pointer ${
+                                        selected
+                                          ? 'bg-cyan-500/18 border-cyan-400/55 text-cyan-100'
+                                          : 'bg-[#090b10] border-white/[0.07] text-slate-400 hover:text-slate-200 hover:border-white/[0.15]'
+                                      }`}
+                                    >
+                                      <span className="text-[10.5px] truncate">{shortLabel}</span>
+                                      {selected && (
+                                        <span className="text-[9.5px] font-mono tabular-nums text-cyan-300 shrink-0">
+                                          #{orderIdx + 1}
+                                        </span>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              {medleyMoves.length < 2 && (
+                                <p className="text-[10px] text-amber-300/90">
+                                  Pick at least 2 moves to cycle through during playback.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">

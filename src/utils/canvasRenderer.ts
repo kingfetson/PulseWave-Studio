@@ -13,7 +13,7 @@ import {
   StudioSettings,
   VisualizerMode,
 } from '../types/studio';
-import { resolveAutoCycledColors } from './colorHarmony';
+import { resolveAutoCycledColors, resolveBeatMappedColors } from './colorHarmony';
 import { renderDanceCharacter } from './danceRenderer';
 import { renderExtraVisualizerMode } from './extraVisualizers';
 import {
@@ -68,21 +68,124 @@ function getImageDimensions(
   return img.width > 0 && img.height > 0 ? { width: img.width, height: img.height } : null;
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const clean = hex.replace('#', '');
+const hexRgbCache = new Map<string, readonly [number, number, number]>();
+const rgbaStringCache = new Map<string, string>();
+
+function parseHexRgbTuple(hex: string): readonly [number, number, number] {
+  const cached = hexRgbCache.get(hex);
+  if (cached) return cached;
+
+  const clean = hex.charCodeAt(0) === 35 ? hex.slice(1) : hex.replace('#', '');
+  let tuple: readonly [number, number, number];
   if (clean.length === 3) {
-    const r = parseInt(clean[0] + clean[0], 16);
-    const g = parseInt(clean[1] + clean[1], 16);
-    const b = parseInt(clean[2] + clean[2], 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    tuple = [
+      parseInt(clean[0] + clean[0], 16) || 0,
+      parseInt(clean[1] + clean[1], 16) || 0,
+      parseInt(clean[2] + clean[2], 16) || 0,
+    ];
+  } else if (clean.length >= 6) {
+    tuple = [
+      parseInt(clean.slice(0, 2), 16) || 0,
+      parseInt(clean.slice(2, 4), 16) || 0,
+      parseInt(clean.slice(4, 6), 16) || 0,
+    ];
+  } else {
+    tuple = [34, 211, 238];
   }
-  if (clean.length === 6) {
-    const r = parseInt(clean.slice(0, 2), 16);
-    const g = parseInt(clean.slice(2, 4), 16);
-    const b = parseInt(clean.slice(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+
+  if (hexRgbCache.size > 256) hexRgbCache.clear();
+  hexRgbCache.set(hex, tuple);
+  return tuple;
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const clamped = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+  const qAlpha = Math.round(clamped * 255);
+  const cacheKey = `${hex}|${qAlpha}`;
+  const cached = rgbaStringCache.get(cacheKey);
+  if (cached) return cached;
+
+  const [r, g, b] = parseHexRgbTuple(hex);
+  const str = `rgba(${r}, ${g}, ${b}, ${(qAlpha / 255).toFixed(3)})`;
+  if (rgbaStringCache.size > 2048) rgbaStringCache.clear();
+  rgbaStringCache.set(cacheKey, str);
+  return str;
+}
+
+const particleSpriteCache = new Map<string, RenderCanvas>();
+const PARTICLE_SPRITE_SIZE = 48;
+const PARTICLE_SPRITE_BASE_R = 10;
+
+function getParticleSprite(
+  color: string,
+  shape: ParticleShape,
+  glowEnabled: boolean
+): RenderCanvas | null {
+  const key = `${shape}|${color}|${glowEnabled ? 1 : 0}`;
+  const existing = particleSpriteCache.get(key);
+  if (existing) return existing;
+
+  const sprite = createRenderCanvas(PARTICLE_SPRITE_SIZE, PARTICLE_SPRITE_SIZE);
+  const sCtx = getContext2d(sprite);
+  if (!sCtx) return null;
+
+  const half = PARTICLE_SPRITE_SIZE * 0.5;
+  sCtx.save();
+  sCtx.translate(half, half);
+  sCtx.fillStyle = color;
+  sCtx.strokeStyle = color;
+  if (glowEnabled) {
+    sCtx.shadowColor = color;
+    sCtx.shadowBlur = 9;
   }
-  return `rgba(34, 211, 238, ${alpha})`;
+
+  const r = PARTICLE_SPRITE_BASE_R;
+  sCtx.beginPath();
+  if (shape === 'circle') {
+    sCtx.arc(0, 0, r, 0, Math.PI * 2);
+    sCtx.fill();
+  } else if (shape === 'ring') {
+    sCtx.arc(0, 0, r * 1.1, 0, Math.PI * 2);
+    sCtx.lineWidth = Math.max(1.8, r * 0.42);
+    sCtx.stroke();
+  } else if (shape === 'square') {
+    const s = r * 1.65;
+    sCtx.rect(-s * 0.5, -s * 0.5, s, s);
+    sCtx.fill();
+  } else if (shape === 'diamond') {
+    const rx = r * 1.45;
+    const ry = r * 0.88;
+    sCtx.moveTo(rx, 0);
+    sCtx.lineTo(0, ry);
+    sCtx.lineTo(-rx, 0);
+    sCtx.lineTo(0, -ry);
+    sCtx.closePath();
+    sCtx.fill();
+  } else if (shape === 'triangle') {
+    sCtx.moveTo(r * 1.35, 0);
+    sCtx.lineTo(-r * 0.72 * 1.35, r * 0.78 * 1.35);
+    sCtx.lineTo(-r * 0.72 * 1.35, -r * 0.78 * 1.35);
+    sCtx.closePath();
+    sCtx.fill();
+  } else if (shape === 'star') {
+    const outerR = r * 1.35;
+    const innerR = outerR * 0.46;
+    for (let k = 0; k < 10; k++) {
+      const a = (k / 10) * Math.PI * 2;
+      const rr = k % 2 === 0 ? outerR : innerR;
+      const px = Math.cos(a) * rr;
+      const py = Math.sin(a) * rr;
+      if (k === 0) sCtx.moveTo(px, py);
+      else sCtx.lineTo(px, py);
+    }
+    sCtx.closePath();
+    sCtx.fill();
+  }
+  sCtx.restore();
+
+  if (particleSpriteCache.size > 64) particleSpriteCache.clear();
+  particleSpriteCache.set(key, sprite);
+  return sprite;
 }
 
 function drawParticleShape(
@@ -148,6 +251,8 @@ function drawParticleShape(
   vCtx.restore();
 }
 
+const wrapTextCache = new Map<string, string[]>();
+
 /**
  * Word-wraps text cleanly to never exceed maxWidth on narrow 9:16 or wide canvases
  */
@@ -156,6 +261,12 @@ export function wrapTextLines(
   text: string,
   maxWidth: number
 ): string[] {
+  const anyCtx = ctx as unknown as { letterSpacing?: string };
+  const lsKey = anyCtx.letterSpacing ?? '';
+  const cacheKey = `${ctx.font}|${lsKey}|${Math.round(maxWidth)}|${text}`;
+  const cached = wrapTextCache.get(cacheKey);
+  if (cached) return cached;
+
   const words = text.trim().split(/\s+/);
   if (words.length === 0 || (words.length === 1 && words[0] === '')) return [];
 
@@ -173,6 +284,9 @@ export function wrapTextLines(
     }
   }
   lines.push(currentLine);
+
+  if (wrapTextCache.size > 384) wrapTextCache.clear();
+  wrapTextCache.set(cacheKey, lines);
   return lines;
 }
 
@@ -284,24 +398,48 @@ function computeBands(frequencyData: Uint8Array, sensitivity: number) {
   return { bass, mid, treble };
 }
 
+const perceptualBinCache = new Map<
+  string,
+  { b0: Uint16Array; b1: Uint16Array }
+>();
+
 function getPerceptualBarValue(
   frequencyData: Uint8Array,
   index: number,
   total: number,
   sensitivity: number
 ): number {
-  const usableBins = Math.floor(frequencyData.length * 0.52);
-  const t0 = Math.pow(index / total, 1.45);
-  const t1 = Math.pow((index + 1) / total, 1.45);
-  const b0 = Math.min(usableBins - 1, Math.floor(t0 * usableBins));
-  const b1 = Math.max(b0 + 1, Math.min(usableBins, Math.ceil(t1 * usableBins)));
+  const usableBins = Math.max(1, Math.floor(frequencyData.length * 0.52));
+  const safeTotal = Math.max(1, total);
+  const safeIdx = index < 0 ? 0 : index >= safeTotal ? safeTotal - 1 : index;
 
+  const key = `${usableBins}:${safeTotal}`;
+  let table = perceptualBinCache.get(key);
+  if (!table) {
+    const b0Arr = new Uint16Array(safeTotal);
+    const b1Arr = new Uint16Array(safeTotal);
+    for (let i = 0; i < safeTotal; i++) {
+      const t0 = Math.pow(i / safeTotal, 1.45);
+      const t1 = Math.pow((i + 1) / safeTotal, 1.45);
+      const b0 = Math.min(usableBins - 1, Math.floor(t0 * usableBins));
+      const b1 = Math.max(b0 + 1, Math.min(usableBins, Math.ceil(t1 * usableBins)));
+      b0Arr[i] = b0;
+      b1Arr[i] = b1;
+    }
+    if (perceptualBinCache.size > 64) perceptualBinCache.clear();
+    table = { b0: b0Arr, b1: b1Arr };
+    perceptualBinCache.set(key, table);
+  }
+
+  const b0 = table.b0[safeIdx];
+  const b1 = table.b1[safeIdx];
   let sum = 0;
   for (let b = b0; b < b1; b++) {
     sum += frequencyData[b];
   }
   const avg = sum / Math.max(1, b1 - b0);
-  return Math.min(1, (avg / 255) * sensitivity);
+  const val = (avg / 255) * sensitivity;
+  return val > 1 ? 1 : val;
 }
 
 // Reusable offscreen scratch canvases for zero-GC iterative bloom blur passes, background caching & glitch FX
@@ -309,6 +447,8 @@ let bloomLayerCanvas: RenderCanvas | null = null;
 let bloomHalfCanvas: RenderCanvas | null = null;
 let bloomQuarterCanvas: RenderCanvas | null = null;
 let bloomEighthCanvas: RenderCanvas | null = null;
+let globalGlowQuarterCanvas: RenderCanvas | null = null;
+let globalGlowEighthCanvas: RenderCanvas | null = null;
 let glitchHoldCanvas: RenderCanvas | null = null;
 let glitchHoldHasFrame = false;
 let glitchWorkCanvas: RenderCanvas | null = null;
@@ -317,6 +457,20 @@ let sceneFromCanvas: RenderCanvas | null = null;
 let sceneToCanvas: RenderCanvas | null = null;
 let lyricFromCanvas: RenderCanvas | null = null;
 let lyricToCanvas: RenderCanvas | null = null;
+let scanlineSampleCanvas: RenderCanvas | null = null;
+let scanlineGapTileCanvas: RenderCanvas | null = null;
+let scanlineOverlayTileCanvas: RenderCanvas | null = null;
+let scanlineCachedKey = '';
+let scanlineSampleFrameCounter = 0;
+let scanlineLastLuma = { avgLuma: 0.32, peakLuma: 0.48 };
+const scanlinePatternCache = new WeakMap<
+  RenderContext2D,
+  { key: string; overlayPattern: CanvasPattern | null; gapPattern: CanvasPattern | null }
+>();
+
+let cachedBaseBgCanvas: RenderCanvas | null = null;
+let cachedBaseBgKey = '';
+let cachedBaseBgImageRef: RenderImageSource | null = null;
 
 let cachedBgCanvas: RenderCanvas | null = null;
 let cachedBgKey = '';
@@ -613,6 +767,306 @@ function renderBeatGlitchEffect(
   }
 }
 
+function sampleFrameVideoBrightness(
+  ctx: RenderContext2D,
+  beatBurst: number,
+  isExport: boolean
+): { avgLuma: number; peakLuma: number } {
+  if (isExport) {
+    scanlineSampleFrameCounter++;
+    if (scanlineSampleFrameCounter % 3 !== 1 && beatBurst < 0.72) {
+      return scanlineLastLuma;
+    }
+  }
+
+  const sampleSize = 8;
+  scanlineSampleCanvas = ensureScratchCanvas(
+    scanlineSampleCanvas,
+    sampleSize,
+    sampleSize
+  );
+  const sampleCtx = getContext2d(scanlineSampleCanvas, {
+    alpha: false,
+    willReadFrequently: true,
+  });
+  if (!sampleCtx) {
+    const fallback = Math.min(1, 0.28 + Math.max(0, Math.min(1, beatBurst)) * 0.45);
+    return { avgLuma: fallback, peakLuma: Math.min(1, fallback * 1.35) };
+  }
+
+  try {
+    sampleCtx.drawImage(ctx.canvas, 0, 0, sampleSize, sampleSize);
+    const { data } = sampleCtx.getImageData(0, 0, sampleSize, sampleSize);
+    let sumLuma = 0;
+    let peakLuma = 0;
+    const pixelCount = sampleSize * sampleSize;
+    for (let i = 0; i < data.length; i += 4) {
+      const luma =
+        (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+      sumLuma += luma;
+      if (luma > peakLuma) peakLuma = luma;
+    }
+    const result = {
+      avgLuma: sumLuma / pixelCount,
+      peakLuma,
+    };
+    scanlineLastLuma = result;
+    return result;
+  } catch {
+    const fallback = Math.min(1, 0.28 + Math.max(0, Math.min(1, beatBurst)) * 0.45);
+    return { avgLuma: fallback, peakLuma: Math.min(1, fallback * 1.35) };
+  }
+}
+
+function parseScanlineHexRgb(hex: string): { r: number; g: number; b: number } {
+  const [r, g, b] = parseHexRgbTuple(hex);
+  return { r, g, b };
+}
+
+function ensureCrtScanlineTiles(
+  linePitch: number,
+  tintColor: string,
+  isCustomColor: boolean
+): {
+  cacheKey: string;
+  gapTile: RenderCanvas;
+  overlayTile: RenderCanvas;
+} {
+  const cacheKey = `${linePitch}:${tintColor.toLowerCase()}:${isCustomColor ? '1' : '0'}`;
+  if (
+    scanlineGapTileCanvas &&
+    scanlineOverlayTileCanvas &&
+    scanlineCachedKey === cacheKey
+  ) {
+    return {
+      cacheKey,
+      gapTile: scanlineGapTileCanvas,
+      overlayTile: scanlineOverlayTileCanvas,
+    };
+  }
+
+  const { r, g, b } = parseScanlineHexRgb(tintColor);
+  const tileW = 3;
+  const gapH = Math.max(1, Math.round(linePitch * 0.42));
+  const scanH = Math.max(1, linePitch - gapH);
+
+  scanlineGapTileCanvas = ensureScratchCanvas(
+    scanlineGapTileCanvas,
+    tileW,
+    linePitch
+  );
+  const gapCtx = getContext2d(scanlineGapTileCanvas);
+  if (gapCtx) {
+    gapCtx.clearRect(0, 0, tileW, linePitch);
+    // Subtle colored phosphor sheen on active line + dark CRT raster gap below
+    gapCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${isCustomColor ? '0.14' : '0.05'})`;
+    gapCtx.fillRect(0, 0, tileW - 1, scanH);
+    gapCtx.fillStyle = 'rgba(4, 6, 14, 0.24)';
+    gapCtx.fillRect(tileW - 1, 0, 1, scanH);
+    gapCtx.fillStyle = `rgba(${Math.round(r * 0.05)}, ${Math.round(g * 0.05)}, ${Math.round(
+      b * 0.05
+    )}, 0.92)`;
+    gapCtx.fillRect(0, scanH, tileW, gapH);
+  }
+
+  scanlineOverlayTileCanvas = ensureScratchCanvas(
+    scanlineOverlayTileCanvas,
+    tileW,
+    linePitch
+  );
+  const ovCtx = getContext2d(scanlineOverlayTileCanvas);
+  if (ovCtx) {
+    ovCtx.clearRect(0, 0, tileW, linePitch);
+    if (isCustomColor) {
+      // Custom CRT phosphor tint across scanline row with bright center core
+      const coreR = Math.min(255, Math.round(r * 0.72 + 255 * 0.28));
+      const coreG = Math.min(255, Math.round(g * 0.72 + 255 * 0.28));
+      const coreB = Math.min(255, Math.round(b * 0.72 + 255 * 0.28));
+      ovCtx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.94)`;
+      ovCtx.fillRect(0, 0, 1, scanH);
+      ovCtx.fillStyle = `rgba(${coreR}, ${coreG}, ${coreB}, 0.96)`;
+      ovCtx.fillRect(1, 0, 1, scanH);
+      ovCtx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.94)`;
+      ovCtx.fillRect(2, 0, 1, scanH);
+    } else {
+      // Classic RGB phosphor triad subtly warmed toward active theme color
+      const mixR = (base: number) => Math.min(255, Math.round(base * 0.82 + r * 0.18));
+      const mixG = (base: number) => Math.min(255, Math.round(base * 0.82 + g * 0.18));
+      const mixB = (base: number) => Math.min(255, Math.round(base * 0.82 + b * 0.18));
+      ovCtx.fillStyle = `rgba(${mixR(255)}, ${mixG(224)}, ${mixB(224)}, 0.92)`;
+      ovCtx.fillRect(0, 0, 1, scanH);
+      ovCtx.fillStyle = `rgba(${mixR(224)}, ${mixG(255)}, ${mixB(232)}, 0.92)`;
+      ovCtx.fillRect(1, 0, 1, scanH);
+      ovCtx.fillStyle = `rgba(${mixR(224)}, ${mixG(236)}, ${mixB(255)}, 0.92)`;
+      ovCtx.fillRect(2, 0, 1, scanH);
+    }
+    // Darker inter-line valley in overlay contrast
+    ovCtx.fillStyle = `rgba(${Math.round(10 + r * 0.04)}, ${Math.round(
+      14 + g * 0.04
+    )}, ${Math.round(22 + b * 0.04)}, 0.88)`;
+    ovCtx.fillRect(0, scanH, tileW, gapH);
+  }
+
+  scanlineCachedKey = cacheKey;
+  return {
+    cacheKey,
+    gapTile: scanlineGapTileCanvas,
+    overlayTile: scanlineOverlayTileCanvas,
+  };
+}
+
+function renderGlobalGlowEffect(
+  ctx: RenderContext2D,
+  width: number,
+  height: number,
+  minDim: number,
+  globalGlowIntensity: number
+): void {
+  const glow = Math.max(0, Math.min(1, globalGlowIntensity));
+  if (glow <= 0.005) return;
+
+  const qW = Math.max(48, Math.round(width * 0.25));
+  const qH = Math.max(48, Math.round(height * 0.25));
+  const eW = Math.max(24, Math.round(width * 0.125));
+  const eH = Math.max(24, Math.round(height * 0.125));
+
+  globalGlowQuarterCanvas = ensureScratchCanvas(globalGlowQuarterCanvas, qW, qH);
+  const qCtx = getContext2d(globalGlowQuarterCanvas, { alpha: false });
+  if (!qCtx) return;
+
+  const qBlurPx = Math.max(2, Math.round(minDim * (0.0045 + glow * 0.0065)));
+  const brightPct = Math.round(88 + glow * 26);
+  const contrastPct = Math.round(118 + glow * 34);
+  const satPct = Math.round(112 + glow * 36);
+
+  qCtx.save();
+  qCtx.filter = `blur(${qBlurPx}px) brightness(${brightPct}%) contrast(${contrastPct}%) saturate(${satPct}%)`;
+  qCtx.drawImage(ctx.canvas, 0, 0, qW, qH);
+  qCtx.restore();
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = Math.min(0.72, glow * 0.56);
+  ctx.drawImage(globalGlowQuarterCanvas, 0, 0, width, height);
+
+  globalGlowEighthCanvas = ensureScratchCanvas(globalGlowEighthCanvas, eW, eH);
+  const eCtx = getContext2d(globalGlowEighthCanvas, { alpha: false });
+  if (eCtx) {
+    const eBlurPx = Math.max(2, Math.round(minDim * (0.006 + glow * 0.0085)));
+    eCtx.save();
+    eCtx.filter = `blur(${eBlurPx}px)`;
+    eCtx.drawImage(globalGlowQuarterCanvas, 0, 0, eW, eH);
+    eCtx.restore();
+
+    ctx.globalAlpha = Math.min(0.45, glow * 0.34);
+    ctx.drawImage(globalGlowEighthCanvas, 0, 0, width, height);
+  }
+  ctx.restore();
+}
+
+function renderCrtScanlineEffect(
+  ctx: RenderContext2D,
+  width: number,
+  height: number,
+  minDim: number,
+  currentTime: number,
+  scanlineIntensity: number,
+  scanlineColorSetting: string | undefined,
+  themePrimaryColor: string,
+  beatBurst: number,
+  isExport: boolean
+): void {
+  const intensity = Math.max(0, Math.min(1, scanlineIntensity));
+  if (intensity <= 0.005) return;
+
+  const rawColor =
+    typeof scanlineColorSetting === 'string' ? scanlineColorSetting.trim() : '';
+  const isCustomColor = /^#[0-9a-fA-F]{3,8}$/.test(rawColor);
+  const resolvedTint = isCustomColor ? rawColor : themePrimaryColor;
+  const { r, g, b } = parseScanlineHexRgb(resolvedTint);
+
+  const { avgLuma, peakLuma } = sampleFrameVideoBrightness(ctx, beatBurst, isExport);
+  // React scanline contrast, phosphor bloom & rolling refresh beam to real-time frame brightness
+  const brightnessDrive = Math.min(1, avgLuma * 0.72 + peakLuma * 0.45);
+  const linePitch = Math.max(3, Math.min(6, Math.round(minDim / 185)));
+  const { cacheKey, gapTile, overlayTile } = ensureCrtScanlineTiles(
+    linePitch,
+    resolvedTint,
+    isCustomColor
+  );
+
+  let patterns = scanlinePatternCache.get(ctx);
+  if (!patterns || patterns.key !== cacheKey) {
+    patterns = {
+      key: cacheKey,
+      overlayPattern: ctx.createPattern(overlayTile, 'repeat'),
+      gapPattern: ctx.createPattern(gapTile, 'repeat'),
+    };
+    scanlinePatternCache.set(ctx, patterns);
+  }
+
+  ctx.save();
+
+  // 1. Pixel-brightness-reactive phosphor triad & raster contrast ('overlay' preserves dark blacks & pops brights)
+  if (patterns.overlayPattern) {
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = Math.min(
+      0.76,
+      intensity * (0.28 + brightnessDrive * 0.46)
+    );
+    ctx.fillStyle = patterns.overlayPattern;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  // 2. Vintage CRT dark raster inter-line mask & subtle phosphor row tint (deepens crisply as frame luminance rises)
+  if (patterns.gapPattern) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = Math.min(
+      0.62,
+      intensity * ((isCustomColor ? 0.24 : 0.16) + brightnessDrive * 0.36)
+    );
+    ctx.fillStyle = patterns.gapPattern;
+    ctx.fillRect(0, 0, width, height);
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(2, 4, 10, ${(intensity * (0.14 + brightnessDrive * 0.28)).toFixed(3)})`;
+    const gapH = Math.max(1, Math.round(linePitch * 0.42));
+    for (let y = linePitch - gapH; y < height; y += linePitch) {
+      ctx.fillRect(0, y, width, gapH);
+    }
+  }
+
+  // 3. Subtle rolling CRT vertical retrace hum bar tinted with Scanline Color and reacting to bright frames
+  const bandH = Math.max(24, height * 0.11);
+  const sweepFrac = ((currentTime * 0.18) % 1.25) - 0.125;
+  const bandY = sweepFrac * height;
+  const bandGrad = ctx.createLinearGradient(0, bandY, 0, bandY + bandH);
+  const bandAlpha = intensity * ((isCustomColor ? 0.04 : 0.02) + brightnessDrive * 0.075);
+  bandGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0)`);
+  bandGrad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${bandAlpha.toFixed(3)})`);
+  bandGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = bandGrad;
+  ctx.fillRect(0, bandY, width, bandH);
+
+  // 4. Gentle CRT glass edge curvature vignette
+  const cx = width * 0.5;
+  const cy = height * 0.5;
+  const outerR = Math.hypot(cx, cy);
+  const tubeVig = ctx.createRadialGradient(cx, cy, outerR * 0.48, cx, cy, outerR);
+  tubeVig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  tubeVig.addColorStop(
+    1,
+    `rgba(2, 4, 10, ${Math.min(0.45, intensity * (0.28 - brightnessDrive * 0.08)).toFixed(3)})`
+  );
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = tubeVig;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.restore();
+}
+
 function createRenderCanvas(width: number, height: number): RenderCanvas {
   if (typeof document !== 'undefined') {
     const c = document.createElement('canvas');
@@ -668,16 +1122,47 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     mocapClip,
   } = params;
 
-  const cycledColors = rawSettings.autoCycleColor
-    ? resolveAutoCycledColors(rawSettings, currentTime, trackDuration)
-    : null;
-  const settings: StudioSettings = cycledColors
+  const hasGlobalHueRotation = Math.abs(rawSettings.globalHueRotation ?? 0) > 0.05;
+  const resolvedColors =
+    rawSettings.autoCycleColor || hasGlobalHueRotation
+      ? resolveAutoCycledColors(rawSettings, currentTime, trackDuration)
+      : null;
+  let settings: StudioSettings = resolvedColors
     ? {
         ...rawSettings,
-        primaryColor: cycledColors.primaryColor,
-        secondaryColor: cycledColors.secondaryColor,
+        primaryColor: resolvedColors.primaryColor,
+        secondaryColor: resolvedColors.secondaryColor,
+        bgColor: resolvedColors.bgColor,
+        ...(resolvedColors.danceRimColor !== undefined
+          ? { danceRimColor: resolvedColors.danceRimColor }
+          : {}),
+        ...(resolvedColors.scanlineColor !== undefined
+          ? { scanlineColor: resolvedColors.scanlineColor }
+          : {}),
       }
     : rawSettings;
+
+  const { bass, mid, treble } = computeBands(frequencyData, settings.sensitivity);
+  const beatBoost = settings.beatDetection ? beatBurst : 0;
+
+  if (settings.beatDetection && settings.beatColorMappingEnabled) {
+    const beatEnergy = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
+    const mapped = resolveBeatMappedColors({
+      lowColor: settings.beatColorLow ?? '#f43f5e',
+      midColor: settings.beatColorMid ?? '#a855f7',
+      highColor: settings.beatColorHigh ?? '#22d3ee',
+      bass,
+      mid,
+      treble,
+      beatEnergy,
+      hueShiftDeg: resolvedColors?.hueShiftDeg ?? (rawSettings.globalHueRotation ?? 0),
+    });
+    settings = {
+      ...settings,
+      primaryColor: mapped.primaryColor,
+      secondaryColor: mapped.secondaryColor,
+    };
+  }
 
   const minDim = Math.min(width, height);
   const isPortrait = height > width;
@@ -687,25 +1172,51 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   // 1. Background Fill & Optional Cover Image (cached across frames for fast export & 60fps playback)
   ctx.save();
 
-  // 1a. Bass Shake camera oscillation & subtle punch zoom on heavy beat hits
-  const shakeIntensity = Math.max(0, Math.min(1, settings.bassShake ?? 0));
+  // 1a. Bass Shake & Beat Shake camera transforms on detected beat hits
+  const bassShakeIntensity = Math.max(0, Math.min(1, settings.bassShake ?? 0));
+  const beatShakeIntensity = Math.max(0, Math.min(1, settings.beatShake ?? 0));
   const shakeImpulse = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
-  const shakeDrive =
-    shakeIntensity > 0.005 && shakeImpulse > 0.02
-      ? Math.pow(shakeImpulse, 1.35) * shakeIntensity
+  const bassShakeDrive =
+    bassShakeIntensity > 0.005 && shakeImpulse > 0.02
+      ? Math.pow(shakeImpulse, 1.35) * bassShakeIntensity
+      : 0;
+  const beatShakeDrive =
+    beatShakeIntensity > 0.005 && shakeImpulse > 0.02
+      ? Math.pow(shakeImpulse, 2.0) * beatShakeIntensity
       : 0;
 
   ctx.save();
-  if (shakeDrive > 0.002) {
-    const maxShift = minDim * 0.018 * shakeDrive;
-    const shakeX =
-      (Math.sin(currentTime * 47.0) * 0.65 + Math.cos(currentTime * 83.0) * 0.35) * maxShift;
-    const shakeY =
-      (Math.cos(currentTime * 53.0) * 0.65 + Math.sin(currentTime * 97.0) * 0.35) *
-      maxShift *
-      0.85;
-    const shakeRot = Math.sin(currentTime * 38.0) * 0.0085 * shakeDrive;
-    const shakeScale = 1 + 0.052 * shakeDrive;
+  if (bassShakeDrive > 0.002 || beatShakeDrive > 0.002) {
+    let shakeX = 0;
+    let shakeY = 0;
+    let shakeRot = 0;
+    let shakeScale = 1;
+
+    if (bassShakeDrive > 0.002) {
+      const maxShift = minDim * 0.018 * bassShakeDrive;
+      shakeX +=
+        (Math.sin(currentTime * 47.0) * 0.65 + Math.cos(currentTime * 83.0) * 0.35) * maxShift;
+      shakeY +=
+        (Math.cos(currentTime * 53.0) * 0.65 + Math.sin(currentTime * 97.0) * 0.35) *
+        maxShift *
+        0.85;
+      shakeRot += Math.sin(currentTime * 38.0) * 0.0085 * bassShakeDrive;
+      shakeScale += 0.052 * bassShakeDrive;
+    }
+
+    if (beatShakeDrive > 0.002) {
+      const maxBeatShift = minDim * 0.011 * beatShakeDrive;
+      shakeX +=
+        (Math.sin(currentTime * 137.0) * 0.55 + Math.cos(currentTime * 223.0) * 0.45) *
+        maxBeatShift;
+      shakeY +=
+        (Math.cos(currentTime * 163.0) * 0.55 + Math.sin(currentTime * 251.0) * 0.45) *
+        maxBeatShift *
+        0.9;
+      shakeRot += Math.sin(currentTime * 191.0) * 0.0042 * beatShakeDrive;
+      shakeScale += 0.024 * beatShakeDrive;
+    }
+
     ctx.translate(width * 0.5 + shakeX, height * 0.5 + shakeY);
     ctx.rotate(shakeRot);
     ctx.scale(shakeScale, shakeScale);
@@ -725,81 +1236,105 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
 
   const bgTintKey =
     bgTintStrength > 0 ? `${settings.primaryColor}|${settings.secondaryColor}` : 'no-tint';
-  const bgKey = `${width}x${height}|${settings.bgColor}|${settings.bgBlur}|${settings.bgDim}|${bgFit}|${bgScale}|${bgOffsetX}|${bgOffsetY}|${bgBrightness}|${bgContrast}|${bgSaturation}|${bgVignette}|${bgTintStrength}|${bgTintKey}|${bgDims ? `${bgDims.width}x${bgDims.height}` : 'none'}`;
+  const baseBgKey = `${width}x${height}|${settings.bgColor}|${settings.bgBlur}|${bgFit}|${bgScale}|${bgOffsetX}|${bgOffsetY}|${bgBrightness}|${bgContrast}|${bgSaturation}|${bgDims ? `${bgDims.width}x${bgDims.height}` : 'none'}`;
+  const bgKey = `${baseBgKey}|${settings.bgDim}|${bgVignette}|${bgTintStrength}|${bgTintKey}`;
 
   if (cachedBgCanvas && cachedBgKey === bgKey && cachedBgImageRef === bgImage) {
     ctx.drawImage(cachedBgCanvas, 0, 0, width, height);
   } else {
+    // Stage A: expensive blurred & tone-filtered photo is cached independently of auto-cycled tint colors
+    const hasBaseCache =
+      cachedBaseBgCanvas &&
+      cachedBaseBgKey === baseBgKey &&
+      cachedBaseBgImageRef === bgImage;
+
+    if (!hasBaseCache) {
+      cachedBaseBgCanvas = ensureScratchCanvas(cachedBaseBgCanvas, width, height);
+      const baseCtx = getContext2d(cachedBaseBgCanvas, { alpha: false });
+      if (baseCtx) {
+        baseCtx.fillStyle = settings.bgColor;
+        baseCtx.fillRect(0, 0, width, height);
+
+        if (bgDims && bgImage) {
+          const toneFilters: string[] = [];
+          if (Math.abs(bgBrightness - 1) > 0.01) {
+            toneFilters.push(`brightness(${Math.round(bgBrightness * 100)}%)`);
+          }
+          if (Math.abs(bgContrast - 1) > 0.01) {
+            toneFilters.push(`contrast(${Math.round(bgContrast * 100)}%)`);
+          }
+          if (Math.abs(bgSaturation - 1) > 0.01) {
+            toneFilters.push(`saturate(${Math.round(bgSaturation * 100)}%)`);
+          }
+
+          if (bgFit === 'contain-blur') {
+            const ambientBlur = Math.max(18, settings.bgBlur + 14);
+            baseCtx.save();
+            baseCtx.filter = [`blur(${ambientBlur}px)`, ...toneFilters].join(' ');
+            drawCoverImage(baseCtx, bgImage, width, height, ambientBlur * 1.6, 1.08, 0, 0);
+            baseCtx.restore();
+
+            baseCtx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.88, 0.32 + settings.bgDim * 0.6)})`;
+            baseCtx.fillRect(0, 0, width, height);
+
+            baseCtx.save();
+            const fgFilters = [
+              ...(settings.bgBlur > 0 ? [`blur(${Math.round(settings.bgBlur * 0.4)}px)`] : []),
+              ...toneFilters,
+            ];
+            if (fgFilters.length > 0) {
+              baseCtx.filter = fgFilters.join(' ');
+            }
+            drawContainFramedImage(baseCtx, bgImage, width, height, bgScale, bgOffsetX, bgOffsetY);
+            baseCtx.restore();
+          } else {
+            baseCtx.save();
+            const allFilters = [
+              ...(settings.bgBlur > 0 ? [`blur(${settings.bgBlur}px)`] : []),
+              ...toneFilters,
+            ];
+            if (allFilters.length > 0) {
+              baseCtx.filter = allFilters.join(' ');
+            }
+            if (bgFit === 'stretch') {
+              const overscan = settings.bgBlur * 1.6;
+              const sw = (width + overscan * 2) * bgScale;
+              const sh = (height + overscan * 2) * bgScale;
+              const sx = (width - sw) * 0.5 - (bgOffsetX / 100) * Math.max(0, sw - width);
+              const sy = (height - sh) * 0.5 - (bgOffsetY / 100) * Math.max(0, sh - height);
+              baseCtx.drawImage(bgImage, sx, sy, sw, sh);
+            } else {
+              drawCoverImage(
+                baseCtx,
+                bgImage,
+                width,
+                height,
+                settings.bgBlur * 1.6,
+                bgScale,
+                bgOffsetX,
+                bgOffsetY
+              );
+            }
+            baseCtx.restore();
+          }
+        }
+        cachedBaseBgKey = baseBgKey;
+        cachedBaseBgImageRef = bgImage;
+      }
+    }
+
+    // Stage B: composite fast tint/dim/vignette over cached base background
     cachedBgCanvas = ensureScratchCanvas(cachedBgCanvas, width, height);
     const bgCtx = getContext2d(cachedBgCanvas, { alpha: false });
     if (bgCtx) {
-      bgCtx.fillStyle = settings.bgColor;
-      bgCtx.fillRect(0, 0, width, height);
+      if (cachedBaseBgCanvas) {
+        bgCtx.drawImage(cachedBaseBgCanvas, 0, 0, width, height);
+      } else {
+        bgCtx.fillStyle = settings.bgColor;
+        bgCtx.fillRect(0, 0, width, height);
+      }
 
       if (bgDims && bgImage) {
-        const toneFilters: string[] = [];
-        if (Math.abs(bgBrightness - 1) > 0.01) {
-          toneFilters.push(`brightness(${Math.round(bgBrightness * 100)}%)`);
-        }
-        if (Math.abs(bgContrast - 1) > 0.01) {
-          toneFilters.push(`contrast(${Math.round(bgContrast * 100)}%)`);
-        }
-        if (Math.abs(bgSaturation - 1) > 0.01) {
-          toneFilters.push(`saturate(${Math.round(bgSaturation * 100)}%)`);
-        }
-
-        if (bgFit === 'contain-blur') {
-          // Ambient blurred fill behind crisp framed full photo
-          const ambientBlur = Math.max(18, settings.bgBlur + 14);
-          bgCtx.save();
-          bgCtx.filter = [`blur(${ambientBlur}px)`, ...toneFilters].join(' ');
-          drawCoverImage(bgCtx, bgImage, width, height, ambientBlur * 1.6, 1.08, 0, 0);
-          bgCtx.restore();
-
-          bgCtx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.88, 0.32 + settings.bgDim * 0.6)})`;
-          bgCtx.fillRect(0, 0, width, height);
-
-          bgCtx.save();
-          const fgFilters = [
-            ...(settings.bgBlur > 0 ? [`blur(${Math.round(settings.bgBlur * 0.4)}px)`] : []),
-            ...toneFilters,
-          ];
-          if (fgFilters.length > 0) {
-            bgCtx.filter = fgFilters.join(' ');
-          }
-          drawContainFramedImage(bgCtx, bgImage, width, height, bgScale, bgOffsetX, bgOffsetY);
-          bgCtx.restore();
-        } else {
-          bgCtx.save();
-          const allFilters = [
-            ...(settings.bgBlur > 0 ? [`blur(${settings.bgBlur}px)`] : []),
-            ...toneFilters,
-          ];
-          if (allFilters.length > 0) {
-            bgCtx.filter = allFilters.join(' ');
-          }
-          if (bgFit === 'stretch') {
-            const overscan = settings.bgBlur * 1.6;
-            const sw = (width + overscan * 2) * bgScale;
-            const sh = (height + overscan * 2) * bgScale;
-            const sx = (width - sw) * 0.5 - (bgOffsetX / 100) * Math.max(0, sw - width);
-            const sy = (height - sh) * 0.5 - (bgOffsetY / 100) * Math.max(0, sh - height);
-            bgCtx.drawImage(bgImage, sx, sy, sw, sh);
-          } else {
-            drawCoverImage(
-              bgCtx,
-              bgImage,
-              width,
-              height,
-              settings.bgBlur * 1.6,
-              bgScale,
-              bgOffsetX,
-              bgOffsetY
-            );
-          }
-          bgCtx.restore();
-        }
-
         if (bgTintStrength > 0.005) {
           bgCtx.save();
           const tintGrad = bgCtx.createLinearGradient(0, 0, width, height);
@@ -822,7 +1357,6 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
           bgCtx.fillRect(0, 0, width, height);
         }
       } else {
-        // Subtle atmospheric radial gradient behind visualizer so solid backgrounds feel deep
         const ambient = bgCtx.createRadialGradient(
           width * 0.5,
           height * 0.48,
@@ -980,9 +1514,6 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     }
   }
 
-  const { bass, mid, treble } = computeBands(frequencyData, settings.sensitivity);
-  const beatBoost = settings.beatDetection ? beatBurst : 0;
-
   // Advance album rotation subtly with bass, and 3D cube rotation scaled by beat intensity
   const cubeSpeedMult = 1 + beatBoost * 3.4 + bass * 0.95;
   if (albumRotationRef) {
@@ -1003,6 +1534,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   const linW = (width - safePadX * 2) * linearSpanFactor;
   const linPadX = (width - linW) * 0.5;
   const bloom = Math.max(0, Math.min(1.5, settings.bloomIntensity ?? 0));
+  const globalGlow = Math.max(0, Math.min(1, settings.globalGlow ?? 0));
   const isCircularModeFor = (mode: VisualizerMode) =>
     mode === 'circular-ring' || mode === 'hybrid-particles' || mode === 'harmonic-orb';
 
@@ -1025,10 +1557,11 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         : height * 0.45
       : visCenterY;
     const enableElemShadow = bloom <= 0.005;
+    const glowShadowScale = 1 + globalGlow * 0.65;
     const applyShadow = (color: string, blurPx: number) => {
       if (enableElemShadow) {
         vCtx.shadowColor = color;
-        vCtx.shadowBlur = blurPx;
+        vCtx.shadowBlur = blurPx * glowShadowScale;
       } else {
         vCtx.shadowBlur = 0;
       }
@@ -1060,8 +1593,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.arc(width * 0.5, burstCenterY, sw.radius, 0, Math.PI * 2);
         vCtx.strokeStyle = hexToRgba(sw.color, sw.alpha * 0.72);
         vCtx.lineWidth = Math.max(1.5, minDim * 0.004 * (sw.alpha + 0.25));
-        vCtx.shadowColor = sw.color;
-        vCtx.shadowBlur = minDim * 0.02;
+        applyShadow(sw.color, minDim * 0.02);
         vCtx.stroke();
       }
       vCtx.restore();
@@ -1208,9 +1740,13 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       }
     }
 
-    // Draw active particles with selected ParticleShape
+    // Draw active particles using pre-rendered glow sprites (eliminates up to 240 Gaussian shadow blurs per frame)
     if (particles.length > 0) {
       vCtx.save();
+      const spriteSizeRatio = PARTICLE_SPRITE_SIZE / (PARTICLE_SPRITE_BASE_R * 2);
+      const isRotatedShape =
+        particleShape !== 'circle' && particleShape !== 'ring';
+
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         const lifeProgress = Math.max(0, Math.min(1, p.life / Math.max(0.05, p.maxLife)));
@@ -1218,13 +1754,36 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         const alpha = (1 - lifeProgress) * fadeIn * 0.88;
         if (alpha <= 0.01) continue;
         const r = Math.max(1, p.radius * (1 - lifeProgress * 0.35));
-        const speedMag = Math.hypot(p.vx, p.vy);
-        const angle = speedMag > 4 ? Math.atan2(p.vy, p.vx) : p.life * 2.4;
-        const colorRgba = hexToRgba(p.color, alpha);
-        vCtx.fillStyle = colorRgba;
-        vCtx.strokeStyle = colorRgba;
-        applyShadow(p.color, minDim * 0.014);
-        drawParticleShape(vCtx, p.x, p.y, r, angle, particleShape);
+        const sprite = getParticleSprite(p.color, particleShape, enableElemShadow);
+
+        if (sprite) {
+          const drawSize = r * 2 * spriteSizeRatio;
+          vCtx.globalAlpha = alpha;
+          if (isRotatedShape) {
+            const speedMag = Math.hypot(p.vx, p.vy);
+            const angle = speedMag > 4 ? Math.atan2(p.vy, p.vx) : p.life * 2.4;
+            vCtx.save();
+            vCtx.translate(p.x, p.y);
+            vCtx.rotate(angle);
+            vCtx.drawImage(sprite, -drawSize * 0.5, -drawSize * 0.5, drawSize, drawSize);
+            vCtx.restore();
+          } else {
+            vCtx.drawImage(
+              sprite,
+              p.x - drawSize * 0.5,
+              p.y - drawSize * 0.5,
+              drawSize,
+              drawSize
+            );
+          }
+        } else {
+          const speedMag = Math.hypot(p.vx, p.vy);
+          const angle = speedMag > 4 ? Math.atan2(p.vy, p.vx) : p.life * 2.4;
+          const colorRgba = hexToRgba(p.color, alpha);
+          vCtx.fillStyle = colorRgba;
+          vCtx.strokeStyle = colorRgba;
+          drawParticleShape(vCtx, p.x, p.y, r, angle, particleShape);
+        }
       }
       vCtx.restore();
     }
@@ -1246,12 +1805,13 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.fillStyle = grad;
       applyShadow(hexToRgba(settings.primaryColor, 0.55 + beatBoost * 0.35), minDim * (0.018 + beatBoost * 0.015));
 
-      // Subtle center horizon line
-      vCtx.fillRect(linPadX, visCenterY - 1, totalW, 2);
-
+      // Subtle center horizon line + batched bars in a single fill pass
+      vCtx.beginPath();
+      vCtx.rect(linPadX, visCenterY - 1, totalW, 2);
+      const barHalfBase = (step - barW) * 0.5;
+      const halfCenter = (barCount - 1) * 0.5;
       for (let i = 0; i < barCount; i++) {
-        // Symmetrical spectrum from center outward looks balanced across 16:9, 9:16, 1:1
-        const mirrorIdx = Math.abs(i - (barCount - 1) / 2) / ((barCount - 1) / 2);
+        const mirrorIdx = Math.abs(i - halfCenter) / Math.max(1, halfCenter);
         const val = getPerceptualBarValue(
           frequencyData,
           Math.floor(mirrorIdx * (barCount * 0.72)),
@@ -1259,14 +1819,12 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
           settings.sensitivity
         );
         const h = Math.max(4, Math.pow(val, 1.15) * maxHalfH);
-        const x = linPadX + i * step + (step - barW) * 0.5;
+        const x = linPadX + i * step + barHalfBase;
         const y = visCenterY - h;
-        const radius = Math.min(barW / 2, h);
-
-        vCtx.beginPath();
+        const radius = Math.min(barW * 0.5, h);
         vCtx.roundRect(x, y, barW, h * 2, radius);
-        vCtx.fill();
       }
+      vCtx.fill();
       vCtx.restore();
     } else if (mode === 'neon-wave') {
       const waveWidth = linW;
@@ -1310,8 +1868,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.lineWidth = lineWidth;
         vCtx.lineCap = 'round';
         vCtx.lineJoin = 'round';
-        vCtx.shadowColor = hexToRgba(color, 0.75 + beatBoost * 0.25);
-        vCtx.shadowBlur = minDim * (0.025 + beatBoost * 0.015);
+        applyShadow(hexToRgba(color, 0.75 + beatBoost * 0.25), minDim * (0.025 + beatBoost * 0.015));
         vCtx.stroke();
 
         if (fillUnder) {
@@ -1424,8 +1981,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.strokeStyle = hexToRgba(color, 0.94);
         vCtx.lineWidth = Math.max(2, minDim * 0.0042);
         vCtx.lineCap = 'round';
-        vCtx.shadowColor = color;
-        vCtx.shadowBlur = minDim * (0.022 + beatBoost * 0.015);
+        applyShadow(color, minDim * (0.022 + beatBoost * 0.015));
         vCtx.stroke();
         vCtx.restore();
       };
@@ -1449,7 +2005,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.fillRect(linPadX, visCenterY - 1, spanW, 2);
       vCtx.restore();
     } else if (mode === 'led-matrix') {
-      // Segmented LED Spectrum: studio hardware meter bricks with peak-hold cap blocks & floor reflection
+      // Segmented LED Spectrum: batched by tier/color for crisp hardware meter bricks with minimal draw calls
       const cols = Math.max(20, Math.min(56, Math.round(settings.barCount * 0.48)));
       const totalW = linW;
       const colStep = totalW / cols;
@@ -1463,57 +2019,81 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       const cellRadius = Math.max(1.5, Math.min(4, cellH * 0.28));
 
       vCtx.save();
-      // Sleek hardware baseline rail
       vCtx.fillStyle = hexToRgba(settings.primaryColor, 0.38);
       vCtx.fillRect(linPadX, baseLineY, totalW, Math.max(2, minDim * 0.0028));
 
+      const litCols = new Uint8Array(cols);
+      const peakCols = new Uint8Array(cols);
+      const colX = new Float32Array(cols);
       for (let c = 0; c < cols; c++) {
-        // Center-focused perceptual symmetry or left-to-right rack meter
         const val = getPerceptualBarValue(frequencyData, c, cols, settings.sensitivity);
         const litRows = Math.max(1, Math.min(rows, Math.round(Math.pow(val, 1.05) * rows)));
-        const peakRow = Math.min(
-          rows - 1,
-          Math.max(litRows, Math.round(Math.min(1, val * 1.12 + 0.08) * rows))
-        );
-        const x = linPadX + c * colStep + (colStep - cellW) * 0.5;
+        const peakRow =
+          val > 0.06
+            ? Math.min(rows - 1, Math.max(litRows, Math.round(Math.min(1, val * 1.12 + 0.08) * rows)))
+            : 255;
+        litCols[c] = litRows;
+        peakCols[c] = peakRow;
+        colX[c] = linPadX + c * colStep + (colStep - cellW) * 0.5;
+      }
 
-        for (let r = 0; r < rows; r++) {
+      // 1. Batch all unlit sockets in a single fill
+      vCtx.fillStyle = 'rgba(255, 255, 255, 0.045)';
+      vCtx.beginPath();
+      for (let c = 0; c < cols; c++) {
+        const x = colX[c];
+        const litRows = litCols[c];
+        const peakRow = peakCols[c];
+        for (let r = litRows; r < rows; r++) {
+          if (r === peakRow) continue;
           const y = baseLineY - (r + 1) * rowStep + (rowStep - cellH) * 0.5;
-          const heightRatio = r / Math.max(1, rows - 1);
-          const tierColor =
-            heightRatio > 0.62 ? settings.secondaryColor : settings.primaryColor;
+          vCtx.roundRect(x, y, cellW, cellH, cellRadius);
+        }
+      }
+      vCtx.fill();
 
-          if (r < litRows) {
-            vCtx.fillStyle = hexToRgba(tierColor, 0.72 + heightRatio * 0.28);
-            vCtx.beginPath();
-            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
-            vCtx.fill();
-          } else if (r === peakRow && val > 0.06) {
-            // Detached luminous peak-hold brick
-            vCtx.fillStyle = hexToRgba('#ffffff', 0.88);
-            vCtx.beginPath();
-            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
-            vCtx.fill();
-          } else {
-            // Unlit recessed LED socket
-            vCtx.fillStyle = 'rgba(255, 255, 255, 0.045)';
-            vCtx.beginPath();
-            vCtx.roundRect(x, y, cellW, cellH, cellRadius);
-            vCtx.fill();
+      // 2. Batch all peak-hold bricks in a single fill
+      vCtx.fillStyle = hexToRgba('#ffffff', 0.88);
+      vCtx.beginPath();
+      for (let c = 0; c < cols; c++) {
+        const peakRow = peakCols[c];
+        if (peakRow >= rows || peakRow < litCols[c]) continue;
+        const y = baseLineY - (peakRow + 1) * rowStep + (rowStep - cellH) * 0.5;
+        vCtx.roundRect(colX[c], y, cellW, cellH, cellRadius);
+      }
+      vCtx.fill();
+
+      // 3. Batch lit rows by row tier (each row shares exact same color & alpha across all columns)
+      for (let r = 0; r < rows; r++) {
+        const heightRatio = r / Math.max(1, rows - 1);
+        const tierColor = heightRatio > 0.62 ? settings.secondaryColor : settings.primaryColor;
+        const y = baseLineY - (r + 1) * rowStep + (rowStep - cellH) * 0.5;
+        vCtx.fillStyle = hexToRgba(tierColor, 0.72 + heightRatio * 0.28);
+        vCtx.beginPath();
+        let anyLit = false;
+        for (let c = 0; c < cols; c++) {
+          if (r < litCols[c]) {
+            vCtx.roundRect(colX[c], y, cellW, cellH, cellRadius);
+            anyLit = true;
           }
         }
+        if (anyLit) vCtx.fill();
+      }
 
-        // Subtle console reflection below rail (top 4 mirrored bricks)
-        const reflectRows = Math.min(4, litRows);
-        for (let rr = 0; rr < reflectRows; rr++) {
-          const ry = baseLineY + 5 + rr * rowStep;
-          const rAlpha = (1 - rr / 4) * 0.22;
-          vCtx.shadowBlur = 0;
-          vCtx.fillStyle = hexToRgba(settings.primaryColor, rAlpha);
-          vCtx.beginPath();
-          vCtx.roundRect(x, ry, cellW, cellH, cellRadius);
-          vCtx.fill();
+      // 4. Batch console reflection rows (4 rows total)
+      for (let rr = 0; rr < 4; rr++) {
+        const ry = baseLineY + 5 + rr * rowStep;
+        const rAlpha = (1 - rr / 4) * 0.22;
+        vCtx.fillStyle = hexToRgba(settings.primaryColor, rAlpha);
+        vCtx.beginPath();
+        let anyRefl = false;
+        for (let c = 0; c < cols; c++) {
+          if (rr < litCols[c]) {
+            vCtx.roundRect(colX[c], ry, cellW, cellH, cellRadius);
+            anyRefl = true;
+          }
         }
+        if (anyRefl) vCtx.fill();
       }
       vCtx.restore();
     } else if (mode === 'stereo-prism') {
@@ -1526,29 +2106,26 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         (isPortrait ? height * 0.16 : height * 0.24) * visScale * (1 + beatBoost * 0.2);
 
       vCtx.save();
-      // Background perspective floor rays anchored beneath horizon
       const floorDepth = (isPortrait ? height * 0.14 : height * 0.2) * visScale;
       const rayCount = 11;
       vCtx.strokeStyle = hexToRgba(settings.secondaryColor, 0.18 + bass * 0.16);
       vCtx.lineWidth = Math.max(1, minDim * 0.0018);
+      vCtx.beginPath();
       for (let r = 0; r < rayCount; r++) {
         const t = r / (rayCount - 1) - 0.5;
         const topX = width * 0.5 + t * (spanW * 0.34);
         const botX = width * 0.5 + t * (spanW * 1.25);
-        vCtx.beginPath();
         vCtx.moveTo(topX, visCenterY);
         vCtx.lineTo(botX, visCenterY + floorDepth);
-        vCtx.stroke();
       }
       const floorPadX = Math.max(0, linPadX * 0.7);
       for (let hLine = 1; hLine <= 4; hLine++) {
         const p = Math.pow(hLine / 4, 1.55);
         const ly = visCenterY + p * floorDepth;
-        vCtx.beginPath();
         vCtx.moveTo(floorPadX, ly);
         vCtx.lineTo(width - floorPadX, ly);
-        vCtx.stroke();
       }
+      vCtx.stroke();
 
       // Luminous center prism halo
       const coreR = minDim * (0.065 + bass * 0.025 + beatBoost * 0.02) * visScale;
@@ -1568,36 +2145,48 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.arc(width * 0.5, visCenterY, coreR * 2.2, 0, Math.PI * 2);
       vCtx.fill();
 
-      // Symmetrical diamond/prism blades
+      // Batched symmetrical diamond/prism blades using a single vertical gradient & 2 shadow groups
       const bladeHalfW = Math.max(2, step * 0.42);
-      for (let i = 0; i < bladeCount; i++) {
-        const distFromCenter = Math.abs(i - (bladeCount - 1) / 2) / Math.max(1, halfBlades);
-        const val = getPerceptualBarValue(
-          frequencyData,
-          Math.floor(distFromCenter * (bladeCount * 0.65)),
-          bladeCount,
-          settings.sensitivity
-        );
-        const bladeH = Math.max(minDim * 0.014, Math.pow(val, 1.12) * maxSpikeH);
-        const cx = linPadX + i * step + step * 0.5;
+      const bladeGrad = vCtx.createLinearGradient(
+        0,
+        visCenterY - maxSpikeH,
+        0,
+        visCenterY + maxSpikeH * 0.72
+      );
+      bladeGrad.addColorStop(0, settings.secondaryColor);
+      bladeGrad.addColorStop(0.58, settings.primaryColor);
+      bladeGrad.addColorStop(1, settings.secondaryColor);
+      vCtx.fillStyle = bladeGrad;
 
-        const bladeGrad = vCtx.createLinearGradient(0, visCenterY - bladeH, 0, visCenterY + bladeH);
-        bladeGrad.addColorStop(0, settings.secondaryColor);
-        bladeGrad.addColorStop(0.5, settings.primaryColor);
-        bladeGrad.addColorStop(1, settings.secondaryColor);
-
-        vCtx.fillStyle = bladeGrad;
-        vCtx.shadowColor = distFromCenter < 0.35 ? settings.primaryColor : settings.secondaryColor;
-        vCtx.shadowBlur = minDim * (0.015 + beatBoost * 0.012);
-
-        // Diamond / tapered prism shard silhouette
+      const bladeGlow = minDim * (0.015 + beatBoost * 0.012);
+      for (const isInnerGroup of [false, true]) {
         vCtx.beginPath();
-        vCtx.moveTo(cx, visCenterY - bladeH);
-        vCtx.lineTo(cx + bladeHalfW, visCenterY);
-        vCtx.lineTo(cx, visCenterY + bladeH * 0.72);
-        vCtx.lineTo(cx - bladeHalfW, visCenterY);
-        vCtx.closePath();
-        vCtx.fill();
+        let anyInGroup = false;
+        for (let i = 0; i < bladeCount; i++) {
+          const distFromCenter = Math.abs(i - (bladeCount - 1) / 2) / Math.max(1, halfBlades);
+          if ((distFromCenter < 0.35) !== isInnerGroup) continue;
+          const val = getPerceptualBarValue(
+            frequencyData,
+            Math.floor(distFromCenter * (bladeCount * 0.65)),
+            bladeCount,
+            settings.sensitivity
+          );
+          const bladeH = Math.max(minDim * 0.014, Math.pow(val, 1.12) * maxSpikeH);
+          const cx = linPadX + i * step + step * 0.5;
+          vCtx.moveTo(cx, visCenterY - bladeH);
+          vCtx.lineTo(cx + bladeHalfW, visCenterY);
+          vCtx.lineTo(cx, visCenterY + bladeH * 0.72);
+          vCtx.lineTo(cx - bladeHalfW, visCenterY);
+          vCtx.closePath();
+          anyInGroup = true;
+        }
+        if (anyInGroup) {
+          applyShadow(
+            isInnerGroup ? settings.primaryColor : settings.secondaryColor,
+            bladeGlow
+          );
+          vCtx.fill();
+        }
       }
 
       // Crisp horizon beam
@@ -1605,8 +2194,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       beamGrad.addColorStop(0, 'rgba(255,255,255,0)');
       beamGrad.addColorStop(0.5, '#ffffff');
       beamGrad.addColorStop(1, 'rgba(255,255,255,0)');
-      vCtx.shadowColor = settings.primaryColor;
-      vCtx.shadowBlur = minDim * 0.02;
+      applyShadow(settings.primaryColor, minDim * 0.02);
       vCtx.fillStyle = beamGrad;
       vCtx.fillRect(linPadX, visCenterY - 1.2, spanW, 2.4);
       vCtx.restore();
@@ -1651,8 +2239,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.closePath();
         vCtx.strokeStyle = hexToRgba(color, alpha);
         vCtx.lineWidth = lineW;
-        vCtx.shadowColor = color;
-        vCtx.shadowBlur = minDim * 0.016;
+        applyShadow(color, minDim * 0.016);
         vCtx.stroke();
         vCtx.restore();
       };
@@ -1725,8 +2312,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         }
         vCtx.strokeStyle = hexToRgba(color, 0.92);
         vCtx.lineWidth = lineW;
-        vCtx.shadowColor = color;
-        vCtx.shadowBlur = minDim * (0.02 + beatBoost * 0.015);
+        applyShadow(color, minDim * (0.02 + beatBoost * 0.015));
         vCtx.stroke();
         vCtx.restore();
       };
@@ -1748,24 +2334,25 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         0.13
       );
 
-      // Orbiting frequency beads along outer halo
+      // Orbiting frequency beads along outer halo (batched into 2 paths)
       const nodeCount = Math.max(12, Math.min(36, Math.round(settings.barCount * 0.3)));
       vCtx.save();
-      for (let n = 0; n < nodeCount; n++) {
-        const sym = n < nodeCount / 2 ? n : nodeCount - 1 - n;
-        const val = getPerceptualBarValue(frequencyData, sym, Math.max(8, nodeCount / 2), settings.sensitivity);
-        const angle = (n / nodeCount) * Math.PI * 2 + currentTime * 0.42;
-        const dist = baseRadius + outerReach * (0.48 + val * 0.68);
-        const nx = cx + Math.cos(angle) * dist;
-        const ny = cy + Math.sin(angle) * dist;
-        const nodeR = Math.max(2, minDim * (0.0032 + val * 0.0055));
-        const nodeColor = n % 2 === 0 ? settings.primaryColor : settings.secondaryColor;
-
+      for (const parity of [0, 1]) {
+        const nodeColor = parity === 0 ? settings.primaryColor : settings.secondaryColor;
         vCtx.beginPath();
-        vCtx.arc(nx, ny, nodeR, 0, Math.PI * 2);
+        for (let n = parity; n < nodeCount; n += 2) {
+          const sym = n < nodeCount / 2 ? n : nodeCount - 1 - n;
+          const val = getPerceptualBarValue(frequencyData, sym, Math.max(8, nodeCount / 2), settings.sensitivity);
+          const angle = (n / nodeCount) * Math.PI * 2 + currentTime * 0.42;
+          const dist = baseRadius + outerReach * (0.48 + val * 0.68);
+          const nx = cx + Math.cos(angle) * dist;
+          const ny = cy + Math.sin(angle) * dist;
+          const nodeR = Math.max(2, minDim * (0.0032 + val * 0.0055));
+          vCtx.moveTo(nx + nodeR, ny);
+          vCtx.arc(nx, ny, nodeR, 0, Math.PI * 2);
+        }
         vCtx.fillStyle = hexToRgba(nodeColor, 0.85);
-        vCtx.shadowColor = nodeColor;
-        vCtx.shadowBlur = minDim * 0.014;
+        applyShadow(nodeColor, minDim * 0.014);
         vCtx.fill();
       }
       vCtx.restore();
@@ -1776,8 +2363,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.arc(cx, cy, circularArtRadius, 0, Math.PI * 2);
       vCtx.strokeStyle = hexToRgba(settings.primaryColor, 0.78);
       vCtx.lineWidth = Math.max(2, minDim * 0.0038);
-      vCtx.shadowColor = settings.primaryColor;
-      vCtx.shadowBlur = minDim * 0.015;
+      applyShadow(settings.primaryColor, minDim * 0.015);
       vCtx.stroke();
       vCtx.restore();
     } else if (mode === 'cube-3d') {
@@ -1857,8 +2443,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.save();
       vCtx.strokeStyle = hexToRgba(settings.secondaryColor, 0.45 + treble * 0.35);
       vCtx.lineWidth = Math.max(1.2, minDim * 0.0024);
-      vCtx.shadowColor = settings.secondaryColor;
-      vCtx.shadowBlur = minDim * 0.014;
+      applyShadow(settings.secondaryColor, minDim * 0.014);
       vCtx.beginPath();
       for (const [a, b] of coreEdges) {
         vCtx.moveTo(coreProj[a].x, coreProj[a].y);
@@ -2021,8 +2606,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
           minDim * (isFrontFacing ? 0.0038 + bandVal * 0.0026 : 0.002)
         );
         vCtx.lineJoin = 'round';
-        vCtx.shadowColor = faceColor;
-        vCtx.shadowBlur = minDim * (isFrontFacing ? 0.018 + beatBoost * 0.015 : 0.006);
+        applyShadow(faceColor, minDim * (isFrontFacing ? 0.018 + beatBoost * 0.015 : 0.006));
         vCtx.stroke();
 
         // Luminous vertex nodes on front-facing panels
@@ -2130,29 +2714,53 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         vCtx.stroke();
         vCtx.restore();
 
-        // Frequency-scaled glowing star nodes along each arm
+        // Frequency-scaled glowing star nodes along each arm (batched by color & alpha tier)
         vCtx.save();
+        const starAlphas = [0.55, 0.78, 0.98];
+        const starBuckets: Array<Array<{ x: number; y: number; r: number }>> = [
+          [], [], [], [], [], [],
+        ];
+        const whiteCores: Array<{ x: number; y: number; r: number }> = [];
         for (let i = 0; i < pts.length; i++) {
           const p = pts[i];
           const nodeR = Math.max(
             1.6,
             minDim * (0.0022 + Math.pow(p.val, 1.35) * 0.0075) * (1 - p.t * 0.25)
           );
-          const nodeColor =
-            p.t < 0.45 ? settings.primaryColor : settings.secondaryColor;
-          vCtx.beginPath();
-          vCtx.arc(p.x, p.y, nodeR, 0, Math.PI * 2);
-          vCtx.fillStyle = hexToRgba(nodeColor, 0.45 + p.val * 0.55);
-          applyShadow(nodeColor, minDim * 0.012);
-          vCtx.fill();
-
+          const colorIdx = p.t < 0.45 ? 0 : 1;
+          const tier = p.val > 0.66 ? 2 : p.val > 0.33 ? 1 : 0;
+          starBuckets[colorIdx * 3 + tier].push({ x: p.x, y: p.y, r: nodeR });
           if (p.val > 0.58) {
+            whiteCores.push({ x: p.x, y: p.y, r: nodeR * 0.42 });
+          }
+        }
+        const starGlowBlur = minDim * 0.012;
+        for (let cIdx = 0; cIdx < 2; cIdx++) {
+          const nodeColor = cIdx === 0 ? settings.primaryColor : settings.secondaryColor;
+          applyShadow(nodeColor, starGlowBlur);
+          for (let tier = 0; tier < 3; tier++) {
+            const list = starBuckets[cIdx * 3 + tier];
+            if (list.length === 0) continue;
+            vCtx.fillStyle = hexToRgba(nodeColor, starAlphas[tier]);
             vCtx.beginPath();
-            vCtx.arc(p.x, p.y, nodeR * 0.42, 0, Math.PI * 2);
-            vCtx.fillStyle = 'rgba(255,255,255,0.88)';
-            vCtx.shadowBlur = 0;
+            for (let k = 0; k < list.length; k++) {
+              const s = list[k];
+              vCtx.moveTo(s.x + s.r, s.y);
+              vCtx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+            }
             vCtx.fill();
           }
+        }
+        if (whiteCores.length > 0) {
+          vCtx.shadowBlur = 0;
+          vCtx.fillStyle = 'rgba(255,255,255,0.88)';
+          vCtx.beginPath();
+          for (let k = 0; k < whiteCores.length; k++) {
+            const wc = whiteCores[k];
+            vCtx.moveTo(wc.x + wc.r, wc.y);
+            vCtx.arc(wc.x, wc.y, wc.r, 0, Math.PI * 2);
+          }
+          vCtx.fill();
         }
         vCtx.restore();
       }
@@ -2163,8 +2771,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.arc(cx, cy, innerCoreR, 0, Math.PI * 2);
       vCtx.strokeStyle = hexToRgba(settings.primaryColor, 0.72 + treble * 0.25);
       vCtx.lineWidth = Math.max(1.8, minDim * 0.0034);
-      vCtx.shadowColor = settings.primaryColor;
-      vCtx.shadowBlur = minDim * 0.016;
+      applyShadow(settings.primaryColor, minDim * 0.016);
       vCtx.stroke();
 
       vCtx.beginPath();
@@ -2644,7 +3251,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         0.95
       );
     } else if (mode === 'rain-matrix') {
-      // Digital Rain Waterfall: cascading spectrum-synced neon columns
+      // Digital Rain Waterfall: cascading spectrum-synced neon columns (batched per color/alpha tier)
       const colCount = Math.max(24, Math.min(64, Math.round(settings.barCount * 0.6)));
       const spanW = linW;
       const colStep = spanW / colCount;
@@ -2653,18 +3260,24 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       const topY = visCenterY - areaH * 0.5;
       const dropSegs = 12;
       const glyphStepY = areaH / 18;
+      const segH = Math.max(2.5, glyphStepY * 0.62);
+      const segRadius = Math.min(3, glyphW * 0.35);
 
-      vCtx.save();
+      const headBuckets: Array<Array<{ x: number; y: number }>> = [[], []];
+      const tailAlphas = [0.22, 0.45, 0.68, 0.9];
+      // 2 colors (0=primary, 1=secondary) x 4 alpha tiers = 8 buckets max
+      const tailBuckets: Array<Array<{ x: number; y: number }>> = [
+        [], [], [], [], [], [], [], [],
+      ];
+
       for (let c = 0; c < colCount; c++) {
-        const symIdx =
-          c < colCount / 2 ? c : colCount - 1 - c;
+        const symIdx = c < colCount / 2 ? c : colCount - 1 - c;
         const val = getPerceptualBarValue(
           frequencyData,
           symIdx,
           Math.max(8, Math.floor(colCount / 2)),
           settings.sensitivity
         );
-        // Deterministic pseudo-random speed & phase per column
         const seed = Math.sin(c * 12.9898 + 4.1414) * 43758.5453;
         const fracSeed = seed - Math.floor(seed);
         const speed = 0.28 + fracSeed * 0.45 + val * 0.42 + beatBoost * 0.25;
@@ -2672,24 +3285,49 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
         const headY = topY + headFrac * areaH;
         const x = linPadX + c * colStep + (colStep - glyphW) * 0.5;
         const activeLen = Math.max(4, Math.round(4 + val * dropSegs));
-        const colColor = c % 3 === 0 ? settings.secondaryColor : settings.primaryColor;
+        const colIdx = c % 3 === 0 ? 1 : 0;
 
         for (let s = 0; s < activeLen; s++) {
           const gy = headY - s * glyphStepY;
           if (gy < topY || gy > topY + areaH) continue;
-          const tailFade = 1 - s / activeLen;
-          const alpha = tailFade * (0.28 + val * 0.72);
-          const segH = Math.max(2.5, glyphStepY * 0.62);
+          if (s === 0) {
+            headBuckets[colIdx].push({ x, y: gy });
+          } else {
+            const tailFade = 1 - s / activeLen;
+            const alpha = tailFade * (0.28 + val * 0.72);
+            const tier = Math.min(3, Math.max(0, Math.floor(alpha * 4)));
+            tailBuckets[colIdx * 4 + tier].push({ x, y: gy });
+          }
+        }
+      }
 
-          vCtx.fillStyle =
-            s === 0
-              ? hexToRgba('#ffffff', Math.min(1, 0.55 + val * 0.45))
-              : hexToRgba(colColor, alpha);
-          applyShadow(colColor, s === 0 ? minDim * 0.014 : 0);
+      vCtx.save();
+      vCtx.shadowBlur = 0;
+      for (let colIdx = 0; colIdx < 2; colIdx++) {
+        const colColor = colIdx === 0 ? settings.primaryColor : settings.secondaryColor;
+        for (let tier = 0; tier < 4; tier++) {
+          const items = tailBuckets[colIdx * 4 + tier];
+          if (items.length === 0) continue;
+          vCtx.fillStyle = hexToRgba(colColor, tailAlphas[tier]);
           vCtx.beginPath();
-          vCtx.roundRect(x, gy, glyphW, segH, Math.min(3, glyphW * 0.35));
+          for (let k = 0; k < items.length; k++) {
+            vCtx.roundRect(items[k].x, items[k].y, glyphW, segH, segRadius);
+          }
           vCtx.fill();
         }
+      }
+
+      const headGlow = minDim * 0.014;
+      vCtx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+      for (let colIdx = 0; colIdx < 2; colIdx++) {
+        const items = headBuckets[colIdx];
+        if (items.length === 0) continue;
+        applyShadow(colIdx === 0 ? settings.primaryColor : settings.secondaryColor, headGlow);
+        vCtx.beginPath();
+        for (let k = 0; k < items.length; k++) {
+          vCtx.roundRect(items[k].x, items[k].y, glyphW, segH, segRadius);
+        }
+        vCtx.fill();
       }
       vCtx.restore();
     } else if (mode === 'flower-mandala') {
@@ -3242,35 +3880,57 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.fill();
       vCtx.restore();
 
-      // Radial spectrum bars around circumference (mirrored left-right symmetry)
+      // Radial spectrum bars around circumference (batched into 2 radial-gradient passes)
       vCtx.save();
       const halfBars = Math.max(16, Math.floor(barCount / 2));
       const barThickness = Math.max(2, ((2 * Math.PI * baseRadius) / barCount) * 0.58);
       vCtx.lineCap = 'round';
       vCtx.lineWidth = barThickness;
 
+      const gradOuterR = Math.max(baseRadius + 1, baseRadius + maxBarLen * 0.78);
+      const primaryOutGrad = vCtx.createRadialGradient(cx, cy, baseRadius, cx, cy, gradOuterR);
+      primaryOutGrad.addColorStop(0, settings.primaryColor);
+      primaryOutGrad.addColorStop(1, settings.secondaryColor);
+
+      const secondaryOutGrad = vCtx.createRadialGradient(cx, cy, baseRadius, cx, cy, gradOuterR);
+      secondaryOutGrad.addColorStop(0, settings.secondaryColor);
+      secondaryOutGrad.addColorStop(1, settings.primaryColor);
+
+      const primarySegs: number[] = [];
+      const secondarySegs: number[] = [];
       for (let i = 0; i < barCount; i++) {
-        // Map symmetric index so left & right halves pulse evenly
         const sym = i < halfBars ? i : barCount - 1 - i;
         const val = getPerceptualBarValue(frequencyData, sym, halfBars, settings.sensitivity);
         const len = Math.max(minDim * 0.008, Math.pow(val, 1.15) * maxBarLen);
-
         const angle = (i / barCount) * Math.PI * 2 - Math.PI * 0.5;
-        const x1 = cx + Math.cos(angle) * baseRadius;
-        const y1 = cy + Math.sin(angle) * baseRadius;
-        const x2 = cx + Math.cos(angle) * (baseRadius + len);
-        const y2 = cy + Math.sin(angle) * (baseRadius + len);
-
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        const x1 = cx + cosA * baseRadius;
+        const y1 = cy + sinA * baseRadius;
+        const x2 = cx + cosA * (baseRadius + len);
+        const y2 = cy + sinA * (baseRadius + len);
         const mix = sym / Math.max(1, halfBars - 1);
-        const strokeGrad = vCtx.createLinearGradient(x1, y1, x2, y2);
-        strokeGrad.addColorStop(0, mix < 0.5 ? settings.primaryColor : settings.secondaryColor);
-        strokeGrad.addColorStop(1, mix < 0.5 ? settings.secondaryColor : settings.primaryColor);
+        const target = mix < 0.5 ? primarySegs : secondarySegs;
+        target.push(x1, y1, x2, y2);
+      }
 
-        vCtx.strokeStyle = strokeGrad;
-        applyShadow(hexToRgba(settings.primaryColor, 0.45), minDim * 0.012);
+      applyShadow(hexToRgba(settings.primaryColor, 0.45), minDim * 0.012);
+      if (primarySegs.length > 0) {
+        vCtx.strokeStyle = primaryOutGrad;
         vCtx.beginPath();
-        vCtx.moveTo(x1, y1);
-        vCtx.lineTo(x2, y2);
+        for (let k = 0; k < primarySegs.length; k += 4) {
+          vCtx.moveTo(primarySegs[k], primarySegs[k + 1]);
+          vCtx.lineTo(primarySegs[k + 2], primarySegs[k + 3]);
+        }
+        vCtx.stroke();
+      }
+      if (secondarySegs.length > 0) {
+        vCtx.strokeStyle = secondaryOutGrad;
+        vCtx.beginPath();
+        for (let k = 0; k < secondarySegs.length; k += 4) {
+          vCtx.moveTo(secondarySegs[k], secondarySegs[k + 1]);
+          vCtx.lineTo(secondarySegs[k + 2], secondarySegs[k + 3]);
+        }
         vCtx.stroke();
       }
       vCtx.restore();
@@ -3281,8 +3941,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       vCtx.arc(cx, cy, circularArtRadius, 0, Math.PI * 2);
       vCtx.strokeStyle = hexToRgba(settings.primaryColor, 0.78);
       vCtx.lineWidth = Math.max(2, minDim * 0.0038);
-      vCtx.shadowColor = settings.primaryColor;
-      vCtx.shadowBlur = minDim * 0.015;
+      applyShadow(settings.primaryColor, minDim * 0.015);
       vCtx.stroke();
       vCtx.restore();
     } else {
@@ -3652,11 +4311,13 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       minDim,
       isPortrait,
       currentTime,
+      dt,
       bass,
       mid,
       treble,
       beatBurst,
       beatTriggered,
+      isExport,
       settings,
       lyrics,
       mocapClip,
@@ -3822,6 +4483,15 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     }
   }
 
+  // 4a-post. Uniform Scene-Wide Global Glow Emission Pass
+  renderGlobalGlowEffect(
+    ctx,
+    width,
+    height,
+    minDim,
+    settings.globalGlow ?? 0
+  );
+
   // 4b. Beat-Triggered Glitch Post-Processing (randomized frame-drops, slice tears, & chromatic aberration)
   renderBeatGlitchEffect(
     ctx,
@@ -3831,6 +4501,20 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     settings.glitchIntensity ?? 0,
     beatBurst,
     beatTriggered
+  );
+
+  // 4c. Brightness-Reactive Vintage CRT Scanline Texture Overlay
+  renderCrtScanlineEffect(
+    ctx,
+    width,
+    height,
+    minDim,
+    currentTime,
+    settings.scanlineIntensity ?? 0,
+    settings.scanlineColor,
+    settings.primaryColor,
+    beatBurst,
+    Boolean(isExport)
   );
 
   // 5. Optional Safe-Zone & Composition Grid Guide (Preview only)
@@ -4052,6 +4736,31 @@ function resolveLyricsOnlyRange(
   return { startIdx, endIdx };
 }
 
+interface LyricsOnlyMeasuredEntry {
+  globalIdx: number;
+  lines: string[];
+  isActive: boolean;
+  blockH: number;
+  maxW: number;
+}
+
+interface CachedLyricsOnlyLayout {
+  key: string;
+  lyricsRef: LyricLine[];
+  fontSize: number;
+  useTwoCols: boolean;
+  measured: {
+    entries: LyricsOnlyMeasuredEntry[];
+    totalH: number;
+    activeFs: number;
+    sideLineH: number;
+    activeLineH: number;
+    gapY: number;
+  };
+}
+
+let lyricsOnlyLayoutCache: CachedLyricsOnlyLayout | null = null;
+
 function renderLyricsOnlyState(
   ctx: RenderContext2D,
   width: number,
@@ -4092,92 +4801,110 @@ function renderLyricsOnlyState(
   const stageBottom = height * (isPortrait ? 0.9 : 0.92);
   const stageH = Math.max(120, stageBottom - stageTop);
 
-  let fontSize = Math.round(
-    minDim *
-      (layout === 'half-verse'
-        ? isPortrait
-          ? 0.041
-          : 0.038
-        : layout === 'full-verse'
-        ? isPortrait
-          ? 0.035
-          : 0.032
-        : isPortrait
-        ? 0.029
-        : 0.028)
-  );
-  const minFontSize = Math.max(13, Math.round(minDim * (layout === 'full-lyrics' ? 0.019 : 0.022)));
-
-  interface MeasuredEntry {
-    globalIdx: number;
-    lines: string[];
-    isActive: boolean;
-    blockH: number;
-    maxW: number;
-  }
+  type MeasuredEntry = LyricsOnlyMeasuredEntry;
 
   const styleSpec = getLyricsOnlyStyleSpec(settings.lyricStyle, settings.lyricFont);
   const formatLineText = (txt: string) =>
     styleSpec.uppercase ? txt.toUpperCase() : txt;
   const italicPrefix = styleSpec.italic ? 'italic ' : '';
 
-  const measureBlock = (fs: number, colWidth: number) => {
-    const activeFs = Math.round(fs * (layout === 'full-lyrics' ? 1.08 : 1.12));
-    const sideLineH = fs * 1.28;
-    const activeLineH = activeFs * 1.26;
-    const gapY = fs * (layout === 'full-lyrics' ? 0.48 : 0.62);
-    const entries: MeasuredEntry[] = [];
-    let totalH = 0;
-
-    ctx.save();
-    for (let i = startIdx; i <= endIdx; i++) {
-      const isActive = !isPreIntro && i === activeIdx;
-      const entryFs = isActive ? activeFs : fs;
-      const entryLineH = isActive ? activeLineH : sideLineH;
-      ctx.font = `${italicPrefix}${isActive ? 700 : 500} ${entryFs}px ${styleSpec.fontFamily}`;
-      applyLyricLetterSpacing(ctx, entryFs, settings.lyricLetterSpacing);
-      const wrapped = wrapTextLines(ctx, formatLineText(lyrics[i].text), colWidth);
-      const maxW = wrapped.reduce((acc, l) => Math.max(acc, ctx.measureText(l).width), 0);
-      const blockH = wrapped.length * entryLineH;
-      entries.push({ globalIdx: i, lines: wrapped, isActive, blockH, maxW });
-      totalH += blockH + (i < endIdx ? gapY : 0);
-    }
-    ctx.restore();
-
-    return { entries, totalH, activeFs, sideLineH, activeLineH, gapY };
-  };
-
   const singleColMaxW = width - safePadX * 2.2;
-  let useTwoCols = false;
-  let measured = measureBlock(fontSize, singleColMaxW);
+  const cacheKey = `${width}x${height}|${isPortrait ? 1 : 0}|${safePadX.toFixed(1)}|${stageTop.toFixed(1)}|${layout}|${settings.lyricStyle}|${settings.lyricFont}|${settings.lyricLetterSpacing ?? 0}|${activeIdx}|${startIdx}-${endIdx}|${lyrics.length}|${lyrics[focusIdx]?.text ?? ''}|${lyrics[0]?.text ?? ''}`;
 
-  // Shrink font size smoothly so half-verse, full-verse, and full-lyrics fit inside the stage
-  while (measured.totalH > stageH * 0.94 && fontSize > minFontSize) {
-    fontSize = Math.max(minFontSize, fontSize - 2);
-    measured = measureBlock(fontSize, singleColMaxW);
-  }
+  let fontSize: number;
+  let useTwoCols: boolean;
+  let measured: CachedLyricsOnlyLayout['measured'];
 
-  // On landscape/square in Full Lyrics mode, split into 2 balanced columns if still taller than stage
   if (
-    layout === 'full-lyrics' &&
-    !isPortrait &&
-    measured.totalH > stageH * 0.96 &&
-    visibleCount >= 8
+    lyricsOnlyLayoutCache &&
+    lyricsOnlyLayoutCache.lyricsRef === lyrics &&
+    lyricsOnlyLayoutCache.key === cacheKey
   ) {
-    const colGap = Math.max(28, width * 0.045);
-    const colW = (width - safePadX * 2 - colGap) * 0.5;
-    let twoColFs = Math.max(
-      minFontSize,
-      Math.round(minDim * 0.025)
+    fontSize = lyricsOnlyLayoutCache.fontSize;
+    useTwoCols = lyricsOnlyLayoutCache.useTwoCols;
+    measured = lyricsOnlyLayoutCache.measured;
+  } else {
+    fontSize = Math.round(
+      minDim *
+        (layout === 'half-verse'
+          ? isPortrait
+            ? 0.041
+            : 0.038
+          : layout === 'full-verse'
+          ? isPortrait
+            ? 0.035
+            : 0.032
+          : isPortrait
+          ? 0.029
+          : 0.028)
     );
-    let colMeasure = measureBlock(twoColFs, colW);
-    while (colMeasure.totalH > stageH * 1.78 && twoColFs > minFontSize) {
-      twoColFs = Math.max(minFontSize, twoColFs - 2);
-      colMeasure = measureBlock(twoColFs, colW);
+    const minFontSize = Math.max(13, Math.round(minDim * (layout === 'full-lyrics' ? 0.019 : 0.022)));
+
+    const measureBlock = (fs: number, colWidth: number) => {
+      const activeFs = Math.round(fs * (layout === 'full-lyrics' ? 1.08 : 1.12));
+      const sideLineH = fs * 1.28;
+      const activeLineH = activeFs * 1.26;
+      const gapY = fs * (layout === 'full-lyrics' ? 0.48 : 0.62);
+      const entries: MeasuredEntry[] = [];
+      let totalH = 0;
+
+      ctx.save();
+      for (let i = startIdx; i <= endIdx; i++) {
+        const isActive = !isPreIntro && i === activeIdx;
+        const entryFs = isActive ? activeFs : fs;
+        const entryLineH = isActive ? activeLineH : sideLineH;
+        ctx.font = `${italicPrefix}${isActive ? 700 : 500} ${entryFs}px ${styleSpec.fontFamily}`;
+        applyLyricLetterSpacing(ctx, entryFs, settings.lyricLetterSpacing);
+        const wrapped = wrapTextLines(ctx, formatLineText(lyrics[i].text), colWidth);
+        const maxW = wrapped.reduce((acc, l) => Math.max(acc, ctx.measureText(l).width), 0);
+        const blockH = wrapped.length * entryLineH;
+        entries.push({ globalIdx: i, lines: wrapped, isActive, blockH, maxW });
+        totalH += blockH + (i < endIdx ? gapY : 0);
+      }
+      ctx.restore();
+
+      return { entries, totalH, activeFs, sideLineH, activeLineH, gapY };
+    };
+
+    useTwoCols = false;
+    measured = measureBlock(fontSize, singleColMaxW);
+
+    // Shrink font size smoothly so half-verse, full-verse, and full-lyrics fit inside the stage
+    while (measured.totalH > stageH * 0.94 && fontSize > minFontSize) {
+      fontSize = Math.max(minFontSize, fontSize - 2);
+      measured = measureBlock(fontSize, singleColMaxW);
     }
-    fontSize = twoColFs;
-    measured = colMeasure;
-    useTwoCols = true;
+
+    // On landscape/square in Full Lyrics mode, split into 2 balanced columns if still taller than stage
+    if (
+      layout === 'full-lyrics' &&
+      !isPortrait &&
+      measured.totalH > stageH * 0.96 &&
+      visibleCount >= 8
+    ) {
+      const colGap = Math.max(28, width * 0.045);
+      const colW = (width - safePadX * 2 - colGap) * 0.5;
+      let twoColFs = Math.max(
+        minFontSize,
+        Math.round(minDim * 0.025)
+      );
+      let colMeasure = measureBlock(twoColFs, colW);
+      while (colMeasure.totalH > stageH * 1.78 && twoColFs > minFontSize) {
+        twoColFs = Math.max(minFontSize, twoColFs - 2);
+        colMeasure = measureBlock(twoColFs, colW);
+      }
+      fontSize = twoColFs;
+      measured = colMeasure;
+      useTwoCols = true;
+    }
+
+    lyricsOnlyLayoutCache = {
+      key: cacheKey,
+      lyricsRef: lyrics,
+      fontSize,
+      useTwoCols,
+      measured,
+    };
   }
 
   const drawLyricsOnlyContainer = (boxX: number, boxY: number, boxW: number, boxH: number) => {
@@ -4379,7 +5106,7 @@ function renderLyricsOnlyState(
 
     entry.lines.forEach((line, idx) => {
       const ly = startLineY + idx * lineH;
-      if (!hasEntryBgBox && (isActive || isPreFocus || !isPast)) {
+      if (!hasEntryBgBox && (isActive || isPreFocus)) {
         drawLyricDarkBackdropShadow(
           ctx,
           line,
