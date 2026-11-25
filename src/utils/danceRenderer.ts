@@ -76,11 +76,59 @@ function ensureDanceShadowCanvas(
   return res;
 }
 
+export type DanceFilterTag = 'high-energy' | 'slow' | 'modern' | 'classic';
+
+export const DANCE_FILTER_TAG_LABELS: Record<DanceFilterTag, string> = {
+  'high-energy': 'High-Energy',
+  slow: 'Slow',
+  modern: 'Modern',
+  classic: 'Classic',
+};
+
+export const DANCE_STYLE_FILTER_CHIPS: Array<{
+  id: 'all' | DanceFilterTag;
+  label: string;
+}> = [
+  { id: 'all', label: 'All' },
+  { id: 'high-energy', label: 'High-Energy' },
+  { id: 'slow', label: 'Slow' },
+  { id: 'modern', label: 'Modern' },
+  { id: 'classic', label: 'Classic' },
+];
+
+export const DANCE_CHARACTER_FILTER_CHIPS: Array<{
+  id: 'all' | DanceFilterTag | 'rig';
+  label: string;
+}> = [
+  { id: 'all', label: 'All' },
+  { id: 'high-energy', label: 'High-Energy' },
+  { id: 'slow', label: 'Slow' },
+  { id: 'modern', label: 'Modern' },
+  { id: 'classic', label: 'Classic' },
+  { id: 'rig', label: 'Rigs' },
+];
+
+const MOCAP_STYLE_TAGS: Record<string, DanceFilterTag[]> = {
+  'mocap-salsa': ['high-energy', 'classic'],
+  'mocap-ballet': ['slow', 'classic'],
+  'mocap-breakdance': ['high-energy', 'modern'],
+  'mocap-moonwalk': ['classic', 'modern'],
+  'mocap-house': ['high-energy', 'modern'],
+  'mocap-contemporary': ['slow', 'modern'],
+  'mocap-afrobeat': ['high-energy', 'modern'],
+  'mocap-tango': ['slow', 'classic'],
+  'mocap-shuffle': ['high-energy', 'modern'],
+  'mocap-kpop': ['high-energy', 'modern'],
+  'mocap-disco': ['high-energy', 'classic'],
+  'mocap-waltz': ['slow', 'classic'],
+};
+
 export interface DanceStyleOption {
   id: DanceStyleKey;
   label: string;
   desc: string;
   category: 'mocap-library' | 'procedural' | 'custom';
+  tags: DanceFilterTag[];
 }
 
 export const DANCE_STYLE_OPTIONS: DanceStyleOption[] = [
@@ -89,65 +137,174 @@ export const DANCE_STYLE_OPTIONS: DanceStyleOption[] = [
     label: `${entry.title} (Mocap)`,
     desc: entry.description,
     category: 'mocap-library' as const,
+    tags: MOCAP_STYLE_TAGS[entry.id] ?? ['modern'],
   })),
   {
     id: 'hip-hop',
     label: 'Hip-Hop Bounce',
     desc: 'Heavy downbeat knee bounce, shoulder rock & lyric-accent arm hits',
     category: 'procedural',
+    tags: ['high-energy', 'modern'],
   },
   {
     id: 'shuffle',
     label: 'Shuffle Step',
     desc: 'Crisp running-man footwork and synced counter-arm swings',
     category: 'procedural',
+    tags: ['high-energy', 'modern'],
   },
   {
     id: 'robot',
     label: 'Robot Pop',
     desc: 'Quantized servo snaps locking to beat peaks and lyric transitions',
     category: 'procedural',
+    tags: ['modern', 'classic'],
   },
   {
     id: 'groove',
     label: 'Smooth Groove',
     desc: 'Fluid torso wave and sweeping arm arcs driven by mid/treble flow',
     category: 'procedural',
+    tags: ['slow', 'modern'],
   },
   {
     id: 'break-freeze',
     label: 'Break Freeze',
     desc: 'Wide athletic stance with dramatic power poses on lyric drops',
     category: 'procedural',
+    tags: ['high-energy', 'modern'],
   },
   {
     id: 'mocap-custom',
     label: 'Custom Upload (.bvh / .json)',
     desc: 'Plays an uploaded .bvh or JSON motion-capture skeleton on beat',
     category: 'custom',
+    tags: ['modern'],
   },
 ];
 
-export const DANCE_AVATAR_OPTIONS: Array<{
+export interface DanceAvatarOption {
   id: DanceAvatarStyle;
   label: string;
   desc: string;
   category: 'human' | 'rig';
-}> = [
-  { id: 'casual', label: 'Casual', desc: 'Pullover hoodie & denim', category: 'human' },
-  { id: 'formal', label: 'Formal', desc: 'Evening blazer & silk trim', category: 'human' },
-  { id: 'robot', label: 'Robot', desc: 'Titanium mech & core visor', category: 'human' },
-  { id: 'ninja', label: 'Ninja', desc: 'Stealth gi & flowing scarf', category: 'human' },
-  { id: 'human-dancer', label: 'Studio Pop', desc: 'Tailored jacket & shades', category: 'human' },
-  { id: 'human-ballerina', label: 'Ballerina', desc: 'Leotard, tutu & pointe', category: 'human' },
-  { id: 'human-bboy', label: 'Street B-Boy', desc: 'Hoodie, joggers & cap', category: 'human' },
-  { id: 'human-diva', label: 'Stage Diva', desc: 'Flowing hair & stage glam', category: 'human' },
-  { id: 'human-suit', label: 'Tuxedo Lounge', desc: 'Formal tux & bowtie', category: 'human' },
-  { id: 'human-neon', label: 'Cyber Human', desc: 'Neon techwear & visor', category: 'human' },
-  { id: 'silhouette', label: 'Silhouette', desc: 'Volumetric rim-lit human', category: 'human' },
-  { id: 'neon-cyber', label: 'Neon Rig', desc: 'Glowing cyber wireframe', category: 'rig' },
-  { id: 'holo-wire', label: 'Holo Mocap', desc: 'Optical marker skeleton', category: 'rig' },
-  { id: 'minimal-rig', label: 'Studio Rig', desc: 'Clean matte rig', category: 'rig' },
+  tags: DanceFilterTag[];
+  styleKeywords: string;
+}
+
+export const DANCE_AVATAR_OPTIONS: DanceAvatarOption[] = [
+  {
+    id: 'casual',
+    label: 'Casual',
+    desc: 'Pullover hoodie & denim',
+    category: 'human',
+    tags: ['modern', 'slow'],
+    styleKeywords: 'hip-hop groove relaxed street chill',
+  },
+  {
+    id: 'formal',
+    label: 'Formal',
+    desc: 'Evening blazer & silk trim',
+    category: 'human',
+    tags: ['classic', 'slow'],
+    styleKeywords: 'tango waltz ballroom jazz smooth lounge',
+  },
+  {
+    id: 'robot',
+    label: 'Robot',
+    desc: 'Titanium mech & core visor',
+    category: 'human',
+    tags: ['high-energy', 'modern'],
+    styleKeywords: 'robot pop edm electronic house dubstep',
+  },
+  {
+    id: 'ninja',
+    label: 'Ninja',
+    desc: 'Stealth gi & flowing scarf',
+    category: 'human',
+    tags: ['high-energy', 'classic'],
+    styleKeywords: 'breakdance freeze acrobatics action street',
+  },
+  {
+    id: 'human-dancer',
+    label: 'Studio Pop',
+    desc: 'Tailored jacket & shades',
+    category: 'human',
+    tags: ['modern', 'high-energy'],
+    styleKeywords: 'kpop pop idol funk moonwalk disco stage',
+  },
+  {
+    id: 'human-ballerina',
+    label: 'Ballerina',
+    desc: 'Leotard, tutu & pointe',
+    category: 'human',
+    tags: ['slow', 'classic'],
+    styleKeywords: 'ballet contemporary lyrical pirouette waltz graceful',
+  },
+  {
+    id: 'human-bboy',
+    label: 'Street B-Boy',
+    desc: 'Hoodie, joggers & cap',
+    category: 'human',
+    tags: ['high-energy', 'modern'],
+    styleKeywords: 'breakdance hip-hop shuffle street toprock freeze',
+  },
+  {
+    id: 'human-diva',
+    label: 'Stage Diva',
+    desc: 'Flowing hair & stage glam',
+    category: 'human',
+    tags: ['high-energy', 'modern'],
+    styleKeywords: 'pop disco salsa afrobeat kpop performance',
+  },
+  {
+    id: 'human-suit',
+    label: 'Tuxedo Lounge',
+    desc: 'Formal tux & bowtie',
+    category: 'human',
+    tags: ['classic', 'slow'],
+    styleKeywords: 'waltz tango ballroom swing smooth formal',
+  },
+  {
+    id: 'human-neon',
+    label: 'Cyber Human',
+    desc: 'Neon techwear & visor',
+    category: 'human',
+    tags: ['modern', 'high-energy'],
+    styleKeywords: 'shuffle house edm rave synthwave futuristic',
+  },
+  {
+    id: 'silhouette',
+    label: 'Silhouette',
+    desc: 'Volumetric rim-lit human',
+    category: 'human',
+    tags: ['slow', 'classic'],
+    styleKeywords: 'contemporary lyrical minimalist shadow ambient',
+  },
+  {
+    id: 'neon-cyber',
+    label: 'Neon Rig',
+    desc: 'Glowing cyber wireframe',
+    category: 'rig',
+    tags: ['modern', 'high-energy'],
+    styleKeywords: 'edm shuffle house robot wireframe rig',
+  },
+  {
+    id: 'holo-wire',
+    label: 'Holo Mocap',
+    desc: 'Optical marker skeleton',
+    category: 'rig',
+    tags: ['modern', 'slow'],
+    styleKeywords: 'mocap bvh skeleton optical contemporary rig',
+  },
+  {
+    id: 'minimal-rig',
+    label: 'Studio Rig',
+    desc: 'Clean matte rig',
+    category: 'rig',
+    tags: ['classic', 'slow'],
+    styleKeywords: 'mocap studio reference clean rig',
+  },
 ];
 
 export interface DanceMedleyPreset {
@@ -197,11 +354,47 @@ export interface RenderDanceParams {
   treble: number;
   beatBurst: number;
   beatTriggered: boolean;
+  bpm?: number | null;
   isExport?: boolean;
   settings: StudioSettings;
   lyrics: LyricLine[];
   mocapClip?: MocapClipData | null;
   hexToRgba: (hex: string, alpha: number) => string;
+}
+
+export interface DanceStrobeTiming {
+  effectiveBpm: number;
+  subdivision: 1 | 2 | 4 | 8;
+  subdivisionLabel: '1/4' | '1/8' | '1/16' | '1/32';
+  strobeHz: number;
+}
+
+export function getDanceStrobeTiming(
+  danceStrobe: number,
+  bpm?: number | null
+): DanceStrobeTiming {
+  const effectiveBpm =
+    typeof bpm === 'number' && Number.isFinite(bpm) && bpm > 0
+      ? Math.max(40, Math.min(240, bpm))
+      : 120;
+  const clamped = Math.max(0, Math.min(1, danceStrobe));
+  const subdivision: 1 | 2 | 4 | 8 =
+    clamped < 0.25 ? 1 : clamped < 0.5 ? 2 : clamped < 0.75 ? 4 : 8;
+  const subdivisionLabel: '1/4' | '1/8' | '1/16' | '1/32' =
+    subdivision === 1
+      ? '1/4'
+      : subdivision === 2
+      ? '1/8'
+      : subdivision === 4
+      ? '1/16'
+      : '1/32';
+  const strobeHz = (effectiveBpm / 60) * subdivision;
+  return {
+    effectiveBpm,
+    subdivision,
+    subdivisionLabel,
+    strobeHz,
+  };
 }
 
 type Vec3 = [number, number, number];
@@ -914,16 +1107,17 @@ function resolveMedleyTransition(
 
   if (trigger === 'seconds') {
     const intervalSec = Math.max(2, Math.min(30, settings.danceMedleyIntervalSeconds ?? 8));
+    const effectiveBlend = Math.min(blendDuration, intervalSec * 0.85);
     const safeTime = Math.max(0, currentTime);
     const slot = Math.floor(safeTime / intervalSec);
     const localT = safeTime - slot * intervalSec;
     const toIdx = slot % rawMoves.length;
-    if (slot > 0 && localT < blendDuration) {
+    if (slot > 0 && localT < effectiveBlend) {
       const fromIdx = (slot - 1) % rawMoves.length;
       return {
         primaryStyle: rawMoves[toIdx],
         fromStyle: rawMoves[fromIdx],
-        blendAlpha: localT / blendDuration,
+        blendAlpha: localT / effectiveBlend,
       };
     }
     return { primaryStyle: rawMoves[toIdx], fromStyle: null, blendAlpha: 1 };
@@ -2430,6 +2624,7 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
     treble,
     beatBurst,
     beatTriggered,
+    bpm,
     isExport = false,
     settings,
     lyrics,
@@ -2633,6 +2828,7 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
   const fov = 3.2;
 
   const danceStrobe = Math.max(0, Math.min(1, settings.danceStrobe ?? 0));
+  const danceGlow = Math.max(0, Math.min(1.5, settings.danceGlow ?? 0));
   const spotlightIntensity = Math.max(
     0,
     Math.min(2, settings.danceSpotlightIntensity ?? 1)
@@ -2643,7 +2839,9 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
   const hasCustomRim = /^#[0-9a-fA-F]{3,8}$/.test(rawRimSetting);
 
   const strobeBuffer =
-    danceStrobe > 0.005 ? ensureDanceStrobeCanvas(width, height) : null;
+    danceStrobe > 0.005 || danceGlow > 0.005
+      ? ensureDanceStrobeCanvas(width, height)
+      : null;
   const avatarCtx: DanceRenderCtx = strobeBuffer ? strobeBuffer.ctx : ctx;
 
   for (const slot of slots) {
@@ -2947,221 +3145,95 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
     }
 
     // Sort bones back-to-front by Z depth for skeletal/rig avatar styles
-    const sortedBones = bones
-      .map(([a, b], idx) => ({
-        a,
-        b,
-        idx,
-        midZ: ((projected[a]?.z ?? 0) + (projected[b]?.z ?? 0)) * 0.5,
-      }))
-      .filter((item) => projected[item.a] && projected[item.b])
-      .sort((u, v) => u.midZ - v.midZ);
-
-    const limbBaseWidth = Math.max(3, charHeight * 0.032);
-    const headRadius = Math.max(6, charHeight * 0.068);
-    const rigGlowFactor = 0.35 + 0.65 * Math.min(1.5, spotlightIntensity);
-
-    if (avatarStyle === 'holo-wire') {
-      avatarCtx.lineCap = 'round';
-      avatarCtx.shadowColor = slotRimColor;
-      avatarCtx.shadowBlur = Math.max(
-        4,
-        charHeight * (0.04 + beatDrive * 0.05) * rigGlowFactor
-      );
-
-      if (beatDrive > 0.12) {
-        avatarCtx.save();
-        avatarCtx.globalAlpha = Math.min(0.4, beatDrive * 0.35);
-        const echoShift = Math.sin(currentTime * 18) * charHeight * 0.025;
-        avatarCtx.strokeStyle = slotSecondary;
-        avatarCtx.lineWidth = Math.max(1.5, limbBaseWidth * 0.45);
-        for (const { a, b } of sortedBones) {
-          const pa = projected[a];
-          const pb = projected[b];
-          avatarCtx.beginPath();
-          avatarCtx.moveTo(pa.x + echoShift, pa.y);
-          avatarCtx.lineTo(pb.x + echoShift, pb.y);
-          avatarCtx.stroke();
-        }
-        avatarCtx.restore();
-      }
-
-      for (const { a, b, idx } of sortedBones) {
-        const pa = projected[a];
-        const pb = projected[b];
-        avatarCtx.strokeStyle =
-          idx % 2 === 0 ? slotRimColor : hasCustomRim ? slotPrimary : slotSecondary;
-        avatarCtx.lineWidth = Math.max(
-          2,
-          limbBaseWidth * 0.52 * ((pa.scale + pb.scale) * 0.5)
-        );
-        avatarCtx.beginPath();
-        avatarCtx.moveTo(pa.x, pa.y);
-        avatarCtx.lineTo(pb.x, pb.y);
-        avatarCtx.stroke();
-      }
-
-      if (projected.length > 0) {
-        avatarCtx.fillStyle = '#f8fafc';
-        avatarCtx.strokeStyle = slotSecondary;
-        avatarCtx.lineWidth = Math.max(1.2, limbBaseWidth * 0.44 * 0.28);
-        avatarCtx.beginPath();
-        for (let j = 0; j < projected.length; j++) {
-          if (j === headIdx) continue;
-          const p = projected[j];
-          const r = Math.max(2.5, limbBaseWidth * 0.44 * p.scale);
-          avatarCtx.moveTo(p.x + r, p.y);
-          avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        }
-        avatarCtx.fill();
-        avatarCtx.stroke();
-
-        const ph = projected[headIdx];
-        if (ph) {
-          const r = headRadius * 0.78 * ph.scale;
-          avatarCtx.fillStyle = hexToRgba(slotRimColor, 0.28);
-          avatarCtx.strokeStyle = slotRimColor;
-          avatarCtx.lineWidth = Math.max(1.2, r * 0.28);
-          avatarCtx.beginPath();
-          avatarCtx.arc(ph.x, ph.y, r, 0, Math.PI * 2);
-          avatarCtx.fill();
-          avatarCtx.stroke();
-        }
-      }
-      avatarCtx.restore();
-      continue;
-    }
-
-    if (avatarStyle === 'minimal-rig') {
-      avatarCtx.lineCap = 'round';
-      avatarCtx.shadowColor = hasCustomRim
-        ? hexToRgba(slotRimColor, 0.55)
-        : 'rgba(0, 0, 0, 0.55)';
-      avatarCtx.shadowBlur = Math.max(6, 10 * rigGlowFactor);
-      for (const { a, b } of sortedBones) {
-        const pa = projected[a];
-        const pb = projected[b];
-        const isTorso = !useMocap && a <= J_CHEST && b <= J_NECK;
-        avatarCtx.strokeStyle = '#f1f5f9';
-        avatarCtx.lineWidth = Math.max(
-          2.5,
-          limbBaseWidth * (isTorso ? 1.25 : 0.72) * ((pa.scale + pb.scale) * 0.5)
-        );
-        avatarCtx.beginPath();
-        avatarCtx.moveTo(pa.x, pa.y);
-        avatarCtx.lineTo(pb.x, pb.y);
-        avatarCtx.stroke();
-      }
-      avatarCtx.fillStyle = slotRimColor;
-      avatarCtx.beginPath();
-      for (let j = 0; j < projected.length; j++) {
-        if (j === headIdx) continue;
-        const p = projected[j];
-        const r = Math.max(2.5, limbBaseWidth * 0.42 * p.scale);
-        avatarCtx.moveTo(p.x + r, p.y);
-        avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      }
-      avatarCtx.fill();
-      const phMin = projected[headIdx];
-      if (phMin) {
-        avatarCtx.fillStyle = '#f8fafc';
-        avatarCtx.beginPath();
-        avatarCtx.arc(phMin.x, phMin.y, headRadius * 0.9 * phMin.scale, 0, Math.PI * 2);
-        avatarCtx.fill();
-      }
-      avatarCtx.restore();
-      continue;
-    }
-
-    // 'neon-cyber': luminous cybernetic dancer rig
-    avatarCtx.lineCap = 'round';
-    avatarCtx.lineJoin = 'round';
-
-    for (const { a, b } of sortedBones) {
-      const pa = projected[a];
-      const pb = projected[b];
-      const isTorso = !useMocap && a <= J_CHEST && b <= J_NECK;
-      const wPx = Math.max(
-        3,
-        limbBaseWidth * (isTorso ? 1.48 : 0.9) * ((pa.scale + pb.scale) * 0.5)
-      );
-
-      const boneGrad = avatarCtx.createLinearGradient(pa.x, pa.y, pb.x, pb.y);
-      boneGrad.addColorStop(0, slotRimColor);
-      boneGrad.addColorStop(1, slotSecondary);
-
-      avatarCtx.shadowColor = slotRimColor;
-      avatarCtx.shadowBlur = Math.max(
-        6,
-        charHeight * (0.045 + beatDrive * 0.045) * rigGlowFactor
-      );
-      avatarCtx.strokeStyle = boneGrad;
-      avatarCtx.lineWidth = wPx;
-      avatarCtx.beginPath();
-      avatarCtx.moveTo(pa.x, pa.y);
-      avatarCtx.lineTo(pb.x, pb.y);
-      avatarCtx.stroke();
-
-      avatarCtx.shadowBlur = 0;
-      avatarCtx.strokeStyle = 'rgba(248, 250, 252, 0.78)';
-      avatarCtx.lineWidth = Math.max(1.2, wPx * 0.28);
-      avatarCtx.beginPath();
-      avatarCtx.moveTo(pa.x, pa.y);
-      avatarCtx.lineTo(pb.x, pb.y);
-      avatarCtx.stroke();
-    }
-
-    avatarCtx.fillStyle = '#ffffff';
-    avatarCtx.shadowColor = slotRimColor;
-    avatarCtx.shadowBlur = Math.max(6, 9 * rigGlowFactor);
-    avatarCtx.beginPath();
-    for (let j = 0; j < projected.length; j++) {
-      if (j === headIdx) continue;
-      const p = projected[j];
-      const r = Math.max(2.5, limbBaseWidth * 0.42 * p.scale);
-      avatarCtx.moveTo(p.x + r, p.y);
-      avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    }
-    avatarCtx.fill();
-
-    const ph = projected[headIdx];
-    if (ph) {
-      const hr = headRadius * ph.scale;
-      avatarCtx.shadowColor = slotRimColor;
-      avatarCtx.shadowBlur = Math.max(8, hr * (0.7 + beatDrive * 0.6) * rigGlowFactor);
-      avatarCtx.fillStyle = '#090b10';
-      avatarCtx.strokeStyle = slotRimColor;
-      avatarCtx.lineWidth = Math.max(2, hr * 0.16);
-      avatarCtx.beginPath();
-      avatarCtx.arc(ph.x, ph.y, hr, 0, Math.PI * 2);
-      avatarCtx.fill();
-      avatarCtx.stroke();
-
-      const visorOffsetX = Math.sin(yaw) * hr * 0.36;
-      avatarCtx.shadowColor = slotSecondary;
-      avatarCtx.strokeStyle = lyricAccent > 0.25 ? '#ffffff' : slotSecondary;
-      avatarCtx.lineWidth = Math.max(2, hr * 0.22);
-      avatarCtx.beginPath();
-      avatarCtx.moveTo(ph.x + visorOffsetX - hr * 0.45, ph.y - hr * 0.05);
-      avatarCtx.lineTo(ph.x + visorOffsetX + hr * 0.45, ph.y - hr * 0.05);
-      avatarCtx.stroke();
-    }
+    renderRigSkeleton({
+      ctx: avatarCtx,
+      avatarStyle,
+      projected,
+      bones,
+      headIdx,
+      useMocap,
+      charHeight,
+      currentTime,
+      beatDrive,
+      lyricAccent,
+      yaw,
+      primaryColor: slotPrimary,
+      secondaryColor: slotSecondary,
+      rimLightColor: slotRimColor,
+      hasCustomRim,
+      spotlightIntensity,
+      hexToRgba,
+    });
 
     avatarCtx.restore();
   }
 
-  // Post-processing Dancer Strobe: rapidly dim & brighten only the avatar layer on beat peaks
-  if (strobeBuffer && danceStrobe > 0.005) {
-    const { canvas: sCanvas, ctx: sCtx } = strobeBuffer;
-    const strobeHz = 14 + danceStrobe * 10;
-    const shutterWave = Math.sin(currentTime * Math.PI * 2 * strobeHz);
-    const shutterOpen = beatTriggered || rawBeat > 0.82 || shutterWave > -0.1;
-    const inBeatPeak = rawBeat > 0.14;
-    const peakNorm = Math.pow(rawBeat, 0.72);
+  // Precompute tempo-synced strobe state when Dancer Strobe is active
+  const strobeActive = Boolean(strobeBuffer && danceStrobe > 0.005);
+  let strobeOpen = true;
+  let strobePeakNorm = 0;
+  let strobeDimContrast = 0;
+  let strobeDimCompositeAlpha = 1;
 
-    if (inBeatPeak && shutterOpen) {
-      // Brighten peak pulse directly on avatar pixels via source-atop mask
-      const whiteHighlight = Math.min(0.62, danceStrobe * peakNorm * 0.5);
+  if (strobeActive) {
+    const { strobeHz } = getDanceStrobeTiming(danceStrobe, bpm);
+    const shutterWave = Math.sin(currentTime * Math.PI * 2 * strobeHz);
+    strobeOpen = beatTriggered || shutterWave > 0;
+    const energyLift = Math.max(rawBeat, bass * 0.65);
+    const tempoPulse = Math.min(1, 0.48 + 0.52 * energyLift);
+    strobePeakNorm = Math.pow(tempoPulse, 0.8);
+    strobeDimContrast = 0.65 + 0.35 * Math.min(1, rawBeat * 1.2);
+    strobeDimCompositeAlpha = Math.max(0.18, 1 - danceStrobe * 0.74 * strobeDimContrast);
+  }
+
+  // Soft Dancer Glow aura pass (rendered before strobe pixel-masking mutates sCanvas)
+  if (strobeBuffer && danceGlow > 0.005) {
+    const { canvas: sCanvas } = strobeBuffer;
+    const glowScale = strobeActive ? (strobeOpen ? 1 : strobeDimCompositeAlpha) : 1;
+    const glowPulse = 1 + beatDrive * 0.24 + lyricAccent * 0.14;
+    const primaryGlowColor = hasCustomRim ? rawRimSetting : settings.primaryColor;
+    const secondaryGlowColor = hasCustomRim ? rawRimSetting : settings.secondaryColor;
+
+    // 1. Wide soft atmospheric halo for dark scene visibility
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = Math.min(0.92, danceGlow * 0.42 * glowPulse) * glowScale;
+    ctx.shadowColor = primaryGlowColor;
+    ctx.shadowBlur = Math.max(10, minDim * 0.052 * (0.4 + danceGlow * 0.85) * glowPulse);
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.drawImage(sCanvas, 0, 0, width, height);
+    ctx.restore();
+
+    // 2. Tight luminous rim bloom around character edges
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = Math.min(0.84, danceGlow * 0.35 * glowPulse) * glowScale;
+    ctx.shadowColor = secondaryGlowColor;
+    ctx.shadowBlur = Math.max(5, minDim * 0.02 * (0.35 + danceGlow * 0.75) * glowPulse);
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.drawImage(sCanvas, 0, 0, width, height);
+    ctx.restore();
+
+    // If strobe is off, draw the crisp character silhouette on top with subtle ambient lift
+    if (!strobeActive) {
+      ctx.drawImage(sCanvas, 0, 0, width, height);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = Math.min(0.22, danceGlow * 0.14);
+      ctx.drawImage(sCanvas, 0, 0, width, height);
+      ctx.restore();
+    }
+  }
+
+  // Post-processing Dancer Strobe: sync strobe shutter frequency to current BPM & boost on beat peaks
+  if (strobeBuffer && strobeActive) {
+    const { canvas: sCanvas, ctx: sCtx } = strobeBuffer;
+
+    if (strobeOpen) {
+      // Brighten tempo-synced pulse directly on avatar pixels via source-atop mask
+      const whiteHighlight = Math.min(0.62, danceStrobe * strobePeakNorm * 0.5);
       if (whiteHighlight > 0.01) {
         sCtx.save();
         sCtx.globalCompositeOperation = 'source-atop';
@@ -3172,15 +3244,15 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
 
       // Base sharp avatar draw + subtle strobe rim glow
       ctx.save();
-      if (danceStrobe * peakNorm > 0.28) {
+      if (danceStrobe * strobePeakNorm > 0.24) {
         ctx.shadowColor = hasCustomRim ? rawRimSetting : settings.primaryColor;
-        ctx.shadowBlur = Math.max(6, minDim * 0.022 * danceStrobe * peakNorm);
+        ctx.shadowBlur = Math.max(6, minDim * 0.022 * danceStrobe * strobePeakNorm);
       }
       ctx.drawImage(sCanvas, 0, 0, width, height);
       ctx.restore();
 
       // Additive flare pass specifically on avatars for unmistakable strobe brighten pop
-      const flareAlpha = Math.min(0.88, danceStrobe * peakNorm * 0.76);
+      const flareAlpha = Math.min(0.88, danceStrobe * strobePeakNorm * 0.76);
       if (flareAlpha > 0.02) {
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
@@ -3189,13 +3261,8 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
         ctx.restore();
       }
     } else {
-      // Rapid dim trough during peak shutter-off OR moody dimmed resting state between beats
-      const dimShade = inBeatPeak
-        ? Math.min(0.88, danceStrobe * 0.82)
-        : Math.min(0.48, danceStrobe * 0.42);
-      const dimCompositeAlpha = inBeatPeak
-        ? Math.max(0.16, 1 - danceStrobe * 0.76)
-        : Math.max(0.58, 1 - danceStrobe * 0.36);
+      // Tempo-synced shutter-off dim trough between flashes
+      const dimShade = Math.min(0.88, danceStrobe * 0.8 * strobeDimContrast);
 
       if (dimShade > 0.01) {
         sCtx.save();
@@ -3206,9 +3273,509 @@ export function renderDanceCharacter(params: RenderDanceParams): void {
       }
 
       ctx.save();
-      ctx.globalAlpha = dimCompositeAlpha;
+      ctx.globalAlpha = strobeDimCompositeAlpha;
       ctx.drawImage(sCanvas, 0, 0, width, height);
       ctx.restore();
     }
   }
 }
+
+function renderRigSkeleton(params: {
+  ctx: DanceRenderCtx;
+  avatarStyle: DanceAvatarStyle;
+  projected: ProjectedJoint[];
+  bones: Array<[number, number]>;
+  headIdx: number;
+  useMocap: boolean;
+  charHeight: number;
+  currentTime: number;
+  beatDrive: number;
+  lyricAccent: number;
+  yaw: number;
+  primaryColor: string;
+  secondaryColor: string;
+  rimLightColor: string;
+  hasCustomRim: boolean;
+  spotlightIntensity: number;
+  hexToRgba: (hex: string, alpha: number) => string;
+}): void {
+  const {
+    ctx: avatarCtx,
+    avatarStyle,
+    projected,
+    bones,
+    headIdx,
+    useMocap,
+    charHeight,
+    currentTime,
+    beatDrive,
+    lyricAccent,
+    yaw,
+    primaryColor: slotPrimary,
+    secondaryColor: slotSecondary,
+    rimLightColor: slotRimColor,
+    hasCustomRim,
+    spotlightIntensity,
+    hexToRgba,
+  } = params;
+
+  const sortedBones = bones
+    .map(([a, b], idx) => ({
+      a,
+      b,
+      idx,
+      midZ: ((projected[a]?.z ?? 0) + (projected[b]?.z ?? 0)) * 0.5,
+    }))
+    .filter((item) => projected[item.a] && projected[item.b])
+    .sort((u, v) => u.midZ - v.midZ);
+
+  const limbBaseWidth = Math.max(2, charHeight * 0.032);
+  const headRadius = Math.max(4, charHeight * 0.068);
+  const rigGlowFactor = 0.35 + 0.65 * Math.min(1.5, spotlightIntensity);
+
+  if (avatarStyle === 'holo-wire') {
+    avatarCtx.lineCap = 'round';
+    avatarCtx.shadowColor = slotRimColor;
+    avatarCtx.shadowBlur = Math.max(
+      4,
+      charHeight * (0.04 + beatDrive * 0.05) * rigGlowFactor
+    );
+
+    if (beatDrive > 0.12) {
+      avatarCtx.save();
+      avatarCtx.globalAlpha = Math.min(0.4, beatDrive * 0.35);
+      const echoShift = Math.sin(currentTime * 18) * charHeight * 0.025;
+      avatarCtx.strokeStyle = slotSecondary;
+      avatarCtx.lineWidth = Math.max(1.5, limbBaseWidth * 0.45);
+      for (const { a, b } of sortedBones) {
+        const pa = projected[a];
+        const pb = projected[b];
+        avatarCtx.beginPath();
+        avatarCtx.moveTo(pa.x + echoShift, pa.y);
+        avatarCtx.lineTo(pb.x + echoShift, pb.y);
+        avatarCtx.stroke();
+      }
+      avatarCtx.restore();
+    }
+
+    for (const { a, b, idx } of sortedBones) {
+      const pa = projected[a];
+      const pb = projected[b];
+      avatarCtx.strokeStyle =
+        idx % 2 === 0 ? slotRimColor : hasCustomRim ? slotPrimary : slotSecondary;
+      avatarCtx.lineWidth = Math.max(
+        1.75,
+        limbBaseWidth * 0.52 * ((pa.scale + pb.scale) * 0.5)
+      );
+      avatarCtx.beginPath();
+      avatarCtx.moveTo(pa.x, pa.y);
+      avatarCtx.lineTo(pb.x, pb.y);
+      avatarCtx.stroke();
+    }
+
+    if (projected.length > 0) {
+      avatarCtx.fillStyle = '#f8fafc';
+      avatarCtx.strokeStyle = slotSecondary;
+      avatarCtx.lineWidth = Math.max(1, limbBaseWidth * 0.44 * 0.28);
+      avatarCtx.beginPath();
+      for (let j = 0; j < projected.length; j++) {
+        if (j === headIdx) continue;
+        const p = projected[j];
+        const r = Math.max(2, limbBaseWidth * 0.44 * p.scale);
+        avatarCtx.moveTo(p.x + r, p.y);
+        avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      }
+      avatarCtx.fill();
+      avatarCtx.stroke();
+
+      const ph = projected[headIdx];
+      if (ph) {
+        const r = headRadius * 0.78 * ph.scale;
+        avatarCtx.fillStyle = hexToRgba(slotRimColor, 0.28);
+        avatarCtx.strokeStyle = slotRimColor;
+        avatarCtx.lineWidth = Math.max(1.2, r * 0.28);
+        avatarCtx.beginPath();
+        avatarCtx.arc(ph.x, ph.y, r, 0, Math.PI * 2);
+        avatarCtx.fill();
+        avatarCtx.stroke();
+      }
+    }
+    return;
+  }
+
+  if (avatarStyle === 'minimal-rig') {
+    avatarCtx.lineCap = 'round';
+    avatarCtx.shadowColor = hasCustomRim
+      ? hexToRgba(slotRimColor, 0.55)
+      : 'rgba(0, 0, 0, 0.55)';
+    avatarCtx.shadowBlur = Math.max(4, 10 * rigGlowFactor);
+    for (const { a, b } of sortedBones) {
+      const pa = projected[a];
+      const pb = projected[b];
+      const isTorso = !useMocap && a <= J_CHEST && b <= J_NECK;
+      avatarCtx.strokeStyle = '#f1f5f9';
+      avatarCtx.lineWidth = Math.max(
+        2,
+        limbBaseWidth * (isTorso ? 1.25 : 0.72) * ((pa.scale + pb.scale) * 0.5)
+      );
+      avatarCtx.beginPath();
+      avatarCtx.moveTo(pa.x, pa.y);
+      avatarCtx.lineTo(pb.x, pb.y);
+      avatarCtx.stroke();
+    }
+    avatarCtx.fillStyle = slotRimColor;
+    avatarCtx.beginPath();
+    for (let j = 0; j < projected.length; j++) {
+      if (j === headIdx) continue;
+      const p = projected[j];
+      const r = Math.max(2, limbBaseWidth * 0.42 * p.scale);
+      avatarCtx.moveTo(p.x + r, p.y);
+      avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    }
+    avatarCtx.fill();
+    const phMin = projected[headIdx];
+    if (phMin) {
+      avatarCtx.fillStyle = '#f8fafc';
+      avatarCtx.beginPath();
+      avatarCtx.arc(phMin.x, phMin.y, headRadius * 0.9 * phMin.scale, 0, Math.PI * 2);
+      avatarCtx.fill();
+    }
+    return;
+  }
+
+  // 'neon-cyber': luminous cybernetic dancer rig
+  avatarCtx.lineCap = 'round';
+  avatarCtx.lineJoin = 'round';
+
+  for (const { a, b } of sortedBones) {
+    const pa = projected[a];
+    const pb = projected[b];
+    const isTorso = !useMocap && a <= J_CHEST && b <= J_NECK;
+    const wPx = Math.max(
+      2.2,
+      limbBaseWidth * (isTorso ? 1.48 : 0.9) * ((pa.scale + pb.scale) * 0.5)
+    );
+
+    const boneGrad = avatarCtx.createLinearGradient(pa.x, pa.y, pb.x, pb.y);
+    boneGrad.addColorStop(0, slotRimColor);
+    boneGrad.addColorStop(1, slotSecondary);
+
+    avatarCtx.shadowColor = slotRimColor;
+    avatarCtx.shadowBlur = Math.max(
+      4,
+      charHeight * (0.045 + beatDrive * 0.045) * rigGlowFactor
+    );
+    avatarCtx.strokeStyle = boneGrad;
+    avatarCtx.lineWidth = wPx;
+    avatarCtx.beginPath();
+    avatarCtx.moveTo(pa.x, pa.y);
+    avatarCtx.lineTo(pb.x, pb.y);
+    avatarCtx.stroke();
+
+    avatarCtx.shadowBlur = 0;
+    avatarCtx.strokeStyle = 'rgba(248, 250, 252, 0.78)';
+    avatarCtx.lineWidth = Math.max(1, wPx * 0.28);
+    avatarCtx.beginPath();
+    avatarCtx.moveTo(pa.x, pa.y);
+    avatarCtx.lineTo(pb.x, pb.y);
+    avatarCtx.stroke();
+  }
+
+  avatarCtx.fillStyle = '#ffffff';
+  avatarCtx.shadowColor = slotRimColor;
+  avatarCtx.shadowBlur = Math.max(4, 9 * rigGlowFactor);
+  avatarCtx.beginPath();
+  for (let j = 0; j < projected.length; j++) {
+    if (j === headIdx) continue;
+    const p = projected[j];
+    const r = Math.max(2, limbBaseWidth * 0.42 * p.scale);
+    avatarCtx.moveTo(p.x + r, p.y);
+    avatarCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  }
+  avatarCtx.fill();
+
+  const ph = projected[headIdx];
+  if (ph) {
+    const hr = headRadius * ph.scale;
+    avatarCtx.shadowColor = slotRimColor;
+    avatarCtx.shadowBlur = Math.max(6, hr * (0.7 + beatDrive * 0.6) * rigGlowFactor);
+    avatarCtx.fillStyle = '#090b10';
+    avatarCtx.strokeStyle = slotRimColor;
+    avatarCtx.lineWidth = Math.max(1.5, hr * 0.16);
+    avatarCtx.beginPath();
+    avatarCtx.arc(ph.x, ph.y, hr, 0, Math.PI * 2);
+    avatarCtx.fill();
+    avatarCtx.stroke();
+
+    const visorOffsetX = Math.sin(yaw) * hr * 0.36;
+    avatarCtx.shadowColor = slotSecondary;
+    avatarCtx.strokeStyle = lyricAccent > 0.25 ? '#ffffff' : slotSecondary;
+    avatarCtx.lineWidth = Math.max(1.5, hr * 0.22);
+    avatarCtx.beginPath();
+    avatarCtx.moveTo(ph.x + visorOffsetX - hr * 0.45, ph.y - hr * 0.05);
+    avatarCtx.lineTo(ph.x + visorOffsetX + hr * 0.45, ph.y - hr * 0.05);
+    avatarCtx.stroke();
+  }
+}
+
+function previewHexToRgba(hex: string, alpha: number): string {
+  const clean = (hex || '#22d3ee').trim().replace('#', '');
+  let full = clean;
+  if (clean.length === 3) {
+    full = `${clean[0]}${clean[0]}${clean[1]}${clean[1]}${clean[2]}${clean[2]}`;
+  }
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) {
+    return `rgba(34, 211, 238, ${alpha})`;
+  }
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+const SIGNATURE_PREVIEW_TIMES: Partial<Record<DanceStyleKey, number>> = {
+  'mocap-salsa': 0.88,
+  'mocap-ballet': 3.08,
+  'mocap-breakdance': 3.24,
+  'mocap-moonwalk': 1.0,
+  'mocap-house': 0.88,
+  'mocap-contemporary': 3.0,
+  'mocap-afrobeat': 1.0,
+  'mocap-tango': 1.92,
+  'mocap-shuffle': 1.0,
+  'mocap-kpop': 1.28,
+  'mocap-disco': 1.0,
+  'mocap-waltz': 0.56,
+  'hip-hop': 0.65,
+  shuffle: 0.55,
+  robot: 0.85,
+  groove: 1.1,
+  'break-freeze': 0.9,
+};
+
+export function getSignaturePreviewTime(
+  style: DanceStyleKey,
+  mocapClip?: MocapClipData | null
+): number {
+  if (style === 'mocap-custom') {
+    if (mocapClip && mocapClip.frameCount > 0 && mocapClip.fps > 0) {
+      return (mocapClip.frameCount / mocapClip.fps) * 0.35;
+    }
+    return 0.7;
+  }
+  return SIGNATURE_PREVIEW_TIMES[style] ?? 0.9;
+}
+
+export interface RenderMocapPreviewParams {
+  ctx: CanvasRenderingContext2D;
+  width: number;
+  height: number;
+  style: DanceStyleKey;
+  avatarStyle?: DanceAvatarStyle;
+  primaryColor?: string;
+  secondaryColor?: string;
+  rimColor?: string;
+  mocapClip?: MocapClipData | null;
+}
+
+export function renderMocapPreviewThumbnail(params: RenderMocapPreviewParams): void {
+  const {
+    ctx,
+    width,
+    height,
+    style,
+    avatarStyle = 'human-dancer',
+    primaryColor = '#22d3ee',
+    secondaryColor = '#a855f7',
+    rimColor,
+    mocapClip,
+  } = params;
+
+  if (width <= 0 || height <= 0) return;
+
+  const isMissingCustomClip =
+    style === 'mocap-custom' && (!mocapClip || mocapClip.frameCount === 0);
+  const rawRim = typeof rimColor === 'string' ? rimColor.trim() : '';
+  const hasCustomRim = /^#[0-9a-fA-F]{3,8}$/.test(rawRim);
+  const resolvedRim = hasCustomRim ? rawRim : primaryColor;
+
+  ctx.save();
+  ctx.clearRect(0, 0, width, height);
+
+  // Studio stage vignette backdrop
+  const bgGrad = ctx.createRadialGradient(
+    width * 0.5,
+    height * 0.38,
+    width * 0.06,
+    width * 0.5,
+    height * 0.5,
+    Math.max(width, height) * 0.78
+  );
+  bgGrad.addColorStop(0, previewHexToRgba(resolvedRim, 0.16));
+  bgGrad.addColorStop(0.55, '#0b111d');
+  bgGrad.addColorStop(1, '#05070c');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Subtle floor grid perspective line & spotlight pool
+  const baseFloorY = height * 0.86;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(6, baseFloorY);
+  ctx.lineTo(width - 6, baseFloorY);
+  ctx.stroke();
+
+  const floorGlow = ctx.createRadialGradient(
+    width * 0.5,
+    baseFloorY,
+    2,
+    width * 0.5,
+    baseFloorY,
+    width * 0.38
+  );
+  floorGlow.addColorStop(0, previewHexToRgba(resolvedRim, 0.28));
+  floorGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.save();
+  ctx.translate(width * 0.5, baseFloorY);
+  ctx.scale(1, 0.28);
+  ctx.translate(-width * 0.5, -baseFloorY);
+  ctx.fillStyle = floorGlow;
+  ctx.beginPath();
+  ctx.arc(width * 0.5, baseFloorY, width * 0.38, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  const previewTime = getSignaturePreviewTime(style, mocapClip);
+  const pose = evaluateStylePose(
+    style,
+    previewTime,
+    0.7,
+    0.6,
+    0.52,
+    0.68,
+    1.0,
+    0.35,
+    0,
+    mocapClip
+  );
+
+  const yaw = -0.26;
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const fov = 3.2;
+
+  const projectAt = (
+    cx: number,
+    fy: number,
+    ch: number
+  ): ProjectedJoint[] =>
+    pose.joints3D.map(([jx, jy, jz]) => {
+      const rx = jx * cosY + jz * sinY;
+      const rz = -jx * sinY + jz * cosY;
+      const depth = Math.max(1.4, fov - rz * 0.75);
+      const persp = fov / depth;
+      return {
+        x: cx + rx * (ch * 0.56) * persp,
+        y: fy - jy * (ch * 0.56) * persp,
+        z: rz,
+        scale: persp,
+        worldY: jy,
+      };
+    });
+
+  // First pass projection to auto-fit wide poses (e.g. breakdance freeze / arabesque) inside thumbnail
+  const trialHeight = height * 0.68;
+  const trialProj = projectAt(width * 0.5, baseFloorY, trialHeight);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < trialProj.length; i++) {
+    const p = trialProj[i];
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  const headMargin = trialHeight * 0.13;
+  const limbMargin = trialHeight * 0.09;
+  minX -= limbMargin;
+  maxX += limbMargin;
+  minY -= headMargin;
+  maxY += limbMargin * 0.5;
+
+  const spanX = Math.max(12, maxX - minX);
+  const spanY = Math.max(12, maxY - minY);
+  const availW = Math.max(24, width - 16);
+  const availH = Math.max(24, height - 16);
+  const fitScale = Math.min(1.08, availW / spanX, availH / spanY);
+
+  const charHeight = trialHeight * fitScale;
+  const rawMidX = (minX + maxX) * 0.5;
+  const centerX = width * 0.5 + (width * 0.5 - rawMidX) * fitScale;
+  const floorY = baseFloorY + (height * 0.87 - baseFloorY) * fitScale;
+  const projected = projectAt(centerX, floorY, charHeight);
+
+  // Soft contact shadow under feet
+  ctx.fillStyle = 'rgba(2, 4, 10, 0.55)';
+  ctx.beginPath();
+  ctx.ellipse(centerX, floorY + 1, charHeight * 0.22, charHeight * 0.045, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  const renderStyle: DanceAvatarStyle = isMissingCustomClip ? 'holo-wire' : avatarStyle;
+  if (isMissingCustomClip) {
+    ctx.globalAlpha = 0.42;
+  }
+
+  if (isHumanAvatarStyle(renderStyle)) {
+    const indices = resolveHumanoidIndices(pose.jointNames, projected.length);
+    if (indices) {
+      renderHumanVolumetricDancer({
+        ctx,
+        avatarStyle: renderStyle,
+        projected,
+        indices,
+        floorY,
+        centerX,
+        charHeight,
+        currentTime: previewTime,
+        beatDrive: 0.45,
+        lyricAccent: 0.2,
+        primaryColor,
+        secondaryColor,
+        rimLightColor: resolvedRim,
+        hasCustomRim,
+        spotlightIntensity: 1.15,
+        danceShadowEnabled: false,
+        hexToRgba: previewHexToRgba,
+      });
+      ctx.restore();
+      return;
+    }
+  }
+
+  renderRigSkeleton({
+    ctx,
+    avatarStyle: renderStyle,
+    projected,
+    bones: pose.bones,
+    headIdx: pose.headIdx,
+    useMocap: pose.useMocap,
+    charHeight,
+    currentTime: previewTime,
+    beatDrive: 0.45,
+    lyricAccent: 0.2,
+    yaw,
+    primaryColor,
+    secondaryColor,
+    rimLightColor: resolvedRim,
+    hasCustomRim,
+    spotlightIntensity: 1.15,
+    hexToRgba: previewHexToRgba,
+  });
+
+  ctx.restore();
+}
+

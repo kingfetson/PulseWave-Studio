@@ -20,18 +20,25 @@ import {
 } from './audioCodecConfig';
 import {
   createInitialBeatState,
+  estimateBpmFromTracker,
   OfflineAudioAnalyzer,
   OfflineLowPassBeatTracker,
   sliceAudioBufferWithFade,
   stepBeatDetector,
 } from './audioEngine';
-import { renderVisualizerFrame } from './canvasRenderer';
+import { RenderImageSource, renderVisualizerFrame } from './canvasRenderer';
 import { resolveAutoCycledColors } from './colorHarmony';
 import {
   ResolvedVideoConfig,
   resolveSupportedVideoConfigForContainer,
 } from './videoConfig';
 import { selectBestMediaRecorderMime } from './videoMimeSupport';
+
+export type DynamicBgResolver = (
+  trackTimeSec: number,
+  width: number,
+  height: number
+) => Promise<RenderImageSource | null> | RenderImageSource | null;
 
 export interface ExportMp4Options {
   audioBuffer: AudioBuffer;
@@ -41,6 +48,7 @@ export interface ExportMp4Options {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  resolveBgImageAtTime?: DynamicBgResolver;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
   autoDownload?: boolean;
@@ -369,6 +377,7 @@ async function exportProjectOnMainThread(options: {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  resolveBgImageAtTime?: DynamicBgResolver;
   mocapClip?: MocapClipData | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
@@ -388,6 +397,7 @@ async function exportProjectOnMainThread(options: {
     lyrics,
     bgImage,
     albumImage,
+    resolveBgImageAtTime,
     mocapClip,
     signal,
     onProgress,
@@ -608,6 +618,13 @@ async function exportProjectOnMainThread(options: {
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
       : null;
+    const exportTrackBpm = beatTracker
+      ? estimateBpmFromTracker(
+          beatTracker,
+          Math.min(25, slicedBuffer.duration),
+          settings.beatSensitivity
+        )
+      : null;
     const beatState = createInitialBeatState();
     const minDim = Math.min(width, height);
     const frequencyData = new Uint8Array(1024);
@@ -649,6 +666,10 @@ async function exportProjectOnMainThread(options: {
         beatTriggered = step.triggered;
       }
 
+      const dynamicBg = resolveBgImageAtTime
+        ? await resolveBgImageAtTime(absoluteTrackTime, width, height)
+        : null;
+
       renderVisualizerFrame({
         ctx,
         width,
@@ -659,13 +680,14 @@ async function exportProjectOnMainThread(options: {
         timeDomainData,
         settings,
         lyrics,
-        bgImage,
+        bgImage: dynamicBg ?? bgImage,
         albumImage,
         particles,
         isExport: true,
         albumRotationRef,
         beatBurst,
         beatTriggered,
+        bpm: beatState.estimatedBpm ?? exportTrackBpm ?? 120,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration,
@@ -765,6 +787,7 @@ async function exportProjectViaMediaRecorder(options: {
   lyrics: LyricLine[];
   bgImage: HTMLImageElement | null;
   albumImage: HTMLImageElement | null;
+  resolveBgImageAtTime?: DynamicBgResolver;
   mocapClip?: MocapClipData | null;
   signal: AbortSignal;
   onProgress: (state: ExportProgressState) => void;
@@ -784,6 +807,7 @@ async function exportProjectViaMediaRecorder(options: {
     lyrics,
     bgImage,
     albumImage,
+    resolveBgImageAtTime,
     mocapClip,
     signal,
     onProgress,
@@ -869,6 +893,13 @@ async function exportProjectViaMediaRecorder(options: {
   const beatTracker = needsBeatDetector
     ? new OfflineLowPassBeatTracker(slicedBuffer, 140, 1.2)
     : null;
+  const exportTrackBpm = beatTracker
+    ? estimateBpmFromTracker(
+        beatTracker,
+        Math.min(25, slicedBuffer.duration),
+        settings.beatSensitivity
+      )
+    : null;
   const beatState = createInitialBeatState();
   const minDim = Math.min(width, height);
   const frequencyData = new Uint8Array(1024);
@@ -947,11 +978,26 @@ async function exportProjectViaMediaRecorder(options: {
     recorder.start(250);
     source.start();
 
+    let latestResolvedBg: RenderImageSource | null = null;
+    let bgResolveInFlight = false;
+
     const tick = () => {
       if (settled || signal.aborted) return;
       const elapsedSec = Math.min(clipDuration, (performance.now() - renderStartPerfMs) / 1000);
       const absoluteTrackTime = trimStart + elapsedSec;
       const currentFrame = Math.min(totalFrames, Math.max(1, Math.round(elapsedSec * fps)));
+
+      if (resolveBgImageAtTime && !bgResolveInFlight) {
+        bgResolveInFlight = true;
+        Promise.resolve(resolveBgImageAtTime(absoluteTrackTime, width, height))
+          .then((resolved) => {
+            latestResolvedBg = resolved;
+          })
+          .catch(() => {})
+          .finally(() => {
+            bgResolveInFlight = false;
+          });
+      }
 
       analyzer.analyzeAt(elapsedSec, settings.smoothing, frequencyData, timeDomainData);
 
@@ -984,13 +1030,14 @@ async function exportProjectViaMediaRecorder(options: {
         timeDomainData,
         settings,
         lyrics,
-        bgImage,
+        bgImage: latestResolvedBg ?? bgImage,
         albumImage,
         particles,
         isExport: true,
         albumRotationRef,
         beatBurst,
         beatTriggered,
+        bpm: beatState.estimatedBpm ?? exportTrackBpm ?? 120,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration,
@@ -1053,6 +1100,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
     lyrics,
     bgImage,
     albumImage,
+    resolveBgImageAtTime,
     mocapClip,
     signal,
     onProgress,
@@ -1088,6 +1136,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
   };
 
   const fullTrackDuration = audioBuffer.duration;
+  const shouldUseWorker = !resolveBgImageAtTime && canUseWorkerPipeline();
 
   if (isWebCodecsUnavailable()) {
     exportResult = await exportProjectViaMediaRecorder({
@@ -1098,12 +1147,13 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
       lyrics,
       bgImage,
       albumImage,
+      resolveBgImageAtTime,
       mocapClip,
       signal,
       onProgress,
       startTimeMs,
     });
-  } else if (canUseWorkerPipeline()) {
+  } else if (shouldUseWorker) {
     try {
       onProgress({
         status: 'preparing',
@@ -1134,6 +1184,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           lyrics,
           bgImage,
           albumImage,
+          resolveBgImageAtTime,
           mocapClip,
           signal,
           onProgress,
@@ -1149,6 +1200,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
             lyrics,
             bgImage,
             albumImage,
+            resolveBgImageAtTime,
             mocapClip,
             signal,
             onProgress,
@@ -1164,6 +1216,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
               lyrics,
               bgImage,
               albumImage,
+              resolveBgImageAtTime,
               mocapClip,
               signal,
               onProgress,
@@ -1187,6 +1240,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
         lyrics,
         bgImage,
         albumImage,
+        resolveBgImageAtTime,
         mocapClip,
         signal,
         onProgress,
@@ -1202,6 +1256,7 @@ export async function exportProjectToMp4(options: ExportMp4Options): Promise<Exp
           lyrics,
           bgImage,
           albumImage,
+          resolveBgImageAtTime,
           mocapClip,
           signal,
           onProgress,

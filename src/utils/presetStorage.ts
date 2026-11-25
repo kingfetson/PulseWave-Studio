@@ -487,7 +487,7 @@ export function validateAndNormalizeSettings(
       obj.danceMedleyTrigger as DanceMedleyTriggerMode
     )
       ? (obj.danceMedleyTrigger as DanceMedleyTriggerMode)
-      : fallback.danceMedleyTrigger ?? 'beats',
+      : fallback.danceMedleyTrigger ?? 'seconds',
     danceMedleyIntervalBeats: Math.round(
       clampNumber(
         obj.danceMedleyIntervalBeats,
@@ -539,6 +539,9 @@ export function validateAndNormalizeSettings(
     danceStrobe: Number(
       clampNumber(obj.danceStrobe, 0, 1, fallback.danceStrobe ?? 0).toFixed(2)
     ),
+    danceGlow: Number(
+      clampNumber(obj.danceGlow, 0, 1.5, fallback.danceGlow ?? 0).toFixed(2)
+    ),
     danceMirror:
       typeof obj.danceMirror === 'boolean'
         ? obj.danceMirror
@@ -569,6 +572,9 @@ export function validateAndNormalizeSettings(
         ? obj.showTrackOverlay
         : fallback.showTrackOverlay,
     lyricPosition: Math.round(clampNumber(obj.lyricPosition, 15, 92, fallback.lyricPosition)),
+    lyricSize: Number(
+      clampNumber(obj.lyricSize, 0.7, 1.5, fallback.lyricSize ?? 1).toFixed(2)
+    ),
     lyricLetterSpacing: Number(
       clampNumber(obj.lyricLetterSpacing, -0.06, 0.3, fallback.lyricLetterSpacing ?? 0).toFixed(2)
     ),

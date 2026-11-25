@@ -816,6 +816,10 @@ export function createInitialBeatState(): BeatState {
     burstIntensity: 0,
     lastEnergy: 0,
     shockwaves: [],
+    elapsedTime: 0,
+    lastBeatTime: undefined,
+    beatIntervals: [],
+    estimatedBpm: undefined,
   };
 }
 
@@ -845,6 +849,7 @@ export function stepBeatDetector(
   primaryColor: string,
   secondaryColor: string
 ): { triggered: boolean; burstIntensity: number } {
+  state.elapsedTime = (state.elapsedTime ?? 0) + Math.max(0, dt);
   state.cooldown = Math.max(0, state.cooldown - dt);
   state.lastEnergy = lowPassRms;
 
@@ -861,6 +866,27 @@ export function stepBeatDetector(
     triggered = true;
     state.burstIntensity = 1.0;
     state.cooldown = 0.16; // 160ms refractory guard against double-triggering
+
+    if (state.lastBeatTime !== undefined) {
+      const interval = state.elapsedTime - state.lastBeatTime;
+      if (interval >= 0.26 && interval <= 1.6) {
+        const intervals = state.beatIntervals ?? [];
+        intervals.push(interval);
+        if (intervals.length > 12) intervals.shift();
+        state.beatIntervals = intervals;
+
+        const sorted = [...intervals].sort((a, b) => a - b);
+        const medianSec = sorted[Math.floor(sorted.length / 2)];
+        let bpm = 60 / medianSec;
+        while (bpm < 68) bpm *= 2;
+        while (bpm > 175) bpm /= 2;
+        state.estimatedBpm =
+          state.estimatedBpm !== undefined
+            ? Math.round(state.estimatedBpm * 0.65 + bpm * 0.35)
+            : Math.round(bpm);
+      }
+    }
+    state.lastBeatTime = state.elapsedTime;
 
     if (state.shockwaves.length >= 6) {
       state.shockwaves.shift();
@@ -1000,3 +1026,58 @@ export class OfflineLowPassBeatTracker {
   }
 }
 
+export function estimateBpmFromTracker(
+  tracker: OfflineLowPassBeatTracker,
+  durationSec: number,
+  beatSensitivity = 1.25
+): number | null {
+  const safeDuration = Math.max(0, Math.min(30, durationSec));
+  if (safeDuration < 1.5) return null;
+
+  const beatState = createInitialBeatState();
+  const dt = 0.015;
+  const beatTimes: number[] = [];
+
+  for (let t = 0; t <= safeDuration; t += dt) {
+    const lowPassRms = tracker.getLowPassRmsAt(t, 1024);
+    const step = stepBeatDetector(
+      beatState,
+      lowPassRms,
+      dt,
+      beatSensitivity,
+      100,
+      '#22d3ee',
+      '#ec4899'
+    );
+    if (step.triggered) {
+      beatTimes.push(t);
+    }
+  }
+
+  const intervals: number[] = [];
+  for (let i = 1; i < beatTimes.length; i++) {
+    const diff = beatTimes[i] - beatTimes[i - 1];
+    if (diff >= 0.28 && diff <= 1.5) {
+      intervals.push(diff);
+    }
+  }
+  if (intervals.length === 0) return beatState.estimatedBpm ?? null;
+
+  const sorted = [...intervals].sort((a, b) => a - b);
+  const medianSec = sorted[Math.floor(sorted.length / 2)];
+  let bpm = 60 / medianSec;
+  while (bpm < 68) bpm *= 2;
+  while (bpm > 175) bpm /= 2;
+  return Math.round(bpm);
+}
+
+export function estimateBpmFromAudioBuffer(
+  buffer: AudioBuffer | PcmAudioInput,
+  beatSensitivity = 1.25
+): number | null {
+  const { sampleRate, length } = getInputChannels(buffer);
+  const durationSec = length / Math.max(1, sampleRate);
+  if (durationSec < 1.5) return null;
+  const tracker = new OfflineLowPassBeatTracker(buffer, 140, 1.2);
+  return estimateBpmFromTracker(tracker, durationSec, beatSensitivity);
+}

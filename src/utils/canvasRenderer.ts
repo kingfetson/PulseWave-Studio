@@ -28,7 +28,12 @@ import { sampleParticleFlowMap } from './particleFlowMap';
 
 export type RenderCanvas = HTMLCanvasElement | OffscreenCanvas;
 export type RenderContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
-export type RenderImageSource = HTMLImageElement | ImageBitmap;
+export type RenderImageSource =
+  | HTMLImageElement
+  | ImageBitmap
+  | HTMLCanvasElement
+  | OffscreenCanvas
+  | HTMLVideoElement;
 
 export interface RenderFrameParams {
   ctx: RenderContext2D;
@@ -47,6 +52,7 @@ export interface RenderFrameParams {
   albumRotationRef?: { angle: number; cubeX?: number; cubeY?: number; cubeZ?: number };
   beatBurst?: number; // 0..1 decaying bass-drum impulse
   beatTriggered?: boolean;
+  bpm?: number | null;
   beatShockwaves?: BeatShockwave[];
   motionBlurState?: MotionBlurState;
   sceneTransitionState?: SceneTransitionState;
@@ -54,10 +60,31 @@ export interface RenderFrameParams {
   mocapClip?: MocapClipData | null;
 }
 
+function isDynamicImageSource(img: RenderImageSource | null): boolean {
+  if (!img) return false;
+  if (typeof HTMLVideoElement !== 'undefined' && img instanceof HTMLVideoElement) {
+    return true;
+  }
+  if (typeof HTMLCanvasElement !== 'undefined' && img instanceof HTMLCanvasElement) {
+    return true;
+  }
+  if (typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas) {
+    return true;
+  }
+  return 'videoWidth' in img;
+}
+
 function getImageDimensions(
   img: RenderImageSource | null
 ): { width: number; height: number } | null {
   if (!img) return null;
+  if ('videoWidth' in img) {
+    if (img.readyState < 2 || img.videoWidth <= 0 || img.videoHeight <= 0) return null;
+    return {
+      width: img.videoWidth,
+      height: img.videoHeight,
+    };
+  }
   if ('naturalWidth' in img) {
     if (!img.complete || img.naturalWidth <= 0) return null;
     return {
@@ -1115,6 +1142,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     albumRotationRef,
     beatBurst = 0,
     beatTriggered = false,
+    bpm,
     beatShockwaves,
     motionBlurState,
     sceneTransitionState,
@@ -1239,11 +1267,19 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   const baseBgKey = `${width}x${height}|${settings.bgColor}|${settings.bgBlur}|${bgFit}|${bgScale}|${bgOffsetX}|${bgOffsetY}|${bgBrightness}|${bgContrast}|${bgSaturation}|${bgDims ? `${bgDims.width}x${bgDims.height}` : 'none'}`;
   const bgKey = `${baseBgKey}|${settings.bgDim}|${bgVignette}|${bgTintStrength}|${bgTintKey}`;
 
-  if (cachedBgCanvas && cachedBgKey === bgKey && cachedBgImageRef === bgImage) {
+  const allowBgCache = !isDynamicImageSource(bgImage);
+
+  if (
+    allowBgCache &&
+    cachedBgCanvas &&
+    cachedBgKey === bgKey &&
+    cachedBgImageRef === bgImage
+  ) {
     ctx.drawImage(cachedBgCanvas, 0, 0, width, height);
   } else {
     // Stage A: expensive blurred & tone-filtered photo is cached independently of auto-cycled tint colors
     const hasBaseCache =
+      allowBgCache &&
       cachedBaseBgCanvas &&
       cachedBaseBgKey === baseBgKey &&
       cachedBaseBgImageRef === bgImage;
@@ -4317,6 +4353,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
       treble,
       beatBurst,
       beatTriggered,
+      bpm,
       isExport,
       settings,
       lyrics,
@@ -4808,8 +4845,9 @@ function renderLyricsOnlyState(
     styleSpec.uppercase ? txt.toUpperCase() : txt;
   const italicPrefix = styleSpec.italic ? 'italic ' : '';
 
+  const lyricSizeScale = Math.max(0.7, Math.min(1.5, settings.lyricSize ?? 1));
   const singleColMaxW = width - safePadX * 2.2;
-  const cacheKey = `${width}x${height}|${isPortrait ? 1 : 0}|${safePadX.toFixed(1)}|${stageTop.toFixed(1)}|${layout}|${settings.lyricStyle}|${settings.lyricFont}|${settings.lyricLetterSpacing ?? 0}|${activeIdx}|${startIdx}-${endIdx}|${lyrics.length}|${lyrics[focusIdx]?.text ?? ''}|${lyrics[0]?.text ?? ''}`;
+  const cacheKey = `${width}x${height}|${isPortrait ? 1 : 0}|${safePadX.toFixed(1)}|${stageTop.toFixed(1)}|${layout}|${settings.lyricStyle}|${settings.lyricFont}|${lyricSizeScale.toFixed(2)}|${settings.lyricLetterSpacing ?? 0}|${activeIdx}|${startIdx}-${endIdx}|${lyrics.length}|${lyrics[focusIdx]?.text ?? ''}|${lyrics[0]?.text ?? ''}`;
 
   let fontSize: number;
   let useTwoCols: boolean;
@@ -4826,6 +4864,7 @@ function renderLyricsOnlyState(
   } else {
     fontSize = Math.round(
       minDim *
+        lyricSizeScale *
         (layout === 'half-verse'
           ? isPortrait
             ? 0.041
@@ -5333,6 +5372,7 @@ function renderLyricState(
     return;
   }
 
+  const lyricSizeScale = Math.max(0.7, Math.min(1.5, settings.lyricSize ?? 1));
   const maxTextWidth = width - safePadX * 2.2;
   const shadowIntensity = Math.max(0, Math.min(2, settings.lyricShadowIntensity ?? 1));
   const beatDrive = Math.max(0, Math.min(2, lyricBeatDrive));
@@ -5343,7 +5383,7 @@ function renderLyricState(
       : undefined;
 
   if (settings.lyricStyle === 'karaoke') {
-    const activeFontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
+    const activeFontSize = Math.round(minDim * lyricSizeScale * (isPortrait ? 0.044 : 0.042));
     const sideFontSize = Math.round(activeFontSize * 0.74);
     const anchorY = height * lyricPosFrac;
 
@@ -5467,7 +5507,7 @@ function renderLyricState(
   const currLine = lyrics[activeIdx];
 
   if (settings.lyricStyle === 'single-pop') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.048 : 0.045));
+    const fontSize = Math.round(minDim * lyricSizeScale * (isPortrait ? 0.048 : 0.045));
     const anchorY = height * lyricPosFrac;
     const elapsed = Math.max(0, currentTime - currLine.time);
     const introScale = elapsed < 0.14 ? 0.86 + (elapsed / 0.14) * 0.14 : 1;
@@ -5533,7 +5573,7 @@ function renderLyricState(
   }
 
   if (settings.lyricStyle === 'subtitle-bar') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.039 : 0.036));
+    const fontSize = Math.round(minDim * lyricSizeScale * (isPortrait ? 0.039 : 0.036));
     const anchorY = height * lyricPosFrac;
 
     ctx.save();

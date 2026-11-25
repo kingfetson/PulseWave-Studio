@@ -1,5 +1,7 @@
 import {
   normalizeProjectTags,
+  ProjectStateVersionRecord,
+  ProjectStateVersionSummary,
   StudioProjectRecord,
   StudioProjectSummary,
 } from '../types/studio';
@@ -9,9 +11,14 @@ const DB_VERSION = 1;
 const STORE_NAME = 'projects';
 const ACTIVE_PROJECT_KEY = 'pulsewave_active_project_id_v1';
 const AUTO_SAVE_PROJECTS_KEY = 'pulsewave_auto_save_projects_v1';
+const MAX_PROJECT_VERSIONS = 12;
 
 export function createProjectId(): string {
   return `proj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function createProjectVersionId(): string {
+  return `ver-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
 export function loadAutoSaveProjects(): boolean {
@@ -72,6 +79,63 @@ function openProjectsDb(): Promise<IDBDatabase> {
   });
 }
 
+function toVersionSummary(v: ProjectStateVersionRecord): ProjectStateVersionSummary {
+  return {
+    id: v.id,
+    label: v.label,
+    createdAt: v.createdAt,
+    reason: v.reason,
+    audioFileName: v.audioFileName,
+    bgImageName: v.bgImageName,
+    albumImageName: v.albumImageName,
+    mocapName: v.mocapName ?? v.mocapClip?.name ?? null,
+    mixClipCount: v.mixClipCount ?? 0,
+    lyricsCount: v.lyricsCount ?? v.lyrics.length,
+    trimStart: v.trimStart,
+    trimEnd: v.trimEnd,
+    duration: v.duration,
+    visualizerMode: v.visualizerMode ?? v.settings.visualizerMode,
+    aspectRatio: v.aspectRatio ?? v.settings.aspectRatio,
+    thumbnailDataUrl: v.thumbnailDataUrl ?? null,
+  };
+}
+
+export function areProjectVersionsEquivalent(
+  a: ProjectStateVersionRecord,
+  b: ProjectStateVersionRecord
+): boolean {
+  return (
+    a.audioFileName === b.audioFileName &&
+    a.bgImageName === b.bgImageName &&
+    a.albumImageName === b.albumImageName &&
+    (a.mocapName ?? null) === (b.mocapName ?? null) &&
+    a.trimStart === b.trimStart &&
+    a.trimEnd === b.trimEnd &&
+    a.duration === b.duration &&
+    (a.audioBlob?.size ?? 0) === (b.audioBlob?.size ?? 0) &&
+    (a.bgImageBlob?.size ?? 0) === (b.bgImageBlob?.size ?? 0) &&
+    (a.albumImageBlob?.size ?? 0) === (b.albumImageBlob?.size ?? 0) &&
+    JSON.stringify(a.lyrics) === JSON.stringify(b.lyrics) &&
+    JSON.stringify(a.settings) === JSON.stringify(b.settings)
+  );
+}
+
+export function mergeProjectVersionList(
+  existing: ProjectStateVersionRecord[] | undefined,
+  nextVersion: ProjectStateVersionRecord,
+  forceAppend = false
+): ProjectStateVersionRecord[] {
+  const currentList = Array.isArray(existing) ? existing : [];
+  if (
+    !forceAppend &&
+    currentList.length > 0 &&
+    areProjectVersionsEquivalent(currentList[0], nextVersion)
+  ) {
+    return currentList;
+  }
+  return [nextVersion, ...currentList].slice(0, MAX_PROJECT_VERSIONS);
+}
+
 function toSummary(rec: StudioProjectRecord): StudioProjectSummary {
   return {
     id: rec.id,
@@ -94,6 +158,7 @@ function toSummary(rec: StudioProjectRecord): StudioProjectSummary {
     albumImageName: rec.albumImageName,
     thumbnailDataUrl: rec.thumbnailDataUrl,
     hasAudioBlob: Boolean(rec.audioBlob),
+    versions: Array.isArray(rec.versions) ? rec.versions.map(toVersionSummary) : [],
   };
 }
 

@@ -1,20 +1,30 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   AudioWaveform,
+  BookmarkPlus,
   Cable,
   Check,
+  Clock,
   Download,
   FolderOpen,
+  History,
+  Image as ImageIcon,
   Layers,
   Loader2,
+  Music,
   Redo2,
+  RotateCcw,
   Save,
   Share2,
+  SlidersHorizontal,
   Sparkles,
   Undo2,
 } from 'lucide-react';
+import type { HistoryTimelineItem } from '../hooks/useStudioHistory';
 import {
   AspectRatioKey,
   ExportResolution,
+  SnapshotKind,
   resolveExportDimensions,
 } from '../types/studio';
 
@@ -37,18 +47,56 @@ interface TopBarProps {
   isSavingProject: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  historyEntries: HistoryTimelineItem[];
+  currentHistoryEntryId: string;
   midiActiveCount: number;
   midiConnectedCount: number;
   midiEnabled: boolean;
+  mixClipCount: number;
   onUndo: () => void;
   onRedo: () => void;
+  onJumpToHistory: (entryId: string) => void;
+  onCaptureProjectSnapshot: (label?: string) => void;
   onOpenProjects: () => void;
   onQuickSaveProject: () => void;
   onLoadDemo: () => void;
+  onOpenMixStudio: () => void;
   onOpenMidi: () => void;
   onOpenBatchExport: () => void;
   onOpenShare: () => void;
   onExport: () => void;
+}
+
+const KIND_BADGE_MAP: Record<
+  SnapshotKind,
+  { text: string; className: string }
+> = {
+  'project-state': {
+    text: 'Project State',
+    className: 'bg-cyan-500/15 text-cyan-300 border-cyan-400/35',
+  },
+  media: {
+    text: 'Media',
+    className: 'bg-emerald-500/12 text-emerald-300 border-emerald-500/30',
+  },
+  lyrics: {
+    text: 'Lyrics',
+    className: 'bg-amber-500/12 text-amber-300 border-amber-500/30',
+  },
+  settings: {
+    text: 'Settings',
+    className: 'bg-white/[0.06] text-slate-300 border-white/[0.12]',
+  },
+};
+
+function formatHistoryTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 export function TopBar({
@@ -70,20 +118,60 @@ export function TopBar({
   isSavingProject,
   canUndo,
   canRedo,
+  historyEntries,
+  currentHistoryEntryId,
   midiActiveCount,
   midiConnectedCount,
   midiEnabled,
+  mixClipCount,
   onUndo,
   onRedo,
+  onJumpToHistory,
+  onCaptureProjectSnapshot,
   onOpenProjects,
   onQuickSaveProject,
   onLoadDemo,
+  onOpenMixStudio,
   onOpenMidi,
   onOpenBatchExport,
   onOpenShare,
   onExport,
 }: TopBarProps) {
   const ratioInfo = resolveExportDimensions(aspectRatio, exportResolution);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [snapshotLabel, setSnapshotLabel] = useState('');
+  const historyMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isHistoryOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (
+        historyMenuRef.current &&
+        !historyMenuRef.current.contains(e.target as Node)
+      ) {
+        setIsHistoryOpen(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsHistoryOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [isHistoryOpen]);
+
+  const orderedEntries = [...historyEntries].reverse();
+
+  const handleCaptureSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onCaptureProjectSnapshot(snapshotLabel.trim() || undefined);
+    setSnapshotLabel('');
+  };
 
   return (
     <header className="h-14 shrink-0 border-b border-white/[0.08] bg-[#121620] px-4 lg:px-5 flex items-center justify-between gap-3">
@@ -129,9 +217,9 @@ export function TopBar({
             disabled={isSavingProject || isExporting}
             title={
               autoSaveProjects
-                ? 'Projects auto-save locally (click to save immediately)'
+                ? 'Projects auto-save locally (click to save immediately & record version snapshot)'
                 : activeProjectId
-                ? 'Save changes to current project'
+                ? 'Save changes & record version snapshot'
                 : 'Save project locally'
             }
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 ${
@@ -178,7 +266,8 @@ export function TopBar({
 
       <div className="flex items-center gap-2 shrink-0">
         <div
-          className="flex items-center gap-1 pr-2 border-r border-white/[0.08]"
+          ref={historyMenuRef}
+          className="relative flex items-center gap-1 pr-2 border-r border-white/[0.08]"
           role="group"
           aria-label="History controls"
         >
@@ -202,6 +291,143 @@ export function TopBar({
           >
             <Redo2 className="w-4 h-4" />
           </button>
+          <button
+            type="button"
+            onClick={() => setIsHistoryOpen((o) => !o)}
+            disabled={isExporting}
+            aria-expanded={isHistoryOpen}
+            title="Project State Snapshots & Undo/Redo Timeline"
+            className={`px-2 py-1 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
+              isHistoryOpen
+                ? 'bg-cyan-500/15 border-cyan-400/40 text-cyan-200'
+                : 'bg-[#090b10] hover:bg-white/[0.07] border-white/[0.08] text-slate-300'
+            }`}
+          >
+            <History className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden lg:inline">Snapshots</span>
+            <span className="font-mono tabular-nums text-[10px] text-slate-400">
+              {historyEntries.length}
+            </span>
+          </button>
+
+          {isHistoryOpen && (
+            <div className="absolute right-0 top-full mt-2 w-[360px] max-w-[92vw] rounded-xl bg-[#121620] border border-white/[0.12] shadow-2xl z-50 overflow-hidden flex flex-col">
+              <div className="px-3.5 py-2.5 border-b border-white/[0.08] bg-[#0b0e16] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-100">
+                      Project State &amp; History
+                    </p>
+                    <p className="text-[10.5px] text-slate-400">
+                      Restore settings, lyrics &amp; media assignments
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                    {historyEntries.length} states
+                  </span>
+                </div>
+
+                <form onSubmit={handleCaptureSubmit} className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={snapshotLabel}
+                    onChange={(e) => setSnapshotLabel(e.target.value)}
+                    placeholder="Snapshot name (optional)..."
+                    className="flex-1 min-w-0 rounded-lg bg-[#090b10] border border-white/[0.09] px-2.5 py-1 text-[11px] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50"
+                  />
+                  <button
+                    type="submit"
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer shrink-0"
+                  >
+                    <BookmarkPlus className="w-3 h-3" />
+                    <span>Capture</span>
+                  </button>
+                </form>
+              </div>
+
+              <div className="max-h-72 overflow-y-auto studio-scroll p-2 space-y-1.5">
+                {orderedEntries.map((entry) => {
+                  const isCurrent = entry.id === currentHistoryEntryId;
+                  const badge = KIND_BADGE_MAP[entry.kind];
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => {
+                        if (!isCurrent) {
+                          onJumpToHistory(entry.id);
+                        }
+                      }}
+                      className={`w-full text-left p-2 rounded-lg border transition-colors flex flex-col gap-1 cursor-pointer ${
+                        isCurrent
+                          ? 'bg-cyan-500/12 border-cyan-400/40'
+                          : entry.position === 'future'
+                          ? 'bg-[#090b10]/50 border-white/[0.06] opacity-70 hover:opacity-100 hover:border-white/[0.14]'
+                          : 'bg-[#090b10] border-white/[0.08] hover:border-white/[0.18]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9.5px] font-medium border shrink-0 ${badge.className}`}
+                          >
+                            {badge.text}
+                          </span>
+                          <span className="text-[11px] font-medium text-slate-100 truncate">
+                            {entry.label}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono tabular-nums text-slate-400 shrink-0 flex items-center gap-1">
+                          {isCurrent ? (
+                            <span className="text-cyan-300 font-semibold">Current</span>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-2.5 h-2.5 text-cyan-400" />
+                              <span>{formatHistoryTime(entry.timestamp)}</span>
+                            </>
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-slate-400">
+                        <span className="text-slate-300 truncate max-w-[130px]">
+                          {entry.projectName}
+                        </span>
+                        <span className="inline-flex items-center gap-1 truncate max-w-[130px]">
+                          <Music className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                          <span>{entry.audioFileName || 'No audio'}</span>
+                        </span>
+                        {(entry.bgImageName || entry.albumImageName) && (
+                          <span className="inline-flex items-center gap-1">
+                            <ImageIcon className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                            <span>
+                              {[
+                                entry.bgImageName ? 'BG' : null,
+                                entry.albumImageName ? 'Cover' : null,
+                              ]
+                                .filter(Boolean)
+                                .join('+')}
+                            </span>
+                          </span>
+                        )}
+                        <span className="font-mono tabular-nums">
+                          {entry.lyricsCount}L · {entry.visualizerMode}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="px-3 py-1.5 border-t border-white/[0.08] bg-[#0b0e16] flex items-center justify-between text-[10px] text-slate-500">
+                <span className="flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Ctrl+Z Undo · Ctrl+Y Redo
+                </span>
+                <span>Click any state to restore</span>
+              </div>
+            </div>
+          )}
         </div>
 
         <button
@@ -213,6 +439,23 @@ export function TopBar({
           <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
           <span className="hidden md:inline">
             {isGeneratingDemo ? 'Synthesizing...' : 'Load Demo Beat'}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenMixStudio}
+          disabled={isExporting}
+          title="Mix multiple audio and video files into one combined MP4"
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 cursor-pointer ${
+            mixClipCount > 0
+              ? 'bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-200 border-cyan-400/35'
+              : 'bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border-white/[0.08]'
+          }`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="hidden md:inline">
+            {mixClipCount > 0 ? `Mix (${mixClipCount})` : 'Mix Audio/Video'}
           </span>
         </button>
 

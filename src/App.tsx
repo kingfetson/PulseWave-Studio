@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
 import { ExportModal, ExportModalView } from './components/ExportModal';
 import { MidiMappingModal } from './components/MidiMappingModal';
+import { MixStudioModal } from './components/MixStudioModal';
 import { PreviewStage } from './components/PreviewStage';
 import { buildSyntheticAudioFrame } from './components/PresetThumbnail';
 import { ProjectsModal } from './components/ProjectsModal';
@@ -9,7 +10,7 @@ import { ShareModal } from './components/ShareModal';
 import { TopBar } from './components/TopBar';
 import { TransportBar } from './components/TransportBar';
 import { useMidiController } from './hooks/useMidiController';
-import { useStudioHistory } from './hooks/useStudioHistory';
+import { StudioSnapshot, useStudioHistory } from './hooks/useStudioHistory';
 import type {
   MidiMappableParamKey,
   MidiMapping,
@@ -26,10 +27,15 @@ import {
   ExportProgressState,
   isProjectCompleted,
   LyricLine,
+  MixClipItem,
+  MixProjectOptions,
   MocapClipData,
   MotionBlurState,
   normalizeProjectTags,
   Particle,
+  ProjectMediaSnapshot,
+  ProjectMetaSnapshot,
+  ProjectStateVersionRecord,
   ProjectStatus,
   SavedPreset,
   SceneTransitionState,
@@ -44,6 +50,7 @@ import {
   audioBufferToCompactWavBase64,
   computeLowPassRms,
   createInitialBeatState,
+  estimateBpmFromAudioBuffer,
   extractWaveformPeaks,
   generateDemoBeat,
   stepBeatDetector,
@@ -82,6 +89,12 @@ import {
 } from './utils/midiMapping';
 import { exportProjectToMp4, sanitizeFileName } from './utils/mp4Exporter';
 import {
+  createMixVideoFrameResolver,
+  disposeMixClips,
+  MixVideoFrameResolver,
+  renderCombinedMixAudioBuffer,
+} from './utils/mixEngine';
+import {
   captureCanvasSnapshotPng,
   createPresetId,
   loadSavedPresets,
@@ -92,12 +105,14 @@ import {
 import {
   captureProjectThumbnail,
   createProjectId,
+  createProjectVersionId,
   deleteProjectRecord,
   duplicateProjectRecord,
   getLastActiveProjectId,
   getProjectRecord,
   listProjectSummaries,
   loadAutoSaveProjects,
+  mergeProjectVersionList,
   persistAutoSaveProjects,
   renameProjectRecord,
   saveProjectRecord,
@@ -143,6 +158,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   scanlineColor: 'auto',
   visualizerScale: 1,
   lyricPosition: 80,
+  lyricSize: 1,
   lyricLetterSpacing: 0,
   lyricShadowIntensity: 1,
   lyricBeatSync: false,
@@ -192,7 +208,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   danceStyle: 'hip-hop',
   danceMedleyEnabled: false,
   danceMedleyStyles: ['hip-hop', 'mocap-salsa', 'mocap-kpop', 'mocap-breakdance'],
-  danceMedleyTrigger: 'beats',
+  danceMedleyTrigger: 'seconds',
   danceMedleyIntervalBeats: 8,
   danceMedleyIntervalSeconds: 8,
   danceMedleyBlendDuration: 0.45,
@@ -204,6 +220,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   danceEnergy: 1,
   danceLyricSync: true,
   danceStrobe: 0,
+  danceGlow: 0,
   danceMirror: false,
   danceSpotlightIntensity: 1,
   danceRimColor: 'auto',
@@ -218,20 +235,58 @@ const INITIAL_EXPORT_STATE: ExportProgressState = {
   message: '',
 };
 
+const INITIAL_MEDIA_SNAPSHOT: ProjectMediaSnapshot = {
+  audioFileName: null,
+  audioBlob: null,
+  audioBuffer: null,
+  waveformPeaks: [],
+  duration: 0,
+  trimStart: 0,
+  trimEnd: 0,
+  bgImageName: null,
+  bgImageBlob: null,
+  bgImage: null,
+  albumImageName: null,
+  albumImageBlob: null,
+  albumImage: null,
+  mocapClip: null,
+  mixClips: [],
+  mixOptions: { normalizeMixAudio: true, defaultCrossfadeSec: 1.5 },
+};
+
+function createInitialProjectMetaSnapshot(): ProjectMetaSnapshot {
+  return {
+    id: null,
+    name: 'Untitled Project',
+    createdAt: new Date().toISOString(),
+    status: 'in-progress',
+    completedAt: undefined,
+    lastExportedAt: undefined,
+    exportCount: 0,
+    tags: [],
+  };
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<SidebarTab>('media');
   const {
     settings,
     lyrics,
+    currentEntryId,
+    historyEntries,
     canUndo,
     canRedo,
     commit: commitHistory,
+    commitProjectSnapshot,
     undo,
     redo,
+    jumpTo,
     reset: resetHistory,
   } = useStudioHistory({
     settings: DEFAULT_SETTINGS,
     lyrics: [],
+    media: INITIAL_MEDIA_SNAPSHOT,
+    projectMeta: createInitialProjectMetaSnapshot(),
   });
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(() => loadSavedPresets());
   const [customExportProfiles, setCustomExportProfiles] = useState<ExportProfile[]>(() =>
@@ -276,6 +331,14 @@ export default function App() {
   const [albumImageName, setAlbumImageName] = useState<string | null>(null);
   const [mocapClip, setMocapClip] = useState<MocapClipData | null>(null);
 
+  // Multi-track Audio & Video Mixer state
+  const [mixClips, setMixClips] = useState<MixClipItem[]>([]);
+  const [mixOptions, setMixOptions] = useState<MixProjectOptions>({
+    normalizeMixAudio: true,
+    defaultCrossfadeSec: 1.5,
+  });
+  const [isMixModalOpen, setIsMixModalOpen] = useState(false);
+
   // Export modal & batch queue state
   const [exportState, setExportState] = useState<ExportProgressState>(INITIAL_EXPORT_STATE);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -303,6 +366,7 @@ export default function App() {
   const [learningParam, setLearningParam] = useState<MidiMappableParamKey | null>(null);
   const [midiNotice, setMidiNotice] = useState<string | null>(null);
   const [tapTempoBpm, setTapTempoBpm] = useState<number | null>(null);
+  const [detectedTrackBpm, setDetectedTrackBpm] = useState<number | null>(null);
   const [tapTempoCount, setTapTempoCount] = useState(0);
 
   // Refs for Web Audio API, Canvas, Images, and AbortController
@@ -351,14 +415,27 @@ export default function App() {
   lyricsRef.current = lyrics;
   const mocapClipRef = useRef<MocapClipData | null>(null);
   mocapClipRef.current = mocapClip;
+  const audioBufferRef = useRef<AudioBuffer | null>(null);
+  audioBufferRef.current = audioBuffer;
+  const mixClipsRef = useRef<MixClipItem[]>([]);
+  mixClipsRef.current = mixClips;
+  const mixOptionsRef = useRef<MixProjectOptions>(mixOptions);
+  mixOptionsRef.current = mixOptions;
+  const mixVideoResolverRef = useRef<MixVideoFrameResolver | null>(null);
   const trimRef = useRef({ trimStart, trimEnd, loopClip, previewTrimLoop });
   trimRef.current = { trimStart, trimEnd, loopClip, previewTrimLoop };
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
+  const isMixModalOpenRef = useRef(isMixModalOpen);
+  isMixModalOpenRef.current = isMixModalOpen;
   const currentTimeRef = useRef(currentTime);
   currentTimeRef.current = currentTime;
   const playbackRateRef = useRef(playbackRate);
   playbackRateRef.current = playbackRate;
+  const tapTempoBpmRef = useRef<number | null>(tapTempoBpm);
+  tapTempoBpmRef.current = tapTempoBpm;
+  const detectedTrackBpmRef = useRef<number | null>(detectedTrackBpm);
+  detectedTrackBpmRef.current = detectedTrackBpm;
   const batchJobsRef = useRef(batchJobs);
   batchJobsRef.current = batchJobs;
   const autoDownloadBatchRef = useRef(autoDownloadBatch);
@@ -386,16 +463,7 @@ export default function App() {
     bgImageName,
     albumImageName,
   };
-  const activeProjectRef = useRef<{
-    id: string | null;
-    name: string;
-    createdAt: string;
-    status?: ProjectStatus;
-    completedAt?: string;
-    lastExportedAt?: string;
-    exportCount?: number;
-    tags?: string[];
-  }>({
+  const activeProjectRef = useRef<ProjectMetaSnapshot>({
     id: activeProjectId,
     name: activeProjectName,
     createdAt: new Date().toISOString(),
@@ -413,9 +481,201 @@ export default function App() {
   isProjectDirtyRef.current = isProjectDirty;
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const saveCurrentProjectRef = useRef<
-    (opts?: { exported?: boolean; forceCreate?: boolean }) => Promise<void>
+    (opts?: {
+      exported?: boolean;
+      forceCreate?: boolean;
+      versionReason?: ProjectStateVersionRecord['reason'];
+      versionLabel?: string;
+    }) => Promise<void>
   >(async () => {});
   const skipDirtyMarkRef = useRef(true);
+
+  const captureCurrentMediaSnapshot = useCallback(
+    (overrides?: Partial<ProjectMediaSnapshot>): ProjectMediaSnapshot => {
+      const meta = mediaMetaRef.current;
+      const trim = trimRef.current;
+      return {
+        audioFileName: meta.audioFileName,
+        audioBlob: audioBlobRef.current,
+        audioBuffer: audioBufferRef.current,
+        waveformPeaks: [...meta.waveformPeaks],
+        duration: meta.duration,
+        trimStart: trim.trimStart,
+        trimEnd: trim.trimEnd,
+        bgImageName: meta.bgImageName,
+        bgImageBlob: bgBlobRef.current,
+        bgImage: bgImageRef.current,
+        albumImageName: meta.albumImageName,
+        albumImageBlob: albumBlobRef.current,
+        albumImage: albumImageRef.current,
+        mocapClip: mocapClipRef.current,
+        mixClips: mixClipsRef.current,
+        mixOptions: { ...mixOptionsRef.current },
+        ...overrides,
+      };
+    },
+    []
+  );
+
+  const captureCurrentProjectMetaSnapshot = useCallback(
+    (overrides?: Partial<ProjectMetaSnapshot>): ProjectMetaSnapshot => {
+      const proj = activeProjectRef.current;
+      return {
+        id: proj.id,
+        name: proj.name,
+        createdAt: proj.createdAt,
+        status: proj.status ?? 'in-progress',
+        completedAt: proj.completedAt,
+        lastExportedAt: proj.lastExportedAt,
+        exportCount: proj.exportCount ?? 0,
+        tags: normalizeProjectTags(proj.tags),
+        ...overrides,
+      };
+    },
+    []
+  );
+
+  const applySnapshotToStudio = useCallback((snapshot: StudioSnapshot) => {
+    const audio = audioElRef.current;
+    const { media, projectMeta } = snapshot;
+
+    // 1. Synchronize audio source & trim bounds
+    const audioChanged =
+      media.audioBlob !== audioBlobRef.current ||
+      media.audioBuffer !== audioBufferRef.current ||
+      media.audioFileName !== mediaMetaRef.current.audioFileName;
+
+    if (audioChanged) {
+      if (audio) {
+        audio.pause();
+        setIsPlaying(false);
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      audioBlobRef.current = media.audioBlob;
+      if (media.audioBlob) {
+        const nextUrl = URL.createObjectURL(media.audioBlob);
+        audioUrlRef.current = nextUrl;
+        if (audio) {
+          audio.src = nextUrl;
+          audio.currentTime = media.trimStart || 0;
+          audio.defaultPlaybackRate = playbackRateRef.current;
+          audio.playbackRate = playbackRateRef.current;
+        }
+      } else if (audio) {
+        audio.removeAttribute('src');
+        audio.load();
+      }
+    }
+
+    audioBufferRef.current = media.audioBuffer;
+    setAudioBuffer(media.audioBuffer);
+    setWaveformPeaks(media.waveformPeaks);
+    setAudioFileName(media.audioFileName);
+    setDuration(media.duration);
+    setTrimStart(media.trimStart);
+    setTrimEnd(media.trimEnd);
+    if (audioChanged) {
+      setCurrentTime(media.trimStart || 0);
+    } else if (audio && audio.src && media.trimEnd > media.trimStart) {
+      const cur = audio.currentTime;
+      if (cur < media.trimStart || cur > media.trimEnd) {
+        const clamped = Math.max(media.trimStart, Math.min(media.trimEnd, cur));
+        audio.currentTime = clamped;
+        setCurrentTime(clamped);
+      }
+    }
+
+    // 2. Synchronize backdrop image assignment
+    const bgChanged =
+      media.bgImageBlob !== bgBlobRef.current ||
+      media.bgImage !== bgImageRef.current ||
+      media.bgImageName !== mediaMetaRef.current.bgImageName;
+    if (bgChanged) {
+      if (bgUrlRef.current) {
+        URL.revokeObjectURL(bgUrlRef.current);
+        bgUrlRef.current = null;
+      }
+      bgBlobRef.current = media.bgImageBlob;
+      if (media.bgImage) {
+        bgImageRef.current = media.bgImage;
+      } else if (media.bgImageBlob) {
+        const bgUrl = URL.createObjectURL(media.bgImageBlob);
+        bgUrlRef.current = bgUrl;
+        const img = new Image();
+        img.onload = () => {
+          bgImageRef.current = img;
+        };
+        img.src = bgUrl;
+      } else {
+        bgImageRef.current = null;
+      }
+      setBgImageName(media.bgImageName);
+    }
+
+    // 3. Synchronize album cover assignment
+    const albumChanged =
+      media.albumImageBlob !== albumBlobRef.current ||
+      media.albumImage !== albumImageRef.current ||
+      media.albumImageName !== mediaMetaRef.current.albumImageName;
+    if (albumChanged) {
+      if (albumUrlRef.current) {
+        URL.revokeObjectURL(albumUrlRef.current);
+        albumUrlRef.current = null;
+      }
+      albumBlobRef.current = media.albumImageBlob;
+      if (media.albumImage) {
+        albumImageRef.current = media.albumImage;
+      } else if (media.albumImageBlob) {
+        const albumUrl = URL.createObjectURL(media.albumImageBlob);
+        albumUrlRef.current = albumUrl;
+        const img = new Image();
+        img.onload = () => {
+          albumImageRef.current = img;
+        };
+        img.src = albumUrl;
+      } else {
+        albumImageRef.current = null;
+      }
+      setAlbumImageName(media.albumImageName);
+    }
+
+    // 4. Synchronize mocap & multi-track mix assignments
+    mocapClipRef.current = media.mocapClip;
+    setMocapClip(media.mocapClip);
+
+    if (media.mixClips !== mixClipsRef.current) {
+      mixVideoResolverRef.current?.dispose();
+      const restoredMixClips = media.mixClips.map((clip) => {
+        if (clip.hasVideo && !clip.objectUrl && clip.file) {
+          return { ...clip, objectUrl: URL.createObjectURL(clip.file) };
+        }
+        return clip;
+      });
+      mixVideoResolverRef.current = restoredMixClips.some(
+        (c) => c.hasVideo && c.objectUrl
+      )
+        ? createMixVideoFrameResolver(restoredMixClips)
+        : null;
+      mixClipsRef.current = restoredMixClips;
+      setMixClips(restoredMixClips);
+    }
+    mixOptionsRef.current = media.mixOptions;
+    setMixOptions(media.mixOptions);
+
+    // 5. Synchronize active project record metadata
+    activeProjectRef.current = {
+      ...projectMeta,
+      tags: normalizeProjectTags(projectMeta.tags),
+    };
+    setActiveProjectId(projectMeta.id);
+    setActiveProjectName(projectMeta.name);
+    setActiveProjectCompleted(isProjectCompleted(projectMeta));
+    setLastActiveProjectId(projectMeta.id);
+    customThumbnailRef.current = null;
+  }, []);
 
   // Initialize hidden <audio> element once
   useEffect(() => {
@@ -548,6 +808,30 @@ export default function App() {
     return ctx;
   }, []);
 
+  const handleUndo = useCallback(() => {
+    const restored = undo();
+    if (restored) {
+      applySnapshotToStudio(restored);
+    }
+  }, [undo, applySnapshotToStudio]);
+
+  const handleRedo = useCallback(() => {
+    const restored = redo();
+    if (restored) {
+      applySnapshotToStudio(restored);
+    }
+  }, [redo, applySnapshotToStudio]);
+
+  const handleJumpToHistory = useCallback(
+    (entryId: string) => {
+      const restored = jumpTo(entryId);
+      if (restored) {
+        applySnapshotToStudio(restored);
+      }
+    },
+    [jumpTo, applySnapshotToStudio]
+  );
+
   // Global Ctrl+Z / Ctrl+Y (and Cmd+Z / Cmd+Shift+Z) history shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -572,16 +856,16 @@ export default function App() {
       const key = e.key.toLowerCase();
       if (key === 'z' && !e.shiftKey) {
         e.preventDefault();
-        undo();
+        handleUndo();
       } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
         e.preventDefault();
-        redo();
+        handleRedo();
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [undo, redo]);
+  }, [handleUndo, handleRedo]);
 
   const updateSettings = useCallback(
     (patch: Partial<StudioSettings>) => {
@@ -603,6 +887,7 @@ export default function App() {
         'globalHueRotation',
         'visualizerScale',
         'lyricPosition',
+        'lyricSize',
         'lyricLetterSpacing',
         'lyricShadowIntensity',
         'lyricPulseIntensity',
@@ -728,6 +1013,23 @@ export default function App() {
     },
     [commitHistory]
   );
+
+  useEffect(() => {
+    setTapTempoBpm(null);
+    if (!audioBuffer) {
+      setDetectedTrackBpm(null);
+      return;
+    }
+    try {
+      const bpm = estimateBpmFromAudioBuffer(
+        audioBuffer,
+        settingsRef.current.beatSensitivity
+      );
+      setDetectedTrackBpm(bpm);
+    } catch {
+      setDetectedTrackBpm(null);
+    }
+  }, [audioBuffer]);
 
   useEffect(() => {
     if (!midiNotice) return;
@@ -873,6 +1175,13 @@ export default function App() {
         audio.pause();
         setIsPlaying(false);
 
+        if (mixClipsRef.current.length > 0 || mixVideoResolverRef.current) {
+          mixVideoResolverRef.current?.dispose();
+          mixVideoResolverRef.current = null;
+          mixClipsRef.current = [];
+          setMixClips([]);
+        }
+
         const ctx = await ensureAudioGraph();
         if (!ctx) throw new Error('Web Audio API is unavailable.');
 
@@ -887,16 +1196,8 @@ export default function App() {
         // Save outgoing project work before switching to a different audio file
         if (isSwitchingTracks && autoSaveProjectsRef.current) {
           await saveCurrentProjectRef.current();
-          activeProjectRef.current = {
-            id: null,
-            name: 'Untitled Project',
-            createdAt: new Date().toISOString(),
-            status: 'in-progress',
-            completedAt: undefined,
-            lastExportedAt: undefined,
-            exportCount: 0,
-            tags: [],
-          };
+          const blankMeta = createInitialProjectMetaSnapshot();
+          activeProjectRef.current = blankMeta;
           setActiveProjectId(null);
           setActiveProjectName('Untitled Project');
           setActiveProjectCompleted(false);
@@ -907,6 +1208,7 @@ export default function App() {
           URL.revokeObjectURL(audioUrlRef.current);
         }
         audioBlobRef.current = file;
+        audioBufferRef.current = decoded;
         const blobUrl = URL.createObjectURL(file);
         audioUrlRef.current = blobUrl;
         audio.src = blobUrl;
@@ -915,29 +1217,51 @@ export default function App() {
         audio.playbackRate = playbackRateRef.current;
 
         const peaks = extractWaveformPeaks(decoded, 200);
+        const safeTrimEnd = Number(decoded.duration.toFixed(2));
         setAudioBuffer(decoded);
         setWaveformPeaks(peaks);
         setAudioFileName(file.name);
         setDuration(decoded.duration);
         setCurrentTime(0);
         setTrimStart(0);
-        setTrimEnd(Number(decoded.duration.toFixed(2)));
+        setTrimEnd(safeTrimEnd);
 
         const baseTitle = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
-        commitHistory((prev) => ({
-          ...prev,
-          settings: {
-            ...prev.settings,
-            trackTitle: isSwitchingTracks ? baseTitle : prev.settings.trackTitle || baseTitle,
-          },
-        }));
+        const nextMedia = captureCurrentMediaSnapshot({
+          audioFileName: file.name,
+          audioBlob: file,
+          audioBuffer: decoded,
+          waveformPeaks: peaks,
+          duration: decoded.duration,
+          trimStart: 0,
+          trimEnd: safeTrimEnd,
+          mixClips: [],
+        });
+        const nextProjectMeta = captureCurrentProjectMetaSnapshot();
+        commitHistory(
+          (prev) => ({
+            ...prev,
+            settings: {
+              ...prev.settings,
+              trackTitle: isSwitchingTracks ? baseTitle : prev.settings.trackTitle || baseTitle,
+            },
+            media: nextMedia,
+            projectMeta: nextProjectMeta,
+          }),
+          { label: `Loaded audio: ${file.name}`, kind: 'media' }
+        );
       } catch (err) {
         setAudioError(
           err instanceof Error ? err.message : 'Unable to decode this audio file.'
         );
       }
     },
-    [ensureAudioGraph, commitHistory]
+    [
+      captureCurrentMediaSnapshot,
+      captureCurrentProjectMetaSnapshot,
+      commitHistory,
+      ensureAudioGraph,
+    ]
   );
 
   const handleLoadDemo = useCallback(async () => {
@@ -951,6 +1275,13 @@ export default function App() {
         setIsPlaying(false);
       }
 
+      if (mixClipsRef.current.length > 0 || mixVideoResolverRef.current) {
+        mixVideoResolverRef.current?.dispose();
+        mixVideoResolverRef.current = null;
+        mixClipsRef.current = [];
+        setMixClips([]);
+      }
+
       const demo = await generateDemoBeat();
       await ensureAudioGraph();
 
@@ -959,16 +1290,8 @@ export default function App() {
         if (autoSaveProjectsRef.current) {
           await saveCurrentProjectRef.current();
         }
-        activeProjectRef.current = {
-          id: null,
-          name: 'Untitled Project',
-          createdAt: new Date().toISOString(),
-          status: 'in-progress',
-          completedAt: undefined,
-          lastExportedAt: undefined,
-          exportCount: 0,
-          tags: [],
-        };
+        const blankMeta = createInitialProjectMetaSnapshot();
+        activeProjectRef.current = blankMeta;
         setActiveProjectId(null);
         setActiveProjectName('Untitled Project');
         setActiveProjectCompleted(false);
@@ -979,6 +1302,7 @@ export default function App() {
         URL.revokeObjectURL(audioUrlRef.current);
       }
       audioBlobRef.current = demo.blob;
+      audioBufferRef.current = demo.audioBuffer;
       audioUrlRef.current = demo.blobUrl;
 
       if (audio) {
@@ -989,21 +1313,39 @@ export default function App() {
       }
 
       const peaks = extractWaveformPeaks(demo.audioBuffer, 200);
+      const safeTrimEnd = Number(demo.audioBuffer.duration.toFixed(2));
       setAudioBuffer(demo.audioBuffer);
       setWaveformPeaks(peaks);
       setAudioFileName(demo.fileName);
       setDuration(demo.audioBuffer.duration);
       setCurrentTime(0);
       setTrimStart(0);
-      setTrimEnd(Number(demo.audioBuffer.duration.toFixed(2)));
-      commitHistory((prev) => ({
-        settings: {
-          ...prev.settings,
-          trackTitle: demo.trackTitle,
-          artistName: demo.artistName,
-        },
-        lyrics: demo.lyrics,
-      }));
+      setTrimEnd(safeTrimEnd);
+
+      const nextMedia = captureCurrentMediaSnapshot({
+        audioFileName: demo.fileName,
+        audioBlob: demo.blob,
+        audioBuffer: demo.audioBuffer,
+        waveformPeaks: peaks,
+        duration: demo.audioBuffer.duration,
+        trimStart: 0,
+        trimEnd: safeTrimEnd,
+        mixClips: [],
+      });
+      const nextProjectMeta = captureCurrentProjectMetaSnapshot();
+      commitHistory(
+        (prev) => ({
+          settings: {
+            ...prev.settings,
+            trackTitle: demo.trackTitle,
+            artistName: demo.artistName,
+          },
+          lyrics: demo.lyrics,
+          media: nextMedia,
+          projectMeta: nextProjectMeta,
+        }),
+        { label: 'Loaded demo beat', kind: 'media' }
+      );
     } catch (err) {
       setAudioError(
         err instanceof Error ? err.message : 'Failed to generate demo beat.'
@@ -1011,53 +1353,100 @@ export default function App() {
     } finally {
       setIsGeneratingDemo(false);
     }
-  }, [ensureAudioGraph, commitHistory]);
+  }, [
+    captureCurrentMediaSnapshot,
+    captureCurrentProjectMetaSnapshot,
+    commitHistory,
+    ensureAudioGraph,
+  ]);
 
-  const handleBgImageSelect = useCallback((file: File | null) => {
-    customThumbnailRef.current = null;
-    if (bgUrlRef.current) {
-      URL.revokeObjectURL(bgUrlRef.current);
-      bgUrlRef.current = null;
-    }
-    if (!file) {
-      bgImageRef.current = null;
-      bgBlobRef.current = null;
-      setBgImageName(null);
-      return;
-    }
-    bgBlobRef.current = file;
-    const url = URL.createObjectURL(file);
-    bgUrlRef.current = url;
-    const img = new Image();
-    img.onload = () => {
-      bgImageRef.current = img;
-      setBgImageName(file.name);
-    };
-    img.src = url;
-  }, []);
+  const handleBgImageSelect = useCallback(
+    (file: File | null) => {
+      customThumbnailRef.current = null;
+      if (bgUrlRef.current) {
+        URL.revokeObjectURL(bgUrlRef.current);
+        bgUrlRef.current = null;
+      }
+      if (!file) {
+        bgImageRef.current = null;
+        bgBlobRef.current = null;
+        setBgImageName(null);
+        const nextMedia = captureCurrentMediaSnapshot({
+          bgImageName: null,
+          bgImageBlob: null,
+          bgImage: null,
+        });
+        commitHistory(
+          (prev) => ({ ...prev, media: nextMedia }),
+          { label: 'Cleared backdrop image', kind: 'media' }
+        );
+        return;
+      }
+      bgBlobRef.current = file;
+      const url = URL.createObjectURL(file);
+      bgUrlRef.current = url;
+      const img = new Image();
+      img.onload = () => {
+        bgImageRef.current = img;
+        setBgImageName(file.name);
+        const nextMedia = captureCurrentMediaSnapshot({
+          bgImageName: file.name,
+          bgImageBlob: file,
+          bgImage: img,
+        });
+        commitHistory(
+          (prev) => ({ ...prev, media: nextMedia }),
+          { label: `Backdrop: ${file.name}`, kind: 'media' }
+        );
+      };
+      img.src = url;
+    },
+    [captureCurrentMediaSnapshot, commitHistory]
+  );
 
-  const handleAlbumImageSelect = useCallback((file: File | null) => {
-    customThumbnailRef.current = null;
-    if (albumUrlRef.current) {
-      URL.revokeObjectURL(albumUrlRef.current);
-      albumUrlRef.current = null;
-    }
-    if (!file) {
-      albumImageRef.current = null;
-      albumBlobRef.current = null;
-      setAlbumImageName(null);
-      return;
-    }
-    albumBlobRef.current = file;
-    const url = URL.createObjectURL(file);
-    albumUrlRef.current = url;
-    const img = new Image();
-    img.onload = () => {
-      albumImageRef.current = img;
-      setAlbumImageName(file.name);
-    };
-    img.src = url;
-  }, []);
+  const handleAlbumImageSelect = useCallback(
+    (file: File | null) => {
+      customThumbnailRef.current = null;
+      if (albumUrlRef.current) {
+        URL.revokeObjectURL(albumUrlRef.current);
+        albumUrlRef.current = null;
+      }
+      if (!file) {
+        albumImageRef.current = null;
+        albumBlobRef.current = null;
+        setAlbumImageName(null);
+        const nextMedia = captureCurrentMediaSnapshot({
+          albumImageName: null,
+          albumImageBlob: null,
+          albumImage: null,
+        });
+        commitHistory(
+          (prev) => ({ ...prev, media: nextMedia }),
+          { label: 'Cleared cover art', kind: 'media' }
+        );
+        return;
+      }
+      albumBlobRef.current = file;
+      const url = URL.createObjectURL(file);
+      albumUrlRef.current = url;
+      const img = new Image();
+      img.onload = () => {
+        albumImageRef.current = img;
+        setAlbumImageName(file.name);
+        const nextMedia = captureCurrentMediaSnapshot({
+          albumImageName: file.name,
+          albumImageBlob: file,
+          albumImage: img,
+        });
+        commitHistory(
+          (prev) => ({ ...prev, media: nextMedia }),
+          { label: `Cover Art: ${file.name}`, kind: 'media' }
+        );
+      };
+      img.src = url;
+    },
+    [captureCurrentMediaSnapshot, commitHistory]
+  );
 
   const handleCopyBgToAlbum = useCallback(() => {
     const blob = bgBlobRef.current;
@@ -1076,9 +1465,18 @@ export default function App() {
       albumImageRef.current = img;
       setAlbumImageName(targetName);
       setIsProjectDirty(true);
+      const nextMedia = captureCurrentMediaSnapshot({
+        albumImageName: targetName,
+        albumImageBlob: blob,
+        albumImage: img,
+      });
+      commitHistory(
+        (prev) => ({ ...prev, media: nextMedia }),
+        { label: `Copied backdrop to cover`, kind: 'media' }
+      );
     };
     img.src = url;
-  }, []);
+  }, [captureCurrentMediaSnapshot, commitHistory]);
 
   const handleCopyAlbumToBg = useCallback(() => {
     const blob = albumBlobRef.current;
@@ -1097,9 +1495,18 @@ export default function App() {
       bgImageRef.current = img;
       setBgImageName(targetName);
       setIsProjectDirty(true);
+      const nextMedia = captureCurrentMediaSnapshot({
+        bgImageName: targetName,
+        bgImageBlob: blob,
+        bgImage: img,
+      });
+      commitHistory(
+        (prev) => ({ ...prev, media: nextMedia }),
+        { label: `Copied cover to backdrop`, kind: 'media' }
+      );
     };
     img.src = url;
-  }, []);
+  }, [captureCurrentMediaSnapshot, commitHistory]);
 
   const handleMocapFileSelect = useCallback(
     async (
@@ -1108,15 +1515,21 @@ export default function App() {
       try {
         const text = await file.text();
         const clip = parseMocapFile(text, file.name);
+        mocapClipRef.current = clip;
         setMocapClip(clip);
-        commitHistory((prev) => ({
-          ...prev,
-          settings: {
-            ...prev.settings,
-            danceEnabled: true,
-            danceStyle: 'mocap-custom',
-          },
-        }));
+        const nextMedia = captureCurrentMediaSnapshot({ mocapClip: clip });
+        commitHistory(
+          (prev) => ({
+            ...prev,
+            settings: {
+              ...prev.settings,
+              danceEnabled: true,
+              danceStyle: 'mocap-custom',
+            },
+            media: nextMedia,
+          }),
+          { label: `Mocap: ${clip.name}`, kind: 'media' }
+        );
         return { ok: true, clip };
       } catch (err) {
         return {
@@ -1125,22 +1538,31 @@ export default function App() {
         };
       }
     },
-    [commitHistory]
+    [captureCurrentMediaSnapshot, commitHistory]
   );
 
   const handleClearMocapClip = useCallback(() => {
+    mocapClipRef.current = null;
     setMocapClip(null);
-    commitHistory((prev) => ({
-      ...prev,
-      settings:
-        prev.settings.danceStyle === 'mocap-custom'
-          ? { ...prev.settings, danceStyle: 'hip-hop' }
-          : prev.settings,
-    }));
-  }, [commitHistory]);
+    const nextMedia = captureCurrentMediaSnapshot({ mocapClip: null });
+    commitHistory(
+      (prev) => ({
+        ...prev,
+        settings:
+          prev.settings.danceStyle === 'mocap-custom'
+            ? { ...prev.settings, danceStyle: 'hip-hop' }
+            : prev.settings,
+        media: nextMedia,
+      }),
+      { label: 'Cleared mocap clip', kind: 'media' }
+    );
+  }, [captureCurrentMediaSnapshot, commitHistory]);
 
   const loadProjectIntoStudio = useCallback(
-    async (record: StudioProjectRecord) => {
+    async (
+      record: StudioProjectRecord,
+      opts?: { resetHistoryStack?: boolean; snapshotLabel?: string }
+    ) => {
       setIsLoadingProject(true);
       setAudioError(null);
       const audio = audioElRef.current;
@@ -1163,11 +1585,24 @@ export default function App() {
           URL.revokeObjectURL(albumUrlRef.current);
           albumUrlRef.current = null;
         }
+        if (mixClipsRef.current.length > 0 || mixVideoResolverRef.current) {
+          mixVideoResolverRef.current?.dispose();
+          mixVideoResolverRef.current = null;
+          mixClipsRef.current = [];
+          setMixClips([]);
+        }
 
         audioBlobRef.current = record.audioBlob;
         bgBlobRef.current = record.bgImageBlob;
         albumBlobRef.current = record.albumImageBlob;
         customThumbnailRef.current = null;
+
+        let decodedAudio: AudioBuffer | null = null;
+        let nextPeaks: number[] = [];
+        let nextDuration = 0;
+        let nextTrimStart = 0;
+        let nextTrimEnd = 0;
+        let nextAudioFileName: string | null = null;
 
         if (record.audioBlob) {
           if (!audioCtxRef.current) {
@@ -1178,7 +1613,7 @@ export default function App() {
             audioCtxRef.current = new AudioCtx();
           }
           const arrayBuf = await record.audioBlob.arrayBuffer();
-          const decoded = await audioCtxRef.current.decodeAudioData(arrayBuf.slice(0));
+          decodedAudio = await audioCtxRef.current.decodeAudioData(arrayBuf.slice(0));
           const blobUrl = URL.createObjectURL(record.audioBlob);
           audioUrlRef.current = blobUrl;
           if (audio) {
@@ -1187,29 +1622,32 @@ export default function App() {
             audio.defaultPlaybackRate = playbackRateRef.current;
             audio.playbackRate = playbackRateRef.current;
           }
-          const peaks =
+          nextPeaks =
             record.waveformPeaks.length > 0
               ? record.waveformPeaks
-              : extractWaveformPeaks(decoded, 200);
-          const safeDur = decoded.duration;
-          const safeStart = Math.max(0, Math.min(record.trimStart || 0, safeDur));
-          const safeEnd =
-            record.trimEnd > safeStart
-              ? Math.min(safeDur, record.trimEnd)
-              : Number(safeDur.toFixed(2));
+              : extractWaveformPeaks(decodedAudio, 200);
+          nextDuration = decodedAudio.duration;
+          nextTrimStart = Math.max(0, Math.min(record.trimStart || 0, nextDuration));
+          nextTrimEnd =
+            record.trimEnd > nextTrimStart
+              ? Math.min(nextDuration, record.trimEnd)
+              : Number(nextDuration.toFixed(2));
+          nextAudioFileName = record.audioFileName;
 
-          setAudioBuffer(decoded);
-          setWaveformPeaks(peaks);
-          setAudioFileName(record.audioFileName);
-          setDuration(safeDur);
-          setTrimStart(safeStart);
-          setTrimEnd(safeEnd);
-          setCurrentTime(safeStart);
+          audioBufferRef.current = decodedAudio;
+          setAudioBuffer(decodedAudio);
+          setWaveformPeaks(nextPeaks);
+          setAudioFileName(nextAudioFileName);
+          setDuration(nextDuration);
+          setTrimStart(nextTrimStart);
+          setTrimEnd(nextTrimEnd);
+          setCurrentTime(nextTrimStart);
         } else {
           if (audio) {
             audio.removeAttribute('src');
             audio.load();
           }
+          audioBufferRef.current = null;
           setAudioBuffer(null);
           setWaveformPeaks([]);
           setAudioFileName(null);
@@ -1219,56 +1657,105 @@ export default function App() {
           setCurrentTime(0);
         }
 
+        let loadedBgImage: HTMLImageElement | null = null;
         if (record.bgImageBlob) {
           const bgUrl = URL.createObjectURL(record.bgImageBlob);
           bgUrlRef.current = bgUrl;
           const img = new Image();
-          img.onload = () => {
-            bgImageRef.current = img;
-          };
-          img.src = bgUrl;
+          await new Promise<void>((resolve) => {
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+            img.src = bgUrl;
+          });
+          loadedBgImage = img.naturalWidth > 0 ? img : null;
+          bgImageRef.current = loadedBgImage;
           setBgImageName(record.bgImageName);
         } else {
           bgImageRef.current = null;
           setBgImageName(null);
         }
 
+        let loadedAlbumImage: HTMLImageElement | null = null;
         if (record.albumImageBlob) {
           const albumUrl = URL.createObjectURL(record.albumImageBlob);
           albumUrlRef.current = albumUrl;
           const img = new Image();
-          img.onload = () => {
-            albumImageRef.current = img;
-          };
-          img.src = albumUrl;
+          await new Promise<void>((resolve) => {
+            img.onload = () => resolve();
+            img.onerror = () => resolve();
+            img.src = albumUrl;
+          });
+          loadedAlbumImage = img.naturalWidth > 0 ? img : null;
+          albumImageRef.current = loadedAlbumImage;
           setAlbumImageName(record.albumImageName);
         } else {
           albumImageRef.current = null;
           setAlbumImageName(null);
         }
 
+        const nextMocap = record.mocapClip ?? null;
+        mocapClipRef.current = nextMocap;
+        setMocapClip(nextMocap);
+
         const normalized =
           validateAndNormalizeSettings(record.settings, DEFAULT_SETTINGS) ??
           DEFAULT_SETTINGS;
-        skipDirtyMarkRef.current = true;
-        resetHistory({
-          settings: normalized,
-          lyrics: Array.isArray(record.lyrics) ? record.lyrics : [],
-        });
-
-        setActiveProjectId(record.id);
-        setActiveProjectName(record.name);
-        setActiveProjectCompleted(isProjectCompleted(record));
-        activeProjectRef.current = {
+        const nextLyrics = Array.isArray(record.lyrics) ? record.lyrics : [];
+        const nextProjectMeta: ProjectMetaSnapshot = {
           id: record.id,
           name: record.name,
           createdAt: record.createdAt,
-          status: record.status ?? (isProjectCompleted(record) ? 'completed' : 'in-progress'),
+          status:
+            record.status ??
+            (isProjectCompleted(record) ? 'completed' : 'in-progress'),
           completedAt: record.completedAt,
           lastExportedAt: record.lastExportedAt,
           exportCount: record.exportCount ?? 0,
           tags: normalizeProjectTags(record.tags),
         };
+        const nextMedia: ProjectMediaSnapshot = {
+          audioFileName: nextAudioFileName,
+          audioBlob: record.audioBlob,
+          audioBuffer: decodedAudio,
+          waveformPeaks: nextPeaks,
+          duration: nextDuration,
+          trimStart: nextTrimStart,
+          trimEnd: nextTrimEnd,
+          bgImageName: record.bgImageBlob ? record.bgImageName : null,
+          bgImageBlob: record.bgImageBlob,
+          bgImage: loadedBgImage,
+          albumImageName: record.albumImageBlob ? record.albumImageName : null,
+          albumImageBlob: record.albumImageBlob,
+          albumImage: loadedAlbumImage,
+          mocapClip: nextMocap,
+          mixClips: [],
+          mixOptions: { ...mixOptionsRef.current },
+        };
+
+        const loadedSnapshot: StudioSnapshot = {
+          settings: normalized,
+          lyrics: nextLyrics,
+          media: nextMedia,
+          projectMeta: nextProjectMeta,
+        };
+
+        skipDirtyMarkRef.current = true;
+        if (opts?.resetHistoryStack) {
+          resetHistory(
+            loadedSnapshot,
+            opts.snapshotLabel || `Opened project: ${record.name}`
+          );
+        } else {
+          commitProjectSnapshot(
+            loadedSnapshot,
+            opts?.snapshotLabel || `Opened project: ${record.name}`
+          );
+        }
+
+        setActiveProjectId(record.id);
+        setActiveProjectName(record.name);
+        setActiveProjectCompleted(isProjectCompleted(record));
+        activeProjectRef.current = nextProjectMeta;
         setLastActiveProjectId(record.id);
         setIsProjectDirty(false);
       } catch (err) {
@@ -1279,7 +1766,7 @@ export default function App() {
         setIsLoadingProject(false);
       }
     },
-    [resetHistory]
+    [commitProjectSnapshot, resetHistory]
   );
 
   const hasMeaningfulProjectData = useCallback(() => {
@@ -1299,6 +1786,52 @@ export default function App() {
     );
   }, []);
 
+  const buildCurrentProjectVersionRecord = useCallback(
+    (
+      reason: ProjectStateVersionRecord['reason'],
+      label?: string
+    ): ProjectStateVersionRecord => {
+      const now = new Date().toISOString();
+      const meta = mediaMetaRef.current;
+      const trim = trimRef.current;
+      const s = settingsRef.current;
+      const currentLyrics = lyricsRef.current;
+      return {
+        id: createProjectVersionId(),
+        label:
+          label?.trim() ||
+          (reason === 'export'
+            ? 'Exported Project State'
+            : reason === 'checkpoint'
+            ? 'Manual Project Snapshot'
+            : 'Saved Project State'),
+        createdAt: now,
+        reason,
+        audioFileName: meta.audioFileName,
+        bgImageName: meta.bgImageName,
+        albumImageName: meta.albumImageName,
+        mocapName: mocapClipRef.current?.name ?? null,
+        mixClipCount: mixClipsRef.current.length,
+        lyricsCount: currentLyrics.length,
+        trimStart: trim.trimStart,
+        trimEnd: trim.trimEnd,
+        duration: meta.duration,
+        visualizerMode: s.visualizerMode,
+        aspectRatio: s.aspectRatio,
+        thumbnailDataUrl:
+          customThumbnailRef.current || captureProjectThumbnail(previewCanvasRef.current),
+        settings: { ...s },
+        lyrics: currentLyrics.map((l) => ({ ...l })),
+        waveformPeaks: [...meta.waveformPeaks],
+        audioBlob: audioBlobRef.current,
+        bgImageBlob: bgBlobRef.current,
+        albumImageBlob: albumBlobRef.current,
+        mocapClip: mocapClipRef.current,
+      };
+    },
+    []
+  );
+
   const buildCurrentProjectRecord = useCallback(
     (
       id: string,
@@ -1308,7 +1841,8 @@ export default function App() {
       completedAt?: string,
       lastExportedAt?: string,
       exportCount?: number,
-      tags?: string[]
+      tags?: string[],
+      versions?: ProjectStateVersionRecord[]
     ): StudioProjectRecord => {
       const now = new Date().toISOString();
       const meta = mediaMetaRef.current;
@@ -1338,6 +1872,8 @@ export default function App() {
         audioBlob: audioBlobRef.current,
         bgImageBlob: bgBlobRef.current,
         albumImageBlob: albumBlobRef.current,
+        mocapClip: mocapClipRef.current,
+        versions,
       };
     },
     []
@@ -1361,7 +1897,12 @@ export default function App() {
   }, []);
 
   const saveCurrentProject = useCallback(
-    (opts?: { exported?: boolean; forceCreate?: boolean }): Promise<void> => {
+    (opts?: {
+      exported?: boolean;
+      forceCreate?: boolean;
+      versionReason?: ProjectStateVersionRecord['reason'];
+      versionLabel?: string;
+    }): Promise<void> => {
       const task = saveChainRef.current.then(async () => {
         if (!opts?.forceCreate && !hasMeaningfulProjectData()) {
           return;
@@ -1379,11 +1920,36 @@ export default function App() {
             : proj.exportCount;
           const status: ProjectStatus = opts?.exported
             ? 'completed'
-            : proj.status ?? (isProjectCompleted({ status: proj.status, lastExportedAt, exportCount }) ? 'completed' : 'in-progress');
+            : proj.status ??
+              (isProjectCompleted({
+                status: proj.status,
+                lastExportedAt,
+                exportCount,
+              })
+                ? 'completed'
+                : 'in-progress');
           const completedAt =
             status === 'completed' ? proj.completedAt ?? now : undefined;
 
           const tags = normalizeProjectTags(proj.tags);
+          const existingRecord = proj.id
+            ? await getProjectRecord(proj.id).catch(() => null)
+            : null;
+          const shouldRecordVersion = Boolean(
+            opts?.exported || opts?.forceCreate || opts?.versionReason || !existingRecord
+          );
+          const nextVersions = shouldRecordVersion
+            ? mergeProjectVersionList(
+                existingRecord?.versions,
+                buildCurrentProjectVersionRecord(
+                  opts?.exported
+                    ? 'export'
+                    : opts?.versionReason ?? 'save',
+                  opts?.versionLabel
+                ),
+                opts?.versionReason === 'checkpoint'
+              )
+            : existingRecord?.versions ?? [];
 
           const record = buildCurrentProjectRecord(
             id,
@@ -1393,7 +1959,8 @@ export default function App() {
             completedAt,
             lastExportedAt,
             exportCount,
-            tags
+            tags,
+            nextVersions
           );
           await saveProjectRecord(record);
 
@@ -1423,7 +1990,13 @@ export default function App() {
       saveChainRef.current = task.catch(() => {});
       return task;
     },
-    [buildCurrentProjectRecord, deriveProjectName, hasMeaningfulProjectData, refreshProjectsList]
+    [
+      buildCurrentProjectRecord,
+      buildCurrentProjectVersionRecord,
+      deriveProjectName,
+      hasMeaningfulProjectData,
+      refreshProjectsList,
+    ]
   );
 
   saveCurrentProjectRef.current = saveCurrentProject;
@@ -1441,6 +2014,10 @@ export default function App() {
             mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
             'Untitled Project';
           const normalizedTags = normalizeProjectTags(requestedTags);
+          const initialVersion = buildCurrentProjectVersionRecord(
+            'save',
+            `Initial: ${finalName}`
+          );
           const record = buildCurrentProjectRecord(
             id,
             finalName,
@@ -1449,10 +2026,11 @@ export default function App() {
             undefined,
             undefined,
             0,
-            normalizedTags
+            normalizedTags,
+            [initialVersion]
           );
           await saveProjectRecord(record);
-          activeProjectRef.current = {
+          const nextProjectMeta: ProjectMetaSnapshot = {
             id,
             name: finalName,
             createdAt: now,
@@ -1462,11 +2040,19 @@ export default function App() {
             exportCount: 0,
             tags: normalizedTags,
           };
+          activeProjectRef.current = nextProjectMeta;
           setActiveProjectId(id);
           setActiveProjectName(finalName);
           setActiveProjectCompleted(false);
           setLastActiveProjectId(id);
           setIsProjectDirty(false);
+          commitProjectSnapshot(
+            (prev) => ({
+              ...prev,
+              projectMeta: nextProjectMeta,
+            }),
+            `Saved project: ${finalName}`
+          );
           await refreshProjectsList();
         } catch (err) {
           setAudioError(err instanceof Error ? err.message : 'Failed to save project.');
@@ -1478,12 +2064,193 @@ export default function App() {
       saveChainRef.current = task.catch(() => {});
       return task;
     },
-    [buildCurrentProjectRecord, refreshProjectsList]
+    [
+      buildCurrentProjectRecord,
+      buildCurrentProjectVersionRecord,
+      commitProjectSnapshot,
+      refreshProjectsList,
+    ]
   );
 
   const handleSaveActiveProject = useCallback(async () => {
-    await saveCurrentProject({ forceCreate: true });
+    await saveCurrentProject({
+      forceCreate: true,
+      versionReason: 'save',
+      versionLabel: `Saved: ${activeProjectRef.current.name || 'Project'}`,
+    });
   }, [saveCurrentProject]);
+
+  const handleCaptureProjectSnapshot = useCallback(
+    async (label?: string) => {
+      const cleanLabel =
+        label?.trim() ||
+        `${activeProjectRef.current.name || 'Project'} Snapshot`;
+      const snapshot: StudioSnapshot = {
+        settings: { ...settingsRef.current },
+        lyrics: lyricsRef.current.map((l) => ({ ...l })),
+        media: captureCurrentMediaSnapshot(),
+        projectMeta: captureCurrentProjectMetaSnapshot(),
+      };
+      commitProjectSnapshot(snapshot, cleanLabel);
+
+      if (activeProjectRef.current.id || hasMeaningfulProjectData()) {
+        await saveCurrentProject({
+          forceCreate: true,
+          versionReason: 'checkpoint',
+          versionLabel: cleanLabel,
+        });
+      }
+    },
+    [
+      captureCurrentMediaSnapshot,
+      captureCurrentProjectMetaSnapshot,
+      commitProjectSnapshot,
+      hasMeaningfulProjectData,
+      saveCurrentProject,
+    ]
+  );
+
+  const handleRestoreProjectVersion = useCallback(
+    async (projectId: string, versionId: string) => {
+      const record = await getProjectRecord(projectId);
+      const version = record?.versions?.find((v) => v.id === versionId);
+      if (!record || !version) return;
+
+      setIsLoadingProject(true);
+      setAudioError(null);
+      try {
+        let decodedAudio: AudioBuffer | null = null;
+        let nextPeaks = version.waveformPeaks ?? [];
+        let nextDuration = version.duration ?? 0;
+        let nextTrimStart = version.trimStart ?? 0;
+        let nextTrimEnd = version.trimEnd ?? 0;
+
+        if (version.audioBlob) {
+          if (
+            version.audioBlob === audioBlobRef.current &&
+            audioBufferRef.current
+          ) {
+            decodedAudio = audioBufferRef.current;
+          } else {
+            if (!audioCtxRef.current) {
+              const AudioCtx =
+                window.AudioContext ||
+                (window as unknown as { webkitAudioContext: typeof AudioContext })
+                  .webkitAudioContext;
+              audioCtxRef.current = new AudioCtx();
+            }
+            const arrayBuf = await version.audioBlob.arrayBuffer();
+            decodedAudio = await audioCtxRef.current.decodeAudioData(
+              arrayBuf.slice(0)
+            );
+          }
+          nextDuration = decodedAudio.duration;
+          if (nextPeaks.length === 0) {
+            nextPeaks = extractWaveformPeaks(decodedAudio, 200);
+          }
+          nextTrimStart = Math.max(0, Math.min(version.trimStart || 0, nextDuration));
+          nextTrimEnd =
+            version.trimEnd > nextTrimStart
+              ? Math.min(nextDuration, version.trimEnd)
+              : Number(nextDuration.toFixed(2));
+        }
+
+        let loadedBgImage: HTMLImageElement | null = null;
+        if (version.bgImageBlob) {
+          if (version.bgImageBlob === bgBlobRef.current && bgImageRef.current) {
+            loadedBgImage = bgImageRef.current;
+          } else {
+            const tempUrl = URL.createObjectURL(version.bgImageBlob);
+            const img = new Image();
+            await new Promise<void>((resolve) => {
+              img.onload = () => resolve();
+              img.onerror = () => resolve();
+              img.src = tempUrl;
+            });
+            URL.revokeObjectURL(tempUrl);
+            loadedBgImage = img.naturalWidth > 0 ? img : null;
+          }
+        }
+
+        let loadedAlbumImage: HTMLImageElement | null = null;
+        if (version.albumImageBlob) {
+          if (
+            version.albumImageBlob === albumBlobRef.current &&
+            albumImageRef.current
+          ) {
+            loadedAlbumImage = albumImageRef.current;
+          } else {
+            const tempUrl = URL.createObjectURL(version.albumImageBlob);
+            const img = new Image();
+            await new Promise<void>((resolve) => {
+              img.onload = () => resolve();
+              img.onerror = () => resolve();
+              img.src = tempUrl;
+            });
+            URL.revokeObjectURL(tempUrl);
+            loadedAlbumImage = img.naturalWidth > 0 ? img : null;
+          }
+        }
+
+        const normalizedSettings =
+          validateAndNormalizeSettings(version.settings, DEFAULT_SETTINGS) ??
+          DEFAULT_SETTINGS;
+        const restoredSnapshot: StudioSnapshot = {
+          settings: normalizedSettings,
+          lyrics: Array.isArray(version.lyrics)
+            ? version.lyrics.map((l) => ({ ...l }))
+            : [],
+          media: {
+            audioFileName: version.audioFileName,
+            audioBlob: version.audioBlob,
+            audioBuffer: decodedAudio,
+            waveformPeaks: nextPeaks,
+            duration: nextDuration,
+            trimStart: nextTrimStart,
+            trimEnd: nextTrimEnd,
+            bgImageName: version.bgImageBlob ? version.bgImageName : null,
+            bgImageBlob: version.bgImageBlob,
+            bgImage: loadedBgImage,
+            albumImageName: version.albumImageBlob ? version.albumImageName : null,
+            albumImageBlob: version.albumImageBlob,
+            albumImage: loadedAlbumImage,
+            mocapClip: version.mocapClip ?? null,
+            mixClips: [],
+            mixOptions: { ...mixOptionsRef.current },
+          },
+          projectMeta: {
+            id: record.id,
+            name: record.name,
+            createdAt: record.createdAt,
+            status:
+              record.status ??
+              (isProjectCompleted(record) ? 'completed' : 'in-progress'),
+            completedAt: record.completedAt,
+            lastExportedAt: record.lastExportedAt,
+            exportCount: record.exportCount ?? 0,
+            tags: normalizeProjectTags(record.tags),
+          },
+        };
+
+        applySnapshotToStudio(restoredSnapshot);
+        commitProjectSnapshot(
+          restoredSnapshot,
+          `Restored: ${version.label}`
+        );
+        setIsProjectDirty(true);
+        setIsProjectsModalOpen(false);
+      } catch (err) {
+        setAudioError(
+          err instanceof Error
+            ? err.message
+            : 'Failed to restore project state snapshot.'
+        );
+      } finally {
+        setIsLoadingProject(false);
+      }
+    },
+    [applySnapshotToStudio, commitProjectSnapshot]
+  );
 
   const handleOpenProject = useCallback(
     async (id: string) => {
@@ -1497,7 +2264,7 @@ export default function App() {
       }
       const record = await getProjectRecord(id);
       if (!record) return;
-      await loadProjectIntoStudio(record);
+      await loadProjectIntoStudio(record, { resetHistoryStack: false });
       setIsProjectsModalOpen(false);
     },
     [hasMeaningfulProjectData, loadProjectIntoStudio, saveCurrentProject]
@@ -1509,10 +2276,17 @@ export default function App() {
       if (activeProjectRef.current.id === id) {
         activeProjectRef.current.name = name;
         setActiveProjectName(name);
+        commitHistory(
+          (prev) => ({
+            ...prev,
+            projectMeta: captureCurrentProjectMetaSnapshot({ name }),
+          }),
+          { label: `Renamed project: ${name}`, kind: 'project-state' }
+        );
       }
       await refreshProjectsList();
     },
-    [refreshProjectsList]
+    [captureCurrentProjectMetaSnapshot, commitHistory, refreshProjectsList]
   );
 
   const handleDuplicateProject = useCallback(
@@ -1527,40 +2301,54 @@ export default function App() {
     async (id: string, completed: boolean) => {
       const updated = await setProjectCompletionStatus(id, completed);
       if (updated && activeProjectRef.current.id === id) {
-        activeProjectRef.current.status = updated.status;
+        const nextStatus: ProjectStatus =
+          updated.status ?? (completed ? 'completed' : 'in-progress');
+        activeProjectRef.current.status = nextStatus;
         activeProjectRef.current.completedAt = updated.completedAt;
         setActiveProjectCompleted(completed);
+        commitHistory(
+          (prev) => ({
+            ...prev,
+            projectMeta: captureCurrentProjectMetaSnapshot({
+              status: nextStatus,
+              completedAt: updated.completedAt,
+            }),
+          }),
+          {
+            label: completed ? 'Marked project completed' : 'Reopened project',
+            kind: 'project-state',
+          }
+        );
       }
       await refreshProjectsList();
     },
-    [refreshProjectsList]
+    [captureCurrentProjectMetaSnapshot, commitHistory, refreshProjectsList]
   );
 
   const handleUpdateProjectTags = useCallback(
     async (id: string, tags: string[]) => {
       const updated = await updateProjectTags(id, tags);
       if (updated && activeProjectRef.current.id === id) {
-        activeProjectRef.current.tags = normalizeProjectTags(updated.tags);
+        const cleanTags = normalizeProjectTags(updated.tags);
+        activeProjectRef.current.tags = cleanTags;
+        commitHistory(
+          (prev) => ({
+            ...prev,
+            projectMeta: captureCurrentProjectMetaSnapshot({ tags: cleanTags }),
+          }),
+          { label: 'Updated project tags', kind: 'project-state' }
+        );
       }
       await refreshProjectsList();
     },
-    [refreshProjectsList]
+    [captureCurrentProjectMetaSnapshot, commitHistory, refreshProjectsList]
   );
 
   const handleDeleteProject = useCallback(
     async (id: string) => {
       await deleteProjectRecord(id);
       if (activeProjectRef.current.id === id) {
-        activeProjectRef.current = {
-          id: null,
-          name: 'Untitled Project',
-          createdAt: new Date().toISOString(),
-          status: 'in-progress',
-          completedAt: undefined,
-          lastExportedAt: undefined,
-          exportCount: 0,
-          tags: [],
-        };
+        activeProjectRef.current = createInitialProjectMetaSnapshot();
         setActiveProjectId(null);
         setActiveProjectName('Untitled Project');
         setActiveProjectCompleted(false);
@@ -1613,12 +2401,20 @@ export default function App() {
         URL.revokeObjectURL(albumUrlRef.current);
         albumUrlRef.current = null;
       }
+      if (mixClipsRef.current.length > 0 || mixVideoResolverRef.current) {
+        mixVideoResolverRef.current?.dispose();
+        mixVideoResolverRef.current = null;
+        mixClipsRef.current = [];
+        setMixClips([]);
+      }
 
       audioBlobRef.current = null;
+      audioBufferRef.current = null;
       bgBlobRef.current = null;
       albumBlobRef.current = null;
       bgImageRef.current = null;
       albumImageRef.current = null;
+      mocapClipRef.current = null;
       customThumbnailRef.current = null;
 
       setAudioBuffer(null);
@@ -1626,23 +2422,24 @@ export default function App() {
       setAudioFileName(null);
       setBgImageName(null);
       setAlbumImageName(null);
+      setMocapClip(null);
       setDuration(0);
       setTrimStart(0);
       setTrimEnd(0);
       setCurrentTime(0);
 
+      const blankMeta = createInitialProjectMetaSnapshot();
+      activeProjectRef.current = blankMeta;
       skipDirtyMarkRef.current = true;
-      resetHistory({ settings: DEFAULT_SETTINGS, lyrics: [] });
-      activeProjectRef.current = {
-        id: null,
-        name: 'Untitled Project',
-        createdAt: new Date().toISOString(),
-        status: 'in-progress',
-        completedAt: undefined,
-        lastExportedAt: undefined,
-        exportCount: 0,
-        tags: [],
-      };
+      commitProjectSnapshot(
+        {
+          settings: DEFAULT_SETTINGS,
+          lyrics: [],
+          media: INITIAL_MEDIA_SNAPSHOT,
+          projectMeta: blankMeta,
+        },
+        'Started blank project'
+      );
       setActiveProjectId(null);
       setActiveProjectName('Untitled Project');
       setActiveProjectCompleted(false);
@@ -1650,7 +2447,7 @@ export default function App() {
       setIsProjectDirty(false);
       setIsProjectsModalOpen(false);
     })();
-  }, [hasMeaningfulProjectData, resetHistory, saveCurrentProject]);
+  }, [commitProjectSnapshot, hasMeaningfulProjectData, saveCurrentProject]);
 
   // Restore saved project library & last active project on startup
   useEffect(() => {
@@ -1664,7 +2461,7 @@ export default function App() {
       if (lastId) {
         const record = await getProjectRecord(lastId);
         if (!cancelled && record) {
-          await loadProjectIntoStudio(record);
+          await loadProjectIntoStudio(record, { resetHistoryStack: true });
         }
       }
     })();
@@ -1772,21 +2569,36 @@ export default function App() {
     [duration]
   );
 
-  const handleTrimChange = useCallback((start: number, end: number) => {
-    setTrimStart(start);
-    setTrimEnd(end);
-    if (trimRef.current.previewTrimLoop && end > start) {
-      const audio = audioElRef.current;
-      const cur = audio && audio.src ? audio.currentTime : currentTimeRef.current;
-      if (cur < start || cur >= end) {
-        const nextPos = !audio?.paused && cur >= end ? start : Math.max(start, Math.min(end, cur));
-        setCurrentTime(nextPos);
-        if (audio && audio.src) {
-          audio.currentTime = nextPos;
+  const handleTrimChange = useCallback(
+    (start: number, end: number) => {
+      setTrimStart(start);
+      setTrimEnd(end);
+      if (trimRef.current.previewTrimLoop && end > start) {
+        const audio = audioElRef.current;
+        const cur = audio && audio.src ? audio.currentTime : currentTimeRef.current;
+        if (cur < start || cur >= end) {
+          const nextPos =
+            !audio?.paused && cur >= end ? start : Math.max(start, Math.min(end, cur));
+          setCurrentTime(nextPos);
+          if (audio && audio.src) {
+            audio.currentTime = nextPos;
+          }
         }
       }
-    }
-  }, []);
+      const nextMedia = captureCurrentMediaSnapshot({
+        trimStart: start,
+        trimEnd: end,
+      });
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          media: nextMedia,
+        }),
+        { mergeKey: 'media:trim', label: 'Adjusted trim range', kind: 'media' }
+      );
+    },
+    [captureCurrentMediaSnapshot, commitHistory]
+  );
 
   const handleTogglePreviewTrimLoop = useCallback(() => {
     setPreviewTrimLoop((prev) => {
@@ -1830,7 +2642,8 @@ export default function App() {
       isExportModalOpen ||
       exportState.status !== 'idle' ||
       isProjectsModalOpen ||
-      isMidiModalOpen;
+      isMidiModalOpen ||
+      isMixModalOpen;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || isModalOpen) return;
@@ -1890,6 +2703,7 @@ export default function App() {
     handleTogglePlay,
     isExportModalOpen,
     isMidiModalOpen,
+    isMixModalOpen,
     isProjectsModalOpen,
     updateSettings,
   ]);
@@ -1907,6 +2721,11 @@ export default function App() {
     const tick = (now: number) => {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTimestamp) / 1000));
       lastTimestamp = now;
+
+      if (isMixModalOpenRef.current) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
 
       const audio = audioElRef.current;
       const analyser = analyserRef.current;
@@ -2015,6 +2834,18 @@ export default function App() {
         }
         const ctx = canvas.getContext('2d');
         if (ctx) {
+          const baseBpm =
+            tapTempoBpmRef.current ??
+            detectedTrackBpmRef.current ??
+            beatStateRef.current.estimatedBpm ??
+            120;
+          const liveBpm = baseBpm * playbackRateRef.current;
+          const mixResolver = mixVideoResolverRef.current;
+          const activeMixBgFrame =
+            mixResolver && mixResolver.hasActiveVideo()
+              ? mixResolver.resolvePreviewFrame(trackTime, width, height)
+              : null;
+
           renderVisualizerFrame({
             ctx,
             width,
@@ -2025,7 +2856,7 @@ export default function App() {
             timeDomainData: waveBuf,
             settings: activeSettings,
             lyrics: lyricsRef.current,
-            bgImage: bgImageRef.current,
+            bgImage: activeMixBgFrame ?? bgImageRef.current,
             albumImage: albumImageRef.current,
             mocapClip: mocapClipRef.current,
             particles: particlesRef.current,
@@ -2033,6 +2864,7 @@ export default function App() {
             albumRotationRef: albumRotationRef.current,
             beatBurst,
             beatTriggered,
+            bpm: liveBpm,
             beatShockwaves: activeSettings.beatDetection
               ? beatStateRef.current.shockwaves
               : undefined,
@@ -2050,22 +2882,38 @@ export default function App() {
     return () => cancelAnimationFrame(rafId);
   }, []);
 
-  // Clean up retained single export URL on unmount
+  // Clean up retained single export URL and mix resources on unmount
   useEffect(() => {
     return () => {
       if (lastSingleExportUrlRef.current) {
         URL.revokeObjectURL(lastSingleExportUrlRef.current);
         lastSingleExportUrlRef.current = null;
       }
+      mixVideoResolverRef.current?.dispose();
+      mixVideoResolverRef.current = null;
+      disposeMixClips(mixClipsRef.current);
     };
   }, []);
 
   // Offline MP4 Export Trigger
   const handleStartExport = useCallback(
-    async (overrideSettings?: StudioSettings) => {
-      if (!audioBuffer || isBatchRunning) return;
+    async (
+      overrideSettings?: StudioSettings,
+      overrideMedia?: {
+        audioBuffer: AudioBuffer;
+        trimStart: number;
+        trimEnd: number;
+        audioFileName?: string;
+      }
+    ) => {
+      const targetBuffer = overrideMedia?.audioBuffer ?? audioBuffer;
+      if (!targetBuffer || isBatchRunning) return;
 
       const activeSettings = overrideSettings ?? settings;
+      const activeTrimStart = overrideMedia?.trimStart ?? trimStart;
+      const activeTrimEnd = overrideMedia?.trimEnd ?? trimEnd;
+      const activeFileName =
+        overrideMedia?.audioFileName ?? mediaMetaRef.current.audioFileName;
 
       // Pause live playback cleanly during offline render
       if (audioElRef.current && !audioElRef.current.paused) {
@@ -2085,15 +2933,22 @@ export default function App() {
         message: 'Initializing video & audio encoders...',
       });
 
+      const mixResolver = mixVideoResolverRef.current;
+      const resolveBgImageAtTime =
+        mixResolver && mixResolver.hasActiveVideo()
+          ? (t: number, w: number, h: number) => mixResolver.resolveExportFrame(t, w, h)
+          : undefined;
+
       try {
         const result = await exportProjectToMp4({
-          audioBuffer,
-          trimStart,
-          trimEnd,
+          audioBuffer: targetBuffer,
+          trimStart: activeTrimStart,
+          trimEnd: activeTrimEnd,
           settings: activeSettings,
           lyrics,
           bgImage: bgImageRef.current,
           albumImage: albumImageRef.current,
+          resolveBgImageAtTime,
           mocapClip: mocapClipRef.current,
           signal: controller.signal,
           onProgress: (next) => setExportState(next),
@@ -2111,14 +2966,14 @@ export default function App() {
           id: 'latest-single-export',
           label:
             activeSettings.trackTitle.trim() ||
-            mediaMetaRef.current.audioFileName?.replace(/\.[^.]+$/, '') ||
+            activeFileName?.replace(/\.[^.]+$/, '') ||
             'Latest Export',
           downloadUrl: result.downloadUrl,
           downloadFileName: result.downloadFileName,
           fileSizeBytes: result.fileSizeBytes,
           aspectRatio: activeSettings.aspectRatio,
           exportResolution: activeSettings.exportResolution,
-          durationSec: Math.max(0.5, trimEnd - trimStart),
+          durationSec: Math.max(0.5, activeTrimEnd - activeTrimStart),
           trackTitle: activeSettings.trackTitle,
           artistName: activeSettings.artistName,
           visualizerMode: activeSettings.visualizerMode,
@@ -2148,6 +3003,133 @@ export default function App() {
       }
     },
     [audioBuffer, isBatchRunning, trimStart, trimEnd, settings, lyrics, saveCurrentProject]
+  );
+
+  const handleApplyMixToStudio = useCallback(
+    async (params: {
+      clips: MixClipItem[];
+      options: MixProjectOptions;
+      trackTitle: string;
+      trimStart: number;
+      trimEnd: number;
+      action: 'apply' | 'export' | 'batch';
+    }) => {
+      const {
+        clips: nextClips,
+        options: nextOptions,
+        trackTitle,
+        trimStart: mixTrimStart,
+        trimEnd: mixTrimEnd,
+        action,
+      } = params;
+      setAudioError(null);
+
+      const audio = audioElRef.current;
+      if (audio) {
+        audio.pause();
+        setIsPlaying(false);
+      }
+
+      await ensureAudioGraph();
+      const rendered = await renderCombinedMixAudioBuffer(nextClips, {
+        normalize: nextOptions.normalizeMixAudio,
+      });
+
+      mixVideoResolverRef.current?.dispose();
+      mixVideoResolverRef.current = nextClips.some((c) => c.hasVideo && c.objectUrl)
+        ? createMixVideoFrameResolver(nextClips)
+        : null;
+
+      mixClipsRef.current = nextClips;
+      mixOptionsRef.current = nextOptions;
+      setMixClips(nextClips);
+      setMixOptions(nextOptions);
+
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+      const mixFileName = `${sanitizeFileName(trackTitle || 'combined-mix')}.wav`;
+      audioBlobRef.current = rendered.wavBlob;
+      audioBufferRef.current = rendered.audioBuffer;
+      const wavUrl = URL.createObjectURL(rendered.wavBlob);
+      audioUrlRef.current = wavUrl;
+
+      const safeTrimStart = Number(
+        Math.max(0, Math.min(Math.max(0, rendered.duration - 0.1), mixTrimStart)).toFixed(2)
+      );
+      const safeTrimEnd = Number(
+        Math.max(
+          Math.min(rendered.duration, safeTrimStart + 0.1),
+          Math.min(
+            rendered.duration,
+            mixTrimEnd > mixTrimStart ? mixTrimEnd : rendered.duration
+          )
+        ).toFixed(2)
+      );
+
+      if (audio) {
+        audio.src = wavUrl;
+        audio.currentTime = safeTrimStart;
+        audio.defaultPlaybackRate = playbackRateRef.current;
+        audio.playbackRate = playbackRateRef.current;
+      }
+
+      setAudioBuffer(rendered.audioBuffer);
+      setWaveformPeaks(rendered.waveformPeaks);
+      setAudioFileName(mixFileName);
+      setDuration(rendered.duration);
+      setCurrentTime(safeTrimStart);
+      setTrimStart(safeTrimStart);
+      setTrimEnd(safeTrimEnd);
+
+      const nextSettings: StudioSettings = {
+        ...settingsRef.current,
+        trackTitle: trackTitle.trim() || settingsRef.current.trackTitle || 'Combined Mix',
+      };
+      const nextMedia = captureCurrentMediaSnapshot({
+        audioFileName: mixFileName,
+        audioBlob: rendered.wavBlob,
+        audioBuffer: rendered.audioBuffer,
+        waveformPeaks: rendered.waveformPeaks,
+        duration: rendered.duration,
+        trimStart: safeTrimStart,
+        trimEnd: safeTrimEnd,
+        mixClips: nextClips,
+        mixOptions: nextOptions,
+      });
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          settings: {
+            ...prev.settings,
+            trackTitle: nextSettings.trackTitle,
+          },
+          media: nextMedia,
+        }),
+        { label: `Applied mix (${nextClips.length} tracks)`, kind: 'media' }
+      );
+
+      setIsMixModalOpen(false);
+
+      if (action === 'export') {
+        void handleStartExport(nextSettings, {
+          audioBuffer: rendered.audioBuffer,
+          trimStart: safeTrimStart,
+          trimEnd: safeTrimEnd,
+          audioFileName: mixFileName,
+        });
+      } else if (action === 'batch') {
+        setExportState(INITIAL_EXPORT_STATE);
+        setExportModalView('batch');
+        setIsExportModalOpen(true);
+      }
+    },
+    [
+      captureCurrentMediaSnapshot,
+      commitHistory,
+      ensureAudioGraph,
+      handleStartExport,
+    ]
   );
 
   const handleOpenSingleExport = useCallback(() => {
@@ -2407,6 +3389,11 @@ export default function App() {
         const customFileName = `${baseSlug}-${ratioSlug}-${String(idx + 1).padStart(2, '0')}`;
 
         try {
+          const mixResolver = mixVideoResolverRef.current;
+          const resolveBgImageAtTime =
+            mixResolver && mixResolver.hasActiveVideo()
+              ? (t: number, w: number, h: number) => mixResolver.resolveExportFrame(t, w, h)
+              : undefined;
           const result = await exportProjectToMp4({
             audioBuffer,
             trimStart: job.trimStart,
@@ -2415,6 +3402,7 @@ export default function App() {
             lyrics: lyricsRef.current,
             bgImage: bgImageRef.current,
             albumImage: albumImageRef.current,
+            resolveBgImageAtTime,
             mocapClip: mocapClipRef.current,
             signal: controller.signal,
             autoDownload: autoDownloadBatchRef.current,
@@ -2576,13 +3564,21 @@ export default function App() {
         Math.max(clampedStart + 0.5, Math.min(job.trimEnd, safeDur || job.trimEnd)).toFixed(2)
       );
 
-      commitHistory((prev) => ({
-        ...prev,
-        settings: { ...job.settings },
-      }));
       setTrimStart(clampedStart);
       setTrimEnd(clampedEnd);
       setCurrentTime(clampedStart);
+      const nextMedia = captureCurrentMediaSnapshot({
+        trimStart: clampedStart,
+        trimEnd: clampedEnd,
+      });
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          settings: { ...job.settings },
+          media: nextMedia,
+        }),
+        { label: `Loaded batch job: ${job.label}`, kind: 'project-state' }
+      );
       if (audioElRef.current && audioElRef.current.src) {
         audioElRef.current.currentTime = clampedStart;
       }
@@ -2591,7 +3587,13 @@ export default function App() {
       motionBlurStateRef.current.frameIndex = 0;
       handleCloseExportModal();
     },
-    [isBatchRunning, duration, commitHistory, handleCloseExportModal]
+    [
+      isBatchRunning,
+      duration,
+      captureCurrentMediaSnapshot,
+      commitHistory,
+      handleCloseExportModal,
+    ]
   );
 
   const handleSavePreset = useCallback(
@@ -2843,86 +3845,104 @@ export default function App() {
     await saveCurrentProject({ forceCreate: true });
   }, [renderCleanCoverCanvas, saveCurrentProject]);
 
-  const handleAutoGenerateCaptions = useCallback(async () => {
-    if (!audioBuffer || isGeneratingCaptions) return;
+  const handleAutoGenerateCaptions = useCallback(
+    async (overrideAudio?: {
+      audioBuffer: AudioBuffer;
+      trimStart: number;
+      trimEnd: number;
+    }) => {
+      const targetBuffer = overrideAudio?.audioBuffer ?? audioBuffer;
+      if (!targetBuffer || isGeneratingCaptions) return;
 
-    setActiveTab('lyrics');
-    setIsGeneratingCaptions(true);
-    setCaptionsNotice(null);
+      const activeTrimStart = overrideAudio?.trimStart ?? trimStart;
+      const activeTrimEnd =
+        overrideAudio && overrideAudio.trimEnd > overrideAudio.trimStart
+          ? overrideAudio.trimEnd
+          : overrideAudio
+          ? targetBuffer.duration
+          : trimEnd;
 
-    try {
-      const { base64, mimeType, durationSec } = audioBufferToCompactWavBase64(
-        audioBuffer,
-        trimStart,
-        trimEnd
-      );
+      setActiveTab('lyrics');
+      setIsGeneratingCaptions(true);
+      setCaptionsNotice(null);
 
-      const response = await fetch('/api/captions/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audioBase64: base64,
-          mimeType,
-          durationSec,
-          trackTitle: settingsRef.current.trackTitle,
-          artistName: settingsRef.current.artistName,
-        }),
-      });
-
-      const rawText = await response.text();
-      let payload: {
-        captions?: Array<{ timeSec: number; text: string }>;
-        error?: string;
-      } = {};
-      if (rawText) {
-        try {
-          payload = JSON.parse(rawText) as typeof payload;
-        } catch {
-          payload = { error: rawText };
-        }
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          payload.error || `Failed to generate captions (HTTP ${response.status}).`
+      try {
+        const { base64, mimeType, durationSec } = audioBufferToCompactWavBase64(
+          targetBuffer,
+          activeTrimStart,
+          activeTrimEnd
         );
+
+        const response = await fetch('/api/captions/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64,
+            mimeType,
+            durationSec,
+            trackTitle: settingsRef.current.trackTitle,
+            artistName: settingsRef.current.artistName,
+          }),
+        });
+
+        const rawText = await response.text();
+        let payload: {
+          captions?: Array<{ timeSec: number; text: string }>;
+          error?: string;
+        } = {};
+        if (rawText) {
+          try {
+            payload = JSON.parse(rawText) as typeof payload;
+          } catch {
+            payload = { error: rawText };
+          }
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            payload.error || `Failed to generate captions (HTTP ${response.status}).`
+          );
+        }
+
+        const maxTime = Math.max(activeTrimStart, activeTrimEnd - 0.1);
+        const generated = (payload.captions ?? [])
+          .map((c) => ({
+            id: createLyricId(),
+            time: Number(
+              Math.max(activeTrimStart, Math.min(maxTime, activeTrimStart + c.timeSec)).toFixed(
+                2
+              )
+            ),
+            text: c.text,
+          }))
+          .sort((a, b) => a.time - b.time);
+
+        if (generated.length === 0) {
+          throw new Error('No caption cues were generated for this audio clip.');
+        }
+
+        commitHistory((prev) => ({
+          ...prev,
+          lyrics: generated,
+        }));
+        setCaptionsNotice({
+          type: 'success',
+          text: `Generated ${generated.length} synced captions for this clip.`,
+        });
+      } catch (err) {
+        setCaptionsNotice({
+          type: 'error',
+          text:
+            err instanceof Error
+              ? err.message
+              : 'Unable to generate captions automatically.',
+        });
+      } finally {
+        setIsGeneratingCaptions(false);
       }
-
-      const maxTime = Math.max(trimStart, trimEnd - 0.1);
-      const generated = (payload.captions ?? [])
-        .map((c) => ({
-          id: createLyricId(),
-          time: Number(
-            Math.max(trimStart, Math.min(maxTime, trimStart + c.timeSec)).toFixed(2)
-          ),
-          text: c.text,
-        }))
-        .sort((a, b) => a.time - b.time);
-
-      if (generated.length === 0) {
-        throw new Error('No caption cues were generated for this audio clip.');
-      }
-
-      commitHistory((prev) => ({
-        ...prev,
-        lyrics: generated,
-      }));
-      setCaptionsNotice({
-        type: 'success',
-        text: `Generated ${generated.length} synced captions for this clip.`,
-      });
-    } catch (err) {
-      setCaptionsNotice({
-        type: 'error',
-        text:
-          err instanceof Error
-            ? err.message
-            : 'Unable to generate captions automatically.',
-      });
-    } finally {
-      setIsGeneratingCaptions(false);
-    }
-  }, [audioBuffer, isGeneratingCaptions, trimStart, trimEnd, commitHistory]);
+    },
+    [audioBuffer, isGeneratingCaptions, trimStart, trimEnd, commitHistory]
+  );
 
   const isSingleExporting =
     exportState.status === 'preparing' ||
@@ -2976,16 +3996,28 @@ export default function App() {
         isSavingProject={isSavingProject}
         canUndo={canUndo}
         canRedo={canRedo}
+        historyEntries={historyEntries}
+        currentHistoryEntryId={currentEntryId}
         midiActiveCount={midiMappings.filter((m) => m.enabled).length}
         midiConnectedCount={
           midiController.devices.filter((d) => d.state === 'connected').length
         }
         midiEnabled={midiEnabled}
-        onUndo={undo}
-        onRedo={redo}
+        mixClipCount={mixClips.length}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onJumpToHistory={handleJumpToHistory}
+        onCaptureProjectSnapshot={(label) => void handleCaptureProjectSnapshot(label)}
         onOpenProjects={() => setIsProjectsModalOpen(true)}
         onQuickSaveProject={() => void handleSaveActiveProject()}
         onLoadDemo={() => void handleLoadDemo()}
+        onOpenMixStudio={() => {
+          if (audioElRef.current && !audioElRef.current.paused) {
+            audioElRef.current.pause();
+            setIsPlaying(false);
+          }
+          setIsMixModalOpen(true);
+        }}
         onOpenMidi={() => setIsMidiModalOpen(true)}
         onOpenBatchExport={handleOpenBatchExport}
         onOpenShare={() => handleOpenShareModal()}
@@ -3050,12 +4082,21 @@ export default function App() {
           onAutoArrange={handleAutoArrange}
           autoArrangeNotice={autoArrangeNotice}
           beatMeterBarRef={beatMeterBarRef}
+          currentBpm={(tapTempoBpm ?? detectedTrackBpm ?? 120) * playbackRate}
           midiMappingBadges={midiMappingBadges}
           onOpenMidiMapping={() => setIsMidiModalOpen(true)}
           onPreviewSceneTransition={handlePreviewSceneTransition}
           mocapClip={mocapClip}
           onMocapFileSelect={handleMocapFileSelect}
           onClearMocapClip={handleClearMocapClip}
+          mixClipCount={mixClips.length}
+          onOpenMixStudio={() => {
+            if (audioElRef.current && !audioElRef.current.paused) {
+              audioElRef.current.pause();
+              setIsPlaying(false);
+            }
+            setIsMixModalOpen(true);
+          }}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -3213,6 +4254,8 @@ export default function App() {
         onToggleProjectCompleted={handleToggleProjectCompleted}
         onUpdateProjectTags={handleUpdateProjectTags}
         onDeleteProject={handleDeleteProject}
+        onRestoreProjectVersion={handleRestoreProjectVersion}
+        onCaptureProjectSnapshot={(label) => void handleCaptureProjectSnapshot(label)}
         onNewBlankProject={handleNewBlankProject}
       />
 
@@ -3239,6 +4282,55 @@ export default function App() {
         onRemoveMapping={handleRemoveMidiMapping}
         onLoadStarterMappings={handleLoadStarterMidiMappings}
         onClearAllMappings={handleClearAllMidiMappings}
+      />
+
+      <MixStudioModal
+        isOpen={isMixModalOpen}
+        initialClips={mixClips}
+        initialOptions={mixOptions}
+        currentAudioBuffer={audioBuffer}
+        currentAudioFileName={audioFileName}
+        ensureAudioContext={ensureAudioGraph}
+        isExporting={isExporting}
+        onClose={() => setIsMixModalOpen(false)}
+        onApplyMix={handleApplyMixToStudio}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        settings={settings}
+        onUpdateSettings={updateSettings}
+        lyrics={lyrics}
+        onLyricsChange={handleLyricsChange}
+        bgImage={bgImageRef.current}
+        bgImageName={bgImageName}
+        onBgImageSelect={handleBgImageSelect}
+        albumImage={albumImageRef.current}
+        albumImageName={albumImageName}
+        onAlbumImageSelect={handleAlbumImageSelect}
+        onCopyBgToAlbum={handleCopyBgToAlbum}
+        onCopyAlbumToBg={handleCopyAlbumToBg}
+        onDownloadCoverThumbnail={handleDownloadCoverThumbnail}
+        onSetProjectThumbnailFromCover={handleSetProjectThumbnailFromCover}
+        savedPresets={savedPresets}
+        onSavePreset={handleSavePreset}
+        onApplyPreset={handleApplyPreset}
+        onDeletePreset={handleDeletePreset}
+        onImportPresetFile={handleImportPresetFile}
+        onDownloadSnapshot={handleSaveCanvasSnapshot}
+        isGeneratingCaptions={isGeneratingCaptions}
+        captionsNotice={captionsNotice}
+        onDismissCaptionsNotice={() => setCaptionsNotice(null)}
+        onAutoGenerateCaptions={(overrideAudio) => void handleAutoGenerateCaptions(overrideAudio)}
+        onAutoArrange={handleAutoArrange}
+        autoArrangeNotice={autoArrangeNotice}
+        midiMappingBadges={midiMappingBadges}
+        onOpenMidiMapping={() => setIsMidiModalOpen(true)}
+        mocapClip={mocapClip}
+        onMocapFileSelect={handleMocapFileSelect}
+        onClearMocapClip={handleClearMocapClip}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
       />
     </div>
   );

@@ -53,6 +53,95 @@ export const LYRIC_FONT_OPTIONS: LyricFontOption[] = [
   },
 ];
 
+export interface LyricTypographyPreset {
+  id: string;
+  label: string;
+  desc: string;
+  lyricFont: LyricFontKey;
+  lyricSize: number;
+  lyricLetterSpacing: number;
+  lyricShadowIntensity: number;
+}
+
+export const LYRIC_TYPOGRAPHY_PRESETS: LyricTypographyPreset[] = [
+  {
+    id: 'modern-minimal',
+    label: 'Modern Minimal',
+    desc: 'Clean sans-serif with airy tracking and subtle shadow',
+    lyricFont: 'sans',
+    lyricSize: 0.95,
+    lyricLetterSpacing: 0.06,
+    lyricShadowIntensity: 0.55,
+  },
+  {
+    id: 'classic-film',
+    label: 'Classic Film',
+    desc: 'Editorial serif subtitles with cinema tracking and soft depth',
+    lyricFont: 'serif',
+    lyricSize: 1.0,
+    lyricLetterSpacing: 0.14,
+    lyricShadowIntensity: 1.15,
+  },
+  {
+    id: 'retro-neon',
+    label: 'Retro Neon',
+    desc: 'Geometric display type with wide synth tracking and deep glow contrast',
+    lyricFont: 'geometric',
+    lyricSize: 1.12,
+    lyricLetterSpacing: 0.12,
+    lyricShadowIntensity: 1.65,
+  },
+  {
+    id: 'bold-impact',
+    label: 'Bold Impact',
+    desc: 'Condensed headline type, oversized scale, tight tracking & heavy shadow',
+    lyricFont: 'display',
+    lyricSize: 1.28,
+    lyricLetterSpacing: -0.02,
+    lyricShadowIntensity: 1.8,
+  },
+  {
+    id: 'studio-hud',
+    label: 'Studio HUD',
+    desc: 'Technical monospace telemetry with crisp spacing and balanced shadow',
+    lyricFont: 'mono',
+    lyricSize: 0.92,
+    lyricLetterSpacing: 0.08,
+    lyricShadowIntensity: 0.9,
+  },
+  {
+    id: 'editorial-poetry',
+    label: 'Editorial Poetry',
+    desc: 'Oversized intimate serif with natural tracking and warm contrast',
+    lyricFont: 'serif',
+    lyricSize: 1.18,
+    lyricLetterSpacing: 0.01,
+    lyricShadowIntensity: 0.85,
+  },
+];
+
+export function findMatchingLyricPreset(
+  settings: Pick<
+    StudioSettings,
+    'lyricFont' | 'lyricSize' | 'lyricLetterSpacing' | 'lyricShadowIntensity'
+  >
+): LyricTypographyPreset | null {
+  const font = settings.lyricFont ?? 'auto';
+  const size = settings.lyricSize ?? 1;
+  const spacing = settings.lyricLetterSpacing ?? 0;
+  const shadow = settings.lyricShadowIntensity ?? 1;
+
+  return (
+    LYRIC_TYPOGRAPHY_PRESETS.find(
+      (preset) =>
+        preset.lyricFont === font &&
+        Math.abs(preset.lyricSize - size) < 0.015 &&
+        Math.abs(preset.lyricLetterSpacing - spacing) < 0.008 &&
+        Math.abs(preset.lyricShadowIntensity - shadow) < 0.03
+    ) ?? null
+  );
+}
+
 export function resolveLyricFontFamily(
   lyricFont: LyricFontKey | undefined,
   styleDefaultFamily = '"Plus Jakarta Sans", sans-serif'
@@ -340,6 +429,8 @@ export function renderExtraLyricStyle(
       ? lyrics[0]
       : null;
 
+  const lyricSizeScale = Math.max(0.7, Math.min(1.5, settings.lyricSize ?? 1));
+  const fontMinDim = minDim * lyricSizeScale;
   const shadowIntensity = Math.max(0, Math.min(2, settings.lyricShadowIntensity ?? 1));
   const beatDrive = Math.max(0, Math.min(2, lyricBeatDrive));
   const beatScale = 1 + beatDrive * 0.065;
@@ -371,7 +462,7 @@ export function renderExtraLyricStyle(
   const lineProgress = Math.max(0, Math.min(1, lineElapsed / lineDuration));
 
   if (style === 'floating-cloud') {
-    const activeFs = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
+    const activeFs = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.042));
     const anchorCenterY = Math.max(
       height * 0.25,
       Math.min(height * 0.75, anchorY)
@@ -444,7 +535,7 @@ export function renderExtraLyricStyle(
   if (style === 'vertical-spine') {
     const focusIdx = activeIdx >= 0 ? activeIdx : 0;
     const isPreIntro = activeIdx < 0;
-    const activeFs = Math.round(minDim * (isPortrait ? 0.038 : 0.036));
+    const activeFs = Math.round(fontMinDim * (isPortrait ? 0.038 : 0.036));
     const sideFs = Math.round(activeFs * 0.74);
     const spineX = width * 0.5;
     const stepH = activeFs * 1.65;
@@ -540,7 +631,7 @@ export function renderExtraLyricStyle(
   if (!currLine) return;
 
   if (style === 'neon-outline') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.052 : 0.049));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.052 : 0.049));
     const scale = (1 + Math.min(0.05, bass * 0.045)) * beatScale;
     const text = currLine.text.toUpperCase();
     ctx.save();
@@ -585,7 +676,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'typewriter') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.037 : 0.034));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.037 : 0.034));
     const revealDuration = Math.min(1.6, lineDuration * 0.72);
     const charRatio = Math.min(1, lineElapsed / Math.max(0.25, revealDuration));
     const visibleChars = Math.max(1, Math.ceil(currLine.text.length * charRatio));
@@ -657,7 +748,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'cinematic-serif') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.042));
     const fadeIn = Math.min(1, lineElapsed / 0.28);
     ctx.save();
     ctx.globalAlpha = 0.25 + fadeIn * 0.75;
@@ -714,7 +805,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'word-sweep') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.046 : 0.044));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.046 : 0.044));
     ctx.save();
     ctx.font = `700 ${fontSize}px ${fontSans}`;
     applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
@@ -791,7 +882,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'glass-card') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.04 : 0.038));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.04 : 0.038));
     ctx.save();
     ctx.font = `600 ${fontSize}px ${fontSans}`;
     applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
@@ -869,7 +960,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'bold-impact') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.056 : 0.054));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.056 : 0.054));
     const punch = lineElapsed < 0.12 ? 1.12 - (lineElapsed / 0.12) * 0.12 : 1;
     const scale = punch * (1 + Math.min(0.06, bass * 0.055)) * beatScale;
     const upper = currLine.text.toUpperCase();
@@ -910,7 +1001,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'split-reveal') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.042));
     const revealFrac = Math.min(1, lineElapsed / 0.25);
     ctx.save();
     ctx.font = `700 ${fontSize}px ${fontSans}`;
@@ -981,7 +1072,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'ticker-ribbon') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.036 : 0.033));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.036 : 0.033));
     ctx.save();
     ctx.font = `600 ${fontSize}px ${fontSans}`;
     applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
@@ -1038,7 +1129,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'cyber-hud') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.036 : 0.034));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.036 : 0.034));
     const upper = currLine.text.toUpperCase();
     ctx.save();
     ctx.font = `600 ${fontSize}px ${fontMono}`;
@@ -1146,7 +1237,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'retro-arcade') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.041));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.041));
     const upper = currLine.text.toUpperCase();
     const scale = (1 + Math.min(0.05, bass * 0.045)) * beatScale;
     ctx.save();
@@ -1179,7 +1270,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'editorial-quote') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.041 : 0.039));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.041 : 0.039));
     ctx.save();
     ctx.font = `italic 600 ${fontSize}px ${fontSerif}`;
     applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);
@@ -1237,7 +1328,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'vinyl-sleeve') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.036 : 0.033));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.036 : 0.033));
     const mins = Math.floor(currLine.time / 60);
     const secs = Math.floor(currLine.time % 60);
     const stamp = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
@@ -1302,7 +1393,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'glitch-flash') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.048 : 0.045));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.048 : 0.045));
     const upper = currLine.text.toUpperCase();
     const entranceBurst = lineElapsed < 0.18 ? 1 - lineElapsed / 0.18 : 0;
     const jitter =
@@ -1350,7 +1441,7 @@ export function renderExtraLyricStyle(
   }
 
   if (style === 'duotone-badge') {
-    const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.041));
+    const fontSize = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.041));
     const scale = (1 + Math.min(0.06, bass * 0.05)) * beatScale;
     ctx.save();
     ctx.font = `800 ${fontSize}px ${fontSans}`;
@@ -1399,7 +1490,7 @@ export function renderExtraLyricStyle(
   }
 
   // 'wave-bounce'
-  const fontSize = Math.round(minDim * (isPortrait ? 0.044 : 0.042));
+  const fontSize = Math.round(fontMinDim * (isPortrait ? 0.044 : 0.042));
   ctx.save();
   ctx.font = `700 ${fontSize}px ${fontSans}`;
   applyLyricLetterSpacing(ctx, fontSize, settings.lyricLetterSpacing);

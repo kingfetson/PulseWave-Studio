@@ -442,6 +442,7 @@ export interface StudioSettings {
   danceEnergy?: number; // 0.3 - 2.0
   danceLyricSync?: boolean;
   danceStrobe?: number; // 0 - 1 (post-processing beat-peak strobe on dancing avatars)
+  danceGlow?: number; // 0 - 1.5 (soft emission glow around 3D dancer characters)
   danceMirror?: boolean; // horizontally flip dancing avatars for symmetric stage look
   danceSpotlightIntensity?: number; // 0 - 2.0 (stage spotlight cone, floor pool & key-light intensity)
   danceRimColor?: string; // 'auto' (follows active theme) or custom hex rim light color
@@ -451,6 +452,7 @@ export interface StudioSettings {
   showTrackOverlay: boolean;
   lyricPosition: number; // 15 - 92 (% from top)
   lyricFont?: LyricFontKey; // typography override ('auto' uses display style default)
+  lyricSize?: number; // 0.7 - 1.5 typography scale multiplier (default 1.0)
   lyricLetterSpacing?: number; // -0.06 - 0.30 em (character tracking / kerning)
   lyricShadowIntensity?: number; // 0 - 2.0 (0 = off, 1 = standard, 2 = deep contrast)
   lyricBeatSync?: boolean; // scale up & glow active lyrics on detected beats
@@ -501,6 +503,10 @@ export interface BeatState {
   burstIntensity: number;
   lastEnergy: number;
   shockwaves: BeatShockwave[];
+  elapsedTime?: number;
+  lastBeatTime?: number;
+  beatIntervals?: number[];
+  estimatedBpm?: number;
 }
 
 export interface MotionBlurState {
@@ -610,6 +616,67 @@ export function normalizeProjectTags(tags?: string[]): string[] {
   return result;
 }
 
+export type SnapshotKind = 'settings' | 'lyrics' | 'media' | 'project-state';
+
+export interface ProjectMediaSnapshot {
+  audioFileName: string | null;
+  audioBlob: Blob | null;
+  audioBuffer: AudioBuffer | null;
+  waveformPeaks: number[];
+  duration: number;
+  trimStart: number;
+  trimEnd: number;
+  bgImageName: string | null;
+  bgImageBlob: Blob | null;
+  bgImage: HTMLImageElement | null;
+  albumImageName: string | null;
+  albumImageBlob: Blob | null;
+  albumImage: HTMLImageElement | null;
+  mocapClip: MocapClipData | null;
+  mixClips: MixClipItem[];
+  mixOptions: MixProjectOptions;
+}
+
+export interface ProjectMetaSnapshot {
+  id: string | null;
+  name: string;
+  createdAt: string;
+  status: ProjectStatus;
+  completedAt?: string;
+  lastExportedAt?: string;
+  exportCount?: number;
+  tags: string[];
+}
+
+export interface ProjectStateVersionSummary {
+  id: string;
+  label: string;
+  createdAt: string;
+  reason: 'save' | 'export' | 'checkpoint' | 'media';
+  audioFileName: string | null;
+  bgImageName: string | null;
+  albumImageName: string | null;
+  mocapName: string | null;
+  mixClipCount: number;
+  lyricsCount: number;
+  trimStart: number;
+  trimEnd: number;
+  duration: number;
+  visualizerMode: VisualizerMode;
+  aspectRatio: AspectRatioKey;
+  thumbnailDataUrl: string | null;
+}
+
+export interface ProjectStateVersionRecord extends ProjectStateVersionSummary {
+  settings: StudioSettings;
+  lyrics: LyricLine[];
+  waveformPeaks: number[];
+  audioBlob: Blob | null;
+  bgImageBlob: Blob | null;
+  albumImageBlob: Blob | null;
+  mocapClip?: MocapClipData | null;
+}
+
 export interface StudioProjectSummary {
   id: string;
   name: string;
@@ -631,6 +698,7 @@ export interface StudioProjectSummary {
   albumImageName: string | null;
   thumbnailDataUrl: string | null;
   hasAudioBlob: boolean;
+  versions?: ProjectStateVersionSummary[];
 }
 
 export function isProjectCompleted(
@@ -645,4 +713,37 @@ export interface StudioProjectRecord extends StudioProjectSummary {
   audioBlob: Blob | null;
   bgImageBlob: Blob | null;
   albumImageBlob: Blob | null;
+  mocapClip?: MocapClipData | null;
+  versions?: ProjectStateVersionRecord[];
 }
+
+export type MixClipKind = 'audio' | 'video';
+
+export interface MixClipItem {
+  id: string;
+  name: string;
+  kind: MixClipKind;
+  file: File | null;
+  objectUrl: string | null;
+  duration: number;
+  trimStart: number;
+  trimEnd: number;
+  startTime: number;
+  volume: number; // 0 - 1.5
+  muted: boolean;
+  solo: boolean;
+  fadeIn: number; // seconds
+  fadeOut: number; // seconds
+  videoOpacity: number; // 0 - 1
+  hasVideo: boolean;
+  videoWidth: number;
+  videoHeight: number;
+  audioBuffer: AudioBuffer | null;
+  waveformPeaks: number[];
+}
+
+export interface MixProjectOptions {
+  normalizeMixAudio: boolean;
+  defaultCrossfadeSec: number;
+}
+

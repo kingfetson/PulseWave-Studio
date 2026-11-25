@@ -15,6 +15,7 @@ import {
 } from '../utils/audioCodecConfig';
 import {
   createInitialBeatState,
+  estimateBpmFromTracker,
   OfflineAudioAnalyzer,
   OfflineLowPassBeatTracker,
   PcmAudioInput,
@@ -391,6 +392,13 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
     const beatTracker = needsBeatDetector
       ? new OfflineLowPassBeatTracker(pcmInput, 140, 1.2)
       : null;
+    const exportTrackBpm = beatTracker
+      ? estimateBpmFromTracker(
+          beatTracker,
+          Math.min(25, length / Math.max(1, sampleRate)),
+          settings.beatSensitivity
+        )
+      : null;
     const beatState = createInitialBeatState();
     const minDim = Math.min(width, height);
     const frequencyData = new Uint8Array(1024);
@@ -457,6 +465,7 @@ async function runWorkerExport(payload: StartWorkerExportPayload): Promise<void>
         albumRotationRef,
         beatBurst,
         beatTriggered,
+        bpm: beatState.estimatedBpm ?? exportTrackBpm ?? 120,
         beatShockwaves: beatState.shockwaves,
         motionBlurState,
         trackDuration: trackDurationForCycle,

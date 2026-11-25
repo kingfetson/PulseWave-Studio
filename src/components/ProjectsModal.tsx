@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  BookmarkPlus,
   Check,
   CheckCircle2,
   CircleDashed,
@@ -7,6 +8,7 @@ import {
   Copy,
   FilePlus2,
   FolderOpen,
+  History,
   Loader2,
   Music2,
   Pencil,
@@ -49,6 +51,8 @@ interface ProjectsModalProps {
   onToggleProjectCompleted: (id: string, completed: boolean) => Promise<void>;
   onUpdateProjectTags: (id: string, tags: string[]) => Promise<void>;
   onDeleteProject: (id: string) => Promise<void>;
+  onRestoreProjectVersion: (projectId: string, versionId: string) => Promise<void>;
+  onCaptureProjectSnapshot: (label?: string) => void;
   onNewBlankProject: () => void;
 }
 
@@ -84,6 +88,8 @@ export function ProjectsModal({
   onToggleProjectCompleted,
   onUpdateProjectTags,
   onDeleteProject,
+  onRestoreProjectVersion,
+  onCaptureProjectSnapshot,
   onNewBlankProject,
 }: ProjectsModalProps) {
   const [newName, setNewName] = useState(defaultProjectName);
@@ -96,6 +102,7 @@ export function ProjectsModal({
   const [editingName, setEditingName] = useState('');
   const [tagEditingId, setTagEditingId] = useState<string | null>(null);
   const [cardTagInput, setCardTagInput] = useState('');
+  const [versionsOpenId, setVersionsOpenId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -106,6 +113,7 @@ export function ProjectsModal({
       setEditingId(null);
       setTagEditingId(null);
       setCardTagInput('');
+      setVersionsOpenId(null);
       setConfirmDeleteId(null);
     }
   }, [isOpen, defaultProjectName]);
@@ -375,6 +383,21 @@ export function ProjectsModal({
                 </span>
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() =>
+                onCaptureProjectSnapshot(
+                  `${newName.trim() || activeProjectName || 'Project'} Snapshot`
+                )
+              }
+              disabled={isSavingProject || isLoadingProject}
+              title="Save a Project State snapshot (settings, lyrics & media) to history"
+              className="px-3 py-2 rounded-lg text-xs font-medium bg-cyan-500/12 hover:bg-cyan-500/20 text-cyan-200 border border-cyan-400/35 transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+            >
+              <BookmarkPlus className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Snapshot</span>
+            </button>
           </div>
 
           {/* Optional tags for new project */}
@@ -616,6 +639,8 @@ export function ProjectsModal({
                 const isActive = project.id === activeProjectId;
                 const isEditing = editingId === project.id;
                 const isEditingTags = tagEditingId === project.id;
+                const isVersionsOpen = versionsOpenId === project.id;
+                const projectVersions = project.versions ?? [];
                 const completed = isProjectCompleted(project);
                 const projectTags = normalizeProjectTags(project.tags);
                 const clipLen = Math.max(0, project.trimEnd - project.trimStart);
@@ -919,24 +944,91 @@ export function ProjectsModal({
                         </button>
                       </div>
 
-                      <button
-                        type="button"
-                        disabled={isLoadingProject || isSavingProject}
-                        onClick={() => void onOpenProject(project.id)}
-                        className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-45 ${
-                          isActive
-                            ? 'bg-white/[0.07] hover:bg-white/[0.12] text-slate-200 border border-white/[0.1]'
-                            : 'bg-cyan-400 hover:bg-cyan-300 text-[#090b10]'
-                        }`}
-                      >
-                        {isLoadingProject ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <FolderOpen className="w-3 h-3" />
+                      <div className="flex items-center gap-1.5">
+                        {projectVersions.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setVersionsOpenId(isVersionsOpen ? null : project.id)
+                            }
+                            title="View & restore saved Project State snapshots"
+                            className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1 cursor-pointer ${
+                              isVersionsOpen
+                                ? 'bg-cyan-500/15 text-cyan-200 border-cyan-400/40'
+                                : 'bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 border-white/[0.08]'
+                            }`}
+                          >
+                            <History className="w-3 h-3 text-cyan-400" />
+                            <span>{projectVersions.length}</span>
+                          </button>
                         )}
-                        <span>{isActive ? 'Reload' : 'Open'}</span>
-                      </button>
+
+                        <button
+                          type="button"
+                          disabled={isLoadingProject || isSavingProject}
+                          onClick={() => void onOpenProject(project.id)}
+                          className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-45 ${
+                            isActive
+                              ? 'bg-white/[0.07] hover:bg-white/[0.12] text-slate-200 border border-white/[0.1]'
+                              : 'bg-cyan-400 hover:bg-cyan-300 text-[#090b10]'
+                          }`}
+                        >
+                          {isLoadingProject ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <FolderOpen className="w-3 h-3" />
+                          )}
+                          <span>{isActive ? 'Reload' : 'Open'}</span>
+                        </button>
+                      </div>
                     </div>
+
+                    {isVersionsOpen && projectVersions.length > 0 && (
+                      <div className="rounded-lg bg-[#121620] border border-white/[0.08] p-2.5 space-y-1.5">
+                        <div className="flex items-center justify-between text-[10.5px] text-slate-300 font-medium">
+                          <span>Project State Snapshots ({projectVersions.length})</span>
+                          <span className="text-[10px] text-slate-500">
+                            Settings, lyrics &amp; media
+                          </span>
+                        </div>
+                        <div className="max-h-40 overflow-y-auto studio-scroll space-y-1.5 pr-0.5">
+                          {projectVersions.map((ver) => (
+                            <div
+                              key={ver.id}
+                              className="flex items-center justify-between gap-2 p-2 rounded-md bg-[#090b10] border border-white/[0.07]"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[11px] font-medium text-slate-100 truncate">
+                                    {ver.label}
+                                  </span>
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] font-mono uppercase bg-white/[0.06] text-slate-400 shrink-0">
+                                    {ver.reason}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                                  {ver.audioFileName || 'No audio'}
+                                  {ver.bgImageName ? ` · BG: ${ver.bgImageName}` : ''}
+                                  {ver.albumImageName ? ` · Cover: ${ver.albumImageName}` : ''}
+                                  {` · ${ver.lyricsCount} lyrics · ${formatUpdatedTime(ver.createdAt)}`}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={isLoadingProject || isSavingProject}
+                                onClick={() =>
+                                  void onRestoreProjectVersion(project.id, ver.id)
+                                }
+                                className="px-2 py-1 rounded text-[10.5px] font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/35 transition-colors flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-40"
+                              >
+                                <RotateCcw className="w-2.5 h-2.5" />
+                                <span>Restore</span>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
