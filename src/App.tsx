@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
+import { DjApplyMixPayload, DjStudioModal } from './components/DjStudioModal';
 import { ExportModal, ExportModalView } from './components/ExportModal';
 import { MidiMappingModal } from './components/MidiMappingModal';
 import { MixStudioModal } from './components/MixStudioModal';
@@ -129,6 +130,7 @@ import {
 const DEFAULT_SETTINGS: StudioSettings = {
   aspectRatio: '16:9',
   visualizerMode: 'mirrored-bars',
+  displayLayer: 'visualizer-lyrics',
   lyricsOnly: false,
   lyricsOnlyLayout: 'full-verse',
   lyricStyle: 'karaoke',
@@ -338,6 +340,7 @@ export default function App() {
     defaultCrossfadeSec: 1.5,
   });
   const [isMixModalOpen, setIsMixModalOpen] = useState(false);
+  const [isDjModalOpen, setIsDjModalOpen] = useState(false);
 
   // Export modal & batch queue state
   const [exportState, setExportState] = useState<ExportProgressState>(INITIAL_EXPORT_STATE);
@@ -428,6 +431,8 @@ export default function App() {
   isPlayingRef.current = isPlaying;
   const isMixModalOpenRef = useRef(isMixModalOpen);
   isMixModalOpenRef.current = isMixModalOpen;
+  const isDjModalOpenRef = useRef(isDjModalOpen);
+  isDjModalOpenRef.current = isDjModalOpen;
   const currentTimeRef = useRef(currentTime);
   currentTimeRef.current = currentTime;
   const playbackRateRef = useRef(playbackRate);
@@ -2622,7 +2627,7 @@ export default function App() {
 
   const handlePreviewSceneTransition = useCallback(() => {
     const activeSettings = settingsRef.current;
-    if (activeSettings.lyricsOnly) return;
+    if (activeSettings.lyricsOnly || activeSettings.displayLayer === 'dance-only') return;
     if ((activeSettings.sceneTransitionType ?? 'none') === 'none') return;
     const altMode =
       activeSettings.visualizerMode === 'mirrored-bars'
@@ -2643,7 +2648,8 @@ export default function App() {
       exportState.status !== 'idle' ||
       isProjectsModalOpen ||
       isMidiModalOpen ||
-      isMixModalOpen;
+      isMixModalOpen ||
+      isDjModalOpen;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey || isModalOpen) return;
@@ -2704,6 +2710,7 @@ export default function App() {
     isExportModalOpen,
     isMidiModalOpen,
     isMixModalOpen,
+    isDjModalOpen,
     isProjectsModalOpen,
     updateSettings,
   ]);
@@ -2722,7 +2729,7 @@ export default function App() {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTimestamp) / 1000));
       lastTimestamp = now;
 
-      if (isMixModalOpenRef.current) {
+      if (isMixModalOpenRef.current || isDjModalOpenRef.current) {
         rafId = requestAnimationFrame(tick);
         return;
       }
@@ -2904,6 +2911,7 @@ export default function App() {
         trimStart: number;
         trimEnd: number;
         audioFileName?: string;
+        lyrics?: LyricLine[];
       }
     ) => {
       const targetBuffer = overrideMedia?.audioBuffer ?? audioBuffer;
@@ -2912,6 +2920,7 @@ export default function App() {
       const activeSettings = overrideSettings ?? settings;
       const activeTrimStart = overrideMedia?.trimStart ?? trimStart;
       const activeTrimEnd = overrideMedia?.trimEnd ?? trimEnd;
+      const activeLyrics = overrideMedia?.lyrics ?? lyrics;
       const activeFileName =
         overrideMedia?.audioFileName ?? mediaMetaRef.current.audioFileName;
 
@@ -2945,7 +2954,7 @@ export default function App() {
           trimStart: activeTrimStart,
           trimEnd: activeTrimEnd,
           settings: activeSettings,
-          lyrics,
+          lyrics: activeLyrics,
           bgImage: bgImageRef.current,
           albumImage: albumImageRef.current,
           resolveBgImageAtTime,
@@ -3130,6 +3139,102 @@ export default function App() {
       ensureAudioGraph,
       handleStartExport,
     ]
+  );
+
+  const handleApplyDjMixToStudio = useCallback(
+    async (payload: DjApplyMixPayload) => {
+      setAudioError(null);
+      const audio = audioElRef.current;
+      if (audio) {
+        audio.pause();
+        setIsPlaying(false);
+      }
+
+      await ensureAudioGraph();
+
+      mixVideoResolverRef.current?.dispose();
+      mixVideoResolverRef.current = payload.videoResolver;
+      mixClipsRef.current = [];
+      setMixClips([]);
+
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+      const mixFileName = `${sanitizeFileName(payload.trackTitle || 'dj-mix')}.wav`;
+      audioBlobRef.current = payload.wavBlob;
+      audioBufferRef.current = payload.audioBuffer;
+      const wavUrl = URL.createObjectURL(payload.wavBlob);
+      audioUrlRef.current = wavUrl;
+
+      const safeTrimStart = Math.max(
+        0,
+        Math.min(payload.trimStart ?? 0, Math.max(0, payload.duration - 0.5))
+      );
+      const safeTrimEnd =
+        payload.trimEnd && payload.trimEnd > safeTrimStart
+          ? Math.min(payload.duration, Number(payload.trimEnd.toFixed(2)))
+          : Number(Math.max(0.5, payload.duration).toFixed(2));
+
+      if (audio) {
+        audio.src = wavUrl;
+        audio.currentTime = safeTrimStart;
+        audio.defaultPlaybackRate = 1;
+        audio.playbackRate = 1;
+      }
+
+      setAudioBuffer(payload.audioBuffer);
+      setWaveformPeaks(payload.waveformPeaks);
+      setAudioFileName(mixFileName);
+      setDuration(payload.duration);
+      setCurrentTime(safeTrimStart);
+      setTrimStart(safeTrimStart);
+      setTrimEnd(safeTrimEnd);
+
+      const nextSettings: StudioSettings = {
+        ...settingsRef.current,
+        trackTitle: payload.trackTitle.trim() || settingsRef.current.trackTitle || 'DJ Mix',
+      };
+      const nextMedia = captureCurrentMediaSnapshot({
+        audioFileName: mixFileName,
+        audioBlob: payload.wavBlob,
+        audioBuffer: payload.audioBuffer,
+        waveformPeaks: payload.waveformPeaks,
+        duration: payload.duration,
+        trimStart: safeTrimStart,
+        trimEnd: safeTrimEnd,
+        mixClips: [],
+        mixOptions: mixOptionsRef.current,
+      });
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          settings: {
+            ...prev.settings,
+            trackTitle: nextSettings.trackTitle,
+          },
+          lyrics: payload.mergedLyrics,
+          media: nextMedia,
+        }),
+        { label: `Applied DJ Mix (${payload.trackTitle})`, kind: 'media' }
+      );
+
+      setIsDjModalOpen(false);
+
+      if (payload.action === 'export') {
+        void handleStartExport(nextSettings, {
+          audioBuffer: payload.audioBuffer,
+          trimStart: safeTrimStart,
+          trimEnd: safeTrimEnd,
+          audioFileName: mixFileName,
+          lyrics: payload.mergedLyrics,
+        });
+      } else if (payload.action === 'batch') {
+        setExportState(INITIAL_EXPORT_STATE);
+        setExportModalView('batch');
+        setIsExportModalOpen(true);
+      }
+    },
+    [captureCurrentMediaSnapshot, commitHistory, ensureAudioGraph, handleStartExport]
   );
 
   const handleOpenSingleExport = useCallback(() => {
@@ -3748,6 +3853,7 @@ export default function App() {
       const rotRef = { angle: albumRotationRef.current.angle };
       const steps =
         !activeSettings.lyricsOnly &&
+        activeSettings.displayLayer !== 'dance-only' &&
         (activeSettings.visualizerMode === 'hybrid-particles' || activeSettings.particleEnabled)
           ? 10
           : 1;
@@ -3793,6 +3899,7 @@ export default function App() {
     const neutralWave = new Uint8Array(1024).fill(128);
     const cleanCoverSettings: StudioSettings = {
       ...targetSettings,
+      displayLayer: 'lyrics-only',
       lyricsOnly: true,
       showSafeZone: false,
       glitchIntensity: 0,
@@ -4018,6 +4125,13 @@ export default function App() {
           }
           setIsMixModalOpen(true);
         }}
+        onOpenDjStudio={() => {
+          if (audioElRef.current && !audioElRef.current.paused) {
+            audioElRef.current.pause();
+            setIsPlaying(false);
+          }
+          setIsDjModalOpen(true);
+        }}
         onOpenMidi={() => setIsMidiModalOpen(true)}
         onOpenBatchExport={handleOpenBatchExport}
         onOpenShare={() => handleOpenShareModal()}
@@ -4096,6 +4210,13 @@ export default function App() {
               setIsPlaying(false);
             }
             setIsMixModalOpen(true);
+          }}
+          onOpenDjStudio={() => {
+            if (audioElRef.current && !audioElRef.current.paused) {
+              audioElRef.current.pause();
+              setIsPlaying(false);
+            }
+            setIsDjModalOpen(true);
           }}
         />
 
@@ -4331,6 +4452,60 @@ export default function App() {
         canRedo={canRedo}
         onUndo={handleUndo}
         onRedo={handleRedo}
+      />
+
+      <DjStudioModal
+        isOpen={isDjModalOpen}
+        currentAudioBuffer={audioBuffer}
+        currentAudioFileName={audioFileName}
+        currentLyrics={lyrics}
+        ensureAudioContext={ensureAudioGraph}
+        isExporting={isExporting}
+        onClose={() => setIsDjModalOpen(false)}
+        onApplyDjMix={handleApplyDjMixToStudio}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        settings={settings}
+        onUpdateSettings={updateSettings}
+        onLyricsChange={handleLyricsChange}
+        bgImage={bgImageRef.current}
+        bgImageName={bgImageName}
+        onBgImageSelect={handleBgImageSelect}
+        albumImage={albumImageRef.current}
+        albumImageName={albumImageName}
+        onAlbumImageSelect={handleAlbumImageSelect}
+        onCopyBgToAlbum={handleCopyBgToAlbum}
+        onCopyAlbumToBg={handleCopyAlbumToBg}
+        onDownloadCoverThumbnail={handleDownloadCoverThumbnail}
+        onSetProjectThumbnailFromCover={handleSetProjectThumbnailFromCover}
+        savedPresets={savedPresets}
+        onSavePreset={handleSavePreset}
+        onApplyPreset={handleApplyPreset}
+        onDeletePreset={handleDeletePreset}
+        onImportPresetFile={handleImportPresetFile}
+        onDownloadSnapshot={handleSaveCanvasSnapshot}
+        isGeneratingCaptions={isGeneratingCaptions}
+        captionsNotice={captionsNotice}
+        onDismissCaptionsNotice={() => setCaptionsNotice(null)}
+        onAutoGenerateCaptions={(overrideAudio) => void handleAutoGenerateCaptions(overrideAudio)}
+        onAutoArrange={handleAutoArrange}
+        autoArrangeNotice={autoArrangeNotice}
+        midiMappingBadges={midiMappingBadges}
+        onOpenMidiMapping={() => setIsMidiModalOpen(true)}
+        mocapClip={mocapClip}
+        onMocapFileSelect={handleMocapFileSelect}
+        onClearMocapClip={handleClearMocapClip}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onCaptureProjectSnapshot={(label) => void handleCaptureProjectSnapshot(label)}
+        onOpenProjects={() => setIsProjectsModalOpen(true)}
+        onOpenMixStudio={() => {
+          setIsDjModalOpen(false);
+          setIsMixModalOpen(true);
+        }}
+        mixClipCount={mixClips.length}
       />
     </div>
   );

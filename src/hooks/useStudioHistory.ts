@@ -81,7 +81,8 @@ function areMixClipsEqual(
       ca.solo !== cb.solo ||
       ca.fadeIn !== cb.fadeIn ||
       ca.fadeOut !== cb.fadeOut ||
-      ca.videoOpacity !== cb.videoOpacity
+      ca.videoOpacity !== cb.videoOpacity ||
+      (ca.videoBlendMode ?? 'normal') !== (cb.videoBlendMode ?? 'normal')
     ) {
       return false;
     }

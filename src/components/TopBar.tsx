@@ -5,6 +5,7 @@ import {
   Cable,
   Check,
   Clock,
+  Disc3,
   Download,
   FolderOpen,
   History,
@@ -61,6 +62,7 @@ interface TopBarProps {
   onQuickSaveProject: () => void;
   onLoadDemo: () => void;
   onOpenMixStudio: () => void;
+  onOpenDjStudio: () => void;
   onOpenMidi: () => void;
   onOpenBatchExport: () => void;
   onOpenShare: () => void;
@@ -132,6 +134,7 @@ export function TopBar({
   onQuickSaveProject,
   onLoadDemo,
   onOpenMixStudio,
+  onOpenDjStudio,
   onOpenMidi,
   onOpenBatchExport,
   onOpenShare,
@@ -457,6 +460,17 @@ export function TopBar({
           <span className="hidden md:inline">
             {mixClipCount > 0 ? `Mix (${mixClipCount})` : 'Mix Audio/Video'}
           </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenDjStudio}
+          disabled={isExporting}
+          title="Open DJ Beat & Lyric Mix Studio"
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gradient-to-r from-cyan-500/12 to-fuchsia-500/12 hover:from-cyan-500/20 hover:to-fuchsia-500/20 text-slate-100 border border-cyan-400/30 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 cursor-pointer"
+        >
+          <Disc3 className="w-3.5 h-3.5 text-fuchsia-400" />
+          <span className="hidden md:inline">DJ Studio</span>
         </button>
 
         <button

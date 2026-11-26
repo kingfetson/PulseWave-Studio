@@ -1,4 +1,4 @@
-import { MixClipItem } from '../types/studio';
+import { MixClipItem, MixVideoBlendMode } from '../types/studio';
 import { audioBufferToWavBlob, extractWaveformPeaks } from './audioEngine';
 
 export interface MixRenderResult {
@@ -10,6 +10,7 @@ export interface MixRenderResult {
 
 export interface MixVideoFrameResolver {
   hasActiveVideo: () => boolean;
+  updateClips: (nextClips: MixClipItem[]) => void;
   resolvePreviewFrame: (
     trackTimeSec: number,
     targetW: number,
@@ -152,6 +153,7 @@ export async function decodeMixClipFile(
     fadeIn: 0,
     fadeOut: 0,
     videoOpacity: 1,
+    videoBlendMode: 'normal',
     hasVideo,
     videoWidth: videoMeta.videoWidth,
     videoHeight: videoMeta.videoHeight,
@@ -181,6 +183,7 @@ export function createMixClipFromBuffer(
     fadeIn: 0,
     fadeOut: 0,
     videoOpacity: 1,
+    videoBlendMode: 'normal',
     hasVideo: false,
     videoWidth: 0,
     videoHeight: 0,
@@ -476,33 +479,59 @@ async function seekVideoElementToTime(
   }
 }
 
+function resolveCanvasCompositeOp(blendMode?: MixVideoBlendMode): GlobalCompositeOperation {
+  switch (blendMode) {
+    case 'screen':
+      return 'screen';
+    case 'overlay':
+      return 'overlay';
+    case 'multiply':
+      return 'multiply';
+    case 'lighten':
+      return 'lighten';
+    case 'darken':
+      return 'darken';
+    case 'color-dodge':
+      return 'color-dodge';
+    case 'hard-light':
+      return 'hard-light';
+    case 'soft-light':
+      return 'soft-light';
+    case 'normal':
+    default:
+      return 'source-over';
+  }
+}
+
 export function createMixVideoFrameResolver(clips: MixClipItem[]): MixVideoFrameResolver {
-  const videoClips = clips.filter(
-    (c) => c.hasVideo && Boolean(c.objectUrl) && c.videoOpacity > 0.01
-  );
+  let orderedVideoClips = clips.filter((c) => c.hasVideo && Boolean(c.objectUrl));
 
   const videoMap = new Map<string, HTMLVideoElement>();
   const lastPreviewSeekMs = new Map<string, number>();
 
-  if (typeof document !== 'undefined') {
-    for (const clip of videoClips) {
-      if (!clip.objectUrl) continue;
-      const v = document.createElement('video');
-      v.muted = true;
-      v.playsInline = true;
-      v.preload = 'auto';
-      v.crossOrigin = 'anonymous';
-      v.src = clip.objectUrl;
-      v.load();
-      videoMap.set(clip.id, v);
-    }
+  const ensureVideoElement = (clip: MixClipItem) => {
+    if (typeof document === 'undefined' || !clip.objectUrl) return;
+    if (videoMap.has(clip.id)) return;
+    const v = document.createElement('video');
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.crossOrigin = 'anonymous';
+    v.src = clip.objectUrl;
+    v.load();
+    videoMap.set(clip.id, v);
+  };
+
+  for (const clip of orderedVideoClips) {
+    ensureVideoElement(clip);
   }
 
   let compositeCanvas: HTMLCanvasElement | null = null;
 
   const collectActiveSamples = (trackTimeSec: number): ActiveVideoSample[] => {
     const active: ActiveVideoSample[] = [];
-    for (const clip of videoClips) {
+    for (const clip of orderedVideoClips) {
+      if (clip.videoOpacity <= 0.01) continue;
       const video = videoMap.get(clip.id);
       if (!video) continue;
       const playLen = getMixClipPlayLength(clip);
@@ -547,9 +576,13 @@ export function createMixVideoFrameResolver(clips: MixClipItem[]): MixVideoFrame
     ctx.fillStyle = '#090b10';
     ctx.fillRect(0, 0, targetW, targetH);
 
-    for (const sample of readySamples) {
+    for (let i = 0; i < readySamples.length; i++) {
+      const sample = readySamples[i];
       ctx.save();
       ctx.globalAlpha = sample.opacity;
+      // Bottom active layer composites normally over canvas backdrop; upper stacked layers apply their blend mode
+      ctx.globalCompositeOperation =
+        i === 0 ? 'source-over' : resolveCanvasCompositeOp(sample.clip.videoBlendMode);
       drawVideoFrameCover(ctx, sample.video, targetW, targetH);
       ctx.restore();
     }
@@ -558,7 +591,32 @@ export function createMixVideoFrameResolver(clips: MixClipItem[]): MixVideoFrame
   };
 
   return {
-    hasActiveVideo: () => videoClips.length > 0,
+    hasActiveVideo: () =>
+      orderedVideoClips.some((c) => c.hasVideo && Boolean(c.objectUrl) && c.videoOpacity > 0.01),
+
+    updateClips: (nextClips: MixClipItem[]) => {
+      const nextVideoClips = nextClips.filter((c) => c.hasVideo && Boolean(c.objectUrl));
+      const activeIds = new Set(nextVideoClips.map((c) => c.id));
+
+      for (const [id, video] of videoMap.entries()) {
+        if (!activeIds.has(id)) {
+          try {
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+          } catch {
+            // ignore cleanup errors
+          }
+          videoMap.delete(id);
+          lastPreviewSeekMs.delete(id);
+        }
+      }
+
+      for (const clip of nextVideoClips) {
+        ensureVideoElement(clip);
+      }
+      orderedVideoClips = nextVideoClips;
+    },
 
     resolvePreviewFrame: (trackTimeSec: number, targetW: number, targetH: number) => {
       const samples = collectActiveSamples(trackTimeSec);

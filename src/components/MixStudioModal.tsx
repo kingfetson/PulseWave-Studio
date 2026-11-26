@@ -5,6 +5,8 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  Eye,
+  EyeOff,
   Film,
   Layers,
   ListOrdered,
@@ -29,8 +31,10 @@ import {
   ASPECT_RATIOS,
   BeatState,
   LyricLine,
+  MIX_VIDEO_BLEND_MODES,
   MixClipItem,
   MixProjectOptions,
+  MixVideoBlendMode,
   MocapClipData,
   MotionBlurState,
   Particle,
@@ -134,6 +138,7 @@ interface MixStudioModalProps {
 
 type StageLayoutMode = 'split' | 'preview' | 'tracks';
 type MobilePane = 'mix' | 'studio';
+type RackMode = 'tracks' | 'layering';
 
 function formatMixTime(sec: number): string {
   const safe = Math.max(0, sec);
@@ -201,6 +206,8 @@ export function MixStudioModal({
   // Embedded workspace layout controls
   const [layoutMode, setLayoutMode] = useState<StageLayoutMode>('split');
   const [mobilePane, setMobilePane] = useState<MobilePane>('mix');
+  const [rackMode, setRackMode] = useState<RackMode>('tracks');
+  const previousOpacityMapRef = useRef<Record<string, number>>({});
 
   // Rendered mix preview buffer for waveform/BPM/captions/scrubbing
   const [mixedPreviewBuffer, setMixedPreviewBuffer] = useState<AudioBuffer | null>(null);
@@ -290,7 +297,11 @@ export function MixStudioModal({
     const prevMode = prevVisualizerModeRef.current;
     if (prevMode !== settings.visualizerMode) {
       prevVisualizerModeRef.current = settings.visualizerMode;
-      if (settings.sceneTransitionType !== 'none' && !settings.lyricsOnly) {
+      if (
+        settings.sceneTransitionType !== 'none' &&
+        !settings.lyricsOnly &&
+        settings.displayLayer !== 'dance-only'
+      ) {
         sceneTransitionStateRef.current = {
           activeMode: settings.visualizerMode,
           fromMode: prevMode,
@@ -299,7 +310,7 @@ export function MixStudioModal({
         };
       }
     }
-  }, [isOpen, settings.visualizerMode, settings.sceneTransitionType, settings.sceneTransitionDuration, settings.lyricsOnly]);
+  }, [isOpen, settings.visualizerMode, settings.sceneTransitionType, settings.sceneTransitionDuration, settings.lyricsOnly, settings.displayLayer]);
 
   // Initialize modal state when opened
   useEffect(() => {
@@ -307,11 +318,13 @@ export function MixStudioModal({
       stopPreviewPlayback();
       return;
     }
-    setClips(initialClips.map((c) => ({ ...c })));
+    setClips(initialClips.map((c) => ({ ...c, videoBlendMode: c.videoBlendMode ?? 'normal' })));
     setOptions({ ...initialOptions });
     setErrorMsg(null);
     setPreviewTime(0);
     setMobilePane('mix');
+    setRackMode('tracks');
+    previousOpacityMapRef.current = {};
     sessionCreatedUrlsRef.current.clear();
     prevVisualizerModeRef.current = settingsRef.current.visualizerMode;
     beatStateRef.current = createInitialBeatState();
@@ -339,18 +352,32 @@ export function MixStudioModal({
     }
   }, [masterVolume, isMasterMuted]);
 
-  // Keep video frame resolver synced with active video clips
+  const videoSourceKey = useMemo(
+    () =>
+      clips
+        .filter((c) => c.hasVideo && Boolean(c.objectUrl))
+        .map((c) => `${c.id}:${c.objectUrl}`)
+        .sort()
+        .join('|'),
+    [clips]
+  );
+
+  // Manage DOM <video> elements only when video sources are added/removed
   useEffect(() => {
     videoResolverRef.current?.dispose();
     videoResolverRef.current = null;
-    if (!isOpen) return;
-    if (clips.some((c) => c.hasVideo && c.objectUrl)) {
-      videoResolverRef.current = createMixVideoFrameResolver(clips);
-    }
+    if (!isOpen || !videoSourceKey) return;
+    videoResolverRef.current = createMixVideoFrameResolver(clipsRef.current);
     return () => {
       videoResolverRef.current?.dispose();
       videoResolverRef.current = null;
     };
+  }, [isOpen, videoSourceKey]);
+
+  // Sync clip opacity, blend mode, trim, startTime, and layer order without reloading <video> elements
+  useEffect(() => {
+    if (!isOpen) return;
+    videoResolverRef.current?.updateClips(clips);
   }, [isOpen, clips]);
 
   // Debounced background render of mixed AudioBuffer for BPM, Auto-Captions, Beat-Sync Lyrics & scrub spectra
@@ -840,9 +867,50 @@ export function MixStudioModal({
     [stopPreviewPlayback]
   );
 
+  const handleToggleLayeringMode = useCallback(() => {
+    if (rackMode === 'layering') {
+      setRackMode('tracks');
+      return;
+    }
+    setRackMode('layering');
+    if (layoutMode === 'preview') {
+      setLayoutMode('split');
+    }
+    setClips((prev) => {
+      const vids = prev.filter((c) => c.hasVideo);
+      if (vids.length < 2) return prev;
+      const hasOverlapping = vids.some((a, i) =>
+        vids.some((b, j) => {
+          if (i >= j) return false;
+          const aStart = a.startTime;
+          const aEnd = a.startTime + getMixClipPlayLength(a);
+          const bStart = b.startTime;
+          const bEnd = b.startTime + getMixClipPlayLength(b);
+          return Math.min(aEnd, bEnd) - Math.max(aStart, bStart) > 0.05;
+        })
+      );
+      if (hasOverlapping) return prev;
+      stopPreviewPlayback();
+      return arrangeMixClipsLayered(prev);
+    });
+  }, [layoutMode, rackMode, stopPreviewPlayback]);
+
+  const handleToggleVideoVisibility = useCallback(
+    (clip: MixClipItem) => {
+      if (clip.videoOpacity > 0.01) {
+        previousOpacityMapRef.current[clip.id] = clip.videoOpacity;
+        handleUpdateClip(clip.id, { videoOpacity: 0 });
+      } else {
+        const restored = previousOpacityMapRef.current[clip.id] ?? 1;
+        handleUpdateClip(clip.id, { videoOpacity: Math.max(0.1, restored) });
+      }
+    },
+    [handleUpdateClip]
+  );
+
   const handlePreviewSceneTransition = useCallback(() => {
     const s = settingsRef.current;
-    if (s.sceneTransitionType === 'none' || s.lyricsOnly) return;
+    if (s.sceneTransitionType === 'none' || s.lyricsOnly || s.displayLayer === 'dance-only') return;
     sceneTransitionStateRef.current = {
       activeMode: s.visualizerMode,
       fromMode: s.visualizerMode,
@@ -1383,7 +1451,27 @@ export function MixStudioModal({
                     className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40"
                   >
                     <Layers className="w-3 h-3 text-cyan-400" />
-                    <span>Layer</span>
+                    <span>Stack 0:00</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleLayeringMode}
+                    aria-pressed={rackMode === 'layering'}
+                    disabled={isApplying}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40 ${
+                      rackMode === 'layering'
+                        ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50'
+                        : 'bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border-white/[0.08]'
+                    }`}
+                  >
+                    <Layers className="w-3 h-3 text-cyan-400" />
+                    <span>Layering Mode</span>
+                    {videoClipCount > 0 && (
+                      <span className="font-mono tabular-nums text-[10px] text-cyan-300">
+                        ({videoClipCount})
+                      </span>
+                    )}
                   </button>
 
                   <button
@@ -1426,7 +1514,7 @@ export function MixStudioModal({
                 </div>
               </div>
 
-              {/* Scrollable Track Rows */}
+              {/* Scrollable Track / Video Layering Rack */}
               {layoutMode !== 'preview' && (
                 <div
                   className={`flex-1 min-h-0 overflow-y-auto studio-scroll p-3 space-y-2 transition-colors ${
@@ -1453,9 +1541,294 @@ export function MixStudioModal({
                         Drop audio &amp; video files here or click Add Audio / Video
                       </p>
                       <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                        Customize visualizers, 3D dancers, glow, lyrics, themes, and format in the Studio Features sidebar on the left, then export one combined MP4.
+                        Customize visualizers, 3D dancers, glow, lyrics, themes, and video layer blends in the Studio Features sidebar on the left, then export one combined MP4.
                       </p>
                     </div>
+                  ) : rackMode === 'layering' ? (
+                    (() => {
+                      // Map video clips in top-to-bottom composition order (last index in `clips` draws on top)
+                      const indexedVideos = clips
+                        .map((clip, clipIndex) => ({ clip, clipIndex }))
+                        .filter(({ clip }) => clip.hasVideo);
+                      const audioOnlyClips = clips.filter((clip) => !clip.hasVideo);
+                      const topDownVideos = [...indexedVideos].reverse();
+
+                      return (
+                        <div className="space-y-2.5">
+                          <div className="px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-400/25 flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-[11px] text-slate-200">
+                              <span className="font-semibold text-cyan-200">Video Layer Stack</span>
+                              <span className="text-slate-400 ml-2">
+                                Top layers composite over lower layers using Opacity &amp; Blend Mode.
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {indexedVideos.length >= 2 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    stopPreviewPlayback();
+                                    setClips((prev) => arrangeMixClipsLayered(prev));
+                                  }}
+                                  className="px-2 py-1 rounded bg-[#090b10] hover:bg-white/[0.06] border border-white/[0.1] text-[10.5px] font-medium text-cyan-300 cursor-pointer"
+                                >
+                                  Align All to 0:00
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setRackMode('tracks')}
+                                className="px-2 py-1 rounded bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-[10.5px] font-medium text-slate-200 cursor-pointer"
+                              >
+                                Track View
+                              </button>
+                            </div>
+                          </div>
+
+                          {topDownVideos.length === 0 ? (
+                            <div className="border border-dashed border-white/[0.14] rounded-xl py-5 px-4 text-center space-y-2 bg-[#090b10]/60">
+                              <Film className="w-5 h-5 text-cyan-400 mx-auto" />
+                              <p className="text-xs font-medium text-slate-200">
+                                No video clips in this mix yet
+                              </p>
+                              <p className="text-[11px] text-slate-400 max-w-md mx-auto">
+                                Add 2 or more video files to stack them with adjustable opacity and blend modes (Screen, Overlay, Multiply, and more).
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-cyan-400 hover:bg-cyan-300 text-[#090b10] cursor-pointer"
+                              >
+                                Add Video Clips
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {topDownVideos.map(({ clip, clipIndex }, stackPos) => {
+                                const videoLayerNumber = indexedVideos.length - stackPos;
+                                const isBaseLayer = videoLayerNumber === 1;
+                                const isTopLayer = stackPos === 0;
+                                const blendMode: MixVideoBlendMode = clip.videoBlendMode ?? 'normal';
+                                const isHidden = clip.videoOpacity <= 0.01;
+                                const playLen = getMixClipPlayLength(clip);
+
+                                return (
+                                  <div
+                                    key={clip.id}
+                                    className={`p-2.5 rounded-lg border transition-colors space-y-2 ${
+                                      isHidden
+                                        ? 'bg-[#090b10]/60 border-white/[0.06] opacity-70'
+                                        : 'bg-[#090b10] border-white/[0.1]'
+                                    }`}
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold font-mono shrink-0 ${
+                                            isBaseLayer
+                                              ? 'bg-white/[0.07] text-slate-300 border border-white/[0.1]'
+                                              : 'bg-cyan-500/15 text-cyan-200 border border-cyan-400/35'
+                                          }`}
+                                        >
+                                          {isBaseLayer ? 'L1 · Base' : `L${videoLayerNumber} · Blend`}
+                                        </span>
+                                        <Film className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                                        <span className="text-xs font-medium text-slate-100 truncate">
+                                          {clip.name}
+                                        </span>
+                                        <span className="text-[10.5px] font-mono tabular-nums text-slate-400 shrink-0">
+                                          {clip.videoWidth}×{clip.videoHeight} · {playLen.toFixed(1)}s
+                                        </span>
+                                      </div>
+
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleToggleVideoVisibility(clip)}
+                                          title={isHidden ? 'Show video layer' : 'Hide video layer'}
+                                          className={`p-1 rounded border transition-colors cursor-pointer ${
+                                            isHidden
+                                              ? 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                                              : 'bg-white/[0.04] text-slate-300 border-white/[0.08] hover:text-white'
+                                          }`}
+                                        >
+                                          {isHidden ? (
+                                            <EyeOff className="w-3.5 h-3.5" />
+                                          ) : (
+                                            <Eye className="w-3.5 h-3.5" />
+                                          )}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMoveClip(clipIndex, 1)}
+                                          disabled={isTopLayer || clipIndex === clips.length - 1}
+                                          title="Bring layer forward (higher)"
+                                          className="p-1 rounded text-slate-400 hover:text-white hover:bg-white/[0.07] disabled:opacity-30 cursor-pointer"
+                                        >
+                                          <ArrowUp className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMoveClip(clipIndex, -1)}
+                                          disabled={isBaseLayer || clipIndex === 0}
+                                          title="Send layer backward (lower)"
+                                          className="p-1 rounded text-slate-400 hover:text-white hover:bg-white/[0.07] disabled:opacity-30 cursor-pointer"
+                                        >
+                                          <ArrowDown className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleUpdateClip(clip.id, { muted: !clip.muted })
+                                          }
+                                          title={clip.muted ? 'Unmute audio' : 'Mute audio'}
+                                          className={`px-1.5 py-0.5 rounded text-[10.5px] font-semibold border transition-colors cursor-pointer ${
+                                            clip.muted
+                                              ? 'bg-rose-500/20 text-rose-300 border-rose-500/35'
+                                              : 'bg-white/[0.04] text-slate-300 border-white/[0.08] hover:bg-white/[0.08]'
+                                          }`}
+                                        >
+                                          M
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRemoveClip(clip.id)}
+                                          title="Remove layer"
+                                          className="p-1 rounded text-slate-400 hover:text-rose-300 hover:bg-rose-500/10 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center text-[11px]">
+                                      <label className="sm:col-span-4 space-y-1">
+                                        <div className="flex items-center justify-between text-slate-400">
+                                          <span>Blend Mode</span>
+                                          {isBaseLayer && (
+                                            <span className="text-[10px] text-slate-500">
+                                              Base normal
+                                            </span>
+                                          )}
+                                        </div>
+                                        <select
+                                          value={blendMode}
+                                          onChange={(e) =>
+                                            handleUpdateClip(clip.id, {
+                                              videoBlendMode: e.target.value as MixVideoBlendMode,
+                                            })
+                                          }
+                                          aria-label={`Blend mode for ${clip.name}`}
+                                          className="w-full px-2 py-1 rounded bg-[#121620] border border-white/[0.1] text-xs text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                                        >
+                                          {MIX_VIDEO_BLEND_MODES.map((bm) => (
+                                            <option key={bm.id} value={bm.id}>
+                                              {bm.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+
+                                      <label className="sm:col-span-5 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-slate-400">Layer Opacity</span>
+                                          <span className="font-mono tabular-nums text-cyan-300">
+                                            {Math.round(clip.videoOpacity * 100)}%
+                                          </span>
+                                        </div>
+                                        <input
+                                          type="range"
+                                          min={0}
+                                          max={1}
+                                          step={0.01}
+                                          value={clip.videoOpacity}
+                                          aria-label={`Opacity for ${clip.name}`}
+                                          onChange={(e) =>
+                                            handleUpdateClip(clip.id, {
+                                              videoOpacity: parseFloat(e.target.value),
+                                            })
+                                          }
+                                          className="w-full accent-cyan-400 cursor-pointer"
+                                        />
+                                      </label>
+
+                                      <label className="sm:col-span-3 space-y-1">
+                                        <span className="text-slate-400 block">Start (s)</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          step={0.1}
+                                          value={Number(clip.startTime.toFixed(2))}
+                                          onChange={(e) =>
+                                            handleUpdateClip(clip.id, {
+                                              startTime: Math.max(
+                                                0,
+                                                parseFloat(e.target.value) || 0
+                                              ),
+                                            })
+                                          }
+                                          className="w-full px-2 py-1 rounded bg-[#121620] border border-white/[0.1] font-mono tabular-nums text-xs text-slate-100 focus:outline-none focus:border-cyan-400/60"
+                                        />
+                                      </label>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {audioOnlyClips.length > 0 && (
+                            <div className="pt-1 space-y-1">
+                              <div className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+                                Audio Tracks ({audioOnlyClips.length})
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                {audioOnlyClips.map((aClip) => (
+                                  <div
+                                    key={aClip.id}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] flex items-center justify-between gap-2 text-[11px]"
+                                  >
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      <Music className="w-3 h-3 text-cyan-400 shrink-0" />
+                                      <span className="text-slate-200 truncate">{aClip.name}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <input
+                                        type="range"
+                                        min={0}
+                                        max={1.5}
+                                        step={0.05}
+                                        value={aClip.volume}
+                                        aria-label={`Volume for ${aClip.name}`}
+                                        onChange={(e) =>
+                                          handleUpdateClip(aClip.id, {
+                                            volume: parseFloat(e.target.value),
+                                          })
+                                        }
+                                        className="w-14 accent-cyan-400 cursor-pointer"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleUpdateClip(aClip.id, { muted: !aClip.muted })
+                                        }
+                                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border cursor-pointer ${
+                                          aClip.muted
+                                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/35'
+                                            : 'bg-white/[0.04] text-slate-300 border-white/[0.08]'
+                                        }`}
+                                      >
+                                        M
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()
                   ) : (
                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
                       {clips.map((clip, index) => {
@@ -1646,7 +2019,7 @@ export function MixStudioModal({
 
                               <label className="space-y-0.5">
                                 <span className="text-slate-400 flex justify-between">
-                                  <span>{clip.hasVideo ? 'Vol / Vid' : 'Vol'}</span>
+                                  <span>{clip.hasVideo ? 'Aud' : 'Vol'}</span>
                                   <span className="font-mono tabular-nums text-cyan-300">
                                     {Math.round(clip.volume * 100)}%
                                   </span>
@@ -1664,15 +2037,22 @@ export function MixStudioModal({
                                   }
                                   className="w-full accent-cyan-400 cursor-pointer"
                                 />
-                                {clip.hasVideo && (
+                              </label>
+                            </div>
+
+                            {clip.hasVideo && (
+                              <div className="pt-1.5 border-t border-white/[0.06] grid grid-cols-12 gap-2 items-center text-[10.5px]">
+                                <label className="col-span-7 flex items-center gap-2">
+                                  <span className="text-slate-400 shrink-0">
+                                    Vid {Math.round(clip.videoOpacity * 100)}%
+                                  </span>
                                   <input
                                     type="range"
                                     min={0}
                                     max={1}
-                                    step={0.05}
+                                    step={0.01}
                                     value={clip.videoOpacity}
                                     aria-label="Video opacity"
-                                    title={`Video Opacity: ${Math.round(clip.videoOpacity * 100)}%`}
                                     onChange={(e) =>
                                       handleUpdateClip(clip.id, {
                                         videoOpacity: parseFloat(e.target.value),
@@ -1680,9 +2060,28 @@ export function MixStudioModal({
                                     }
                                     className="w-full accent-cyan-400 cursor-pointer"
                                   />
-                                )}
-                              </label>
-                            </div>
+                                </label>
+                                <label className="col-span-5 flex items-center gap-1.5">
+                                  <span className="text-slate-400 shrink-0">Blend</span>
+                                  <select
+                                    value={clip.videoBlendMode ?? 'normal'}
+                                    aria-label="Video blend mode"
+                                    onChange={(e) =>
+                                      handleUpdateClip(clip.id, {
+                                        videoBlendMode: e.target.value as MixVideoBlendMode,
+                                      })
+                                    }
+                                    className="w-full px-1.5 py-0.5 rounded bg-[#121620] border border-white/[0.08] text-[10.5px] text-slate-100 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                                  >
+                                    {MIX_VIDEO_BLEND_MODES.map((bm) => (
+                                      <option key={bm.id} value={bm.id}>
+                                        {bm.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                            )}
                           </div>
                         );
                       })}

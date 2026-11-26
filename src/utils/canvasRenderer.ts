@@ -4181,7 +4181,15 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     }
   };
 
-  if (!settings.lyricsOnly) {
+  const hideVisualizer =
+    settings.lyricsOnly || settings.displayLayer === 'dance-only';
+  const hideLyrics =
+    settings.displayLayer === 'visualizer-only' ||
+    settings.displayLayer === 'dance-only';
+  const showDance =
+    Boolean(settings.danceEnabled) || settings.displayLayer === 'dance-only';
+
+  if (!hideVisualizer) {
     const transType = settings.sceneTransitionType ?? 'none';
     const transTarget = settings.sceneTransitionTarget ?? 'both';
     const transDur = Math.max(0.15, Math.min(1.5, settings.sceneTransitionDuration ?? 0.45));
@@ -4339,7 +4347,7 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
   }
 
   // 2b. Beat & Lyric Synced Character Dance / Motion-Capture Skeleton
-  if (settings.danceEnabled) {
+  if (showDance) {
     renderDanceCharacter({
       ctx,
       width,
@@ -4418,40 +4426,42 @@ export function renderVisualizerFrame(params: RenderFrameParams): void {
     ctx.restore();
   }
 
-  // 4. Synced Lyrics Overlay
-  const lyricsOnlyTopInset =
-    coverCardRect && coverCardPos !== 'center'
-      ? coverCardRect.y +
-        coverCardRect.size +
-        (settings.showTrackOverlay &&
-        (Boolean(settings.trackTitle.trim()) || Boolean(settings.artistName.trim())) &&
-        (isPortrait || coverCardPos === 'top-center')
-          ? minDim * (isPortrait ? 0.11 : 0.095)
-          : minDim * 0.03)
-      : undefined;
+  // 4. Synced Lyrics Overlay (skipped when Display Layer is Visualizer Only or Dance Only)
+  if (!hideLyrics) {
+    const lyricsOnlyTopInset =
+      coverCardRect && coverCardPos !== 'center'
+        ? coverCardRect.y +
+          coverCardRect.size +
+          (settings.showTrackOverlay &&
+          (Boolean(settings.trackTitle.trim()) || Boolean(settings.artistName.trim())) &&
+          (isPortrait || coverCardPos === 'top-center')
+            ? minDim * (isPortrait ? 0.11 : 0.095)
+            : minDim * 0.03)
+        : undefined;
 
-  const lyricPulseIntensity = Math.max(0, Math.min(2, settings.lyricPulseIntensity ?? 1));
-  const lyricBeatImpulse = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
-  const lyricBeatDrive =
-    settings.lyricBeatSync && lyricPulseIntensity > 0 && lyricBeatImpulse > 0.01
-      ? Math.pow(lyricBeatImpulse, 0.85) * lyricPulseIntensity
-      : 0;
+    const lyricPulseIntensity = Math.max(0, Math.min(2, settings.lyricPulseIntensity ?? 1));
+    const lyricBeatImpulse = Math.max(beatTriggered ? 1 : 0, Math.min(1, beatBurst));
+    const lyricBeatDrive =
+      settings.lyricBeatSync && lyricPulseIntensity > 0 && lyricBeatImpulse > 0.01
+        ? Math.pow(lyricBeatImpulse, 0.85) * lyricPulseIntensity
+        : 0;
 
-  renderLyrics(
-    ctx,
-    width,
-    height,
-    minDim,
-    isPortrait,
-    safePadX,
-    lyricPosFrac,
-    currentTime,
-    bass,
-    settings,
-    lyrics,
-    lyricsOnlyTopInset,
-    lyricBeatDrive
-  );
+    renderLyrics(
+      ctx,
+      width,
+      height,
+      minDim,
+      isPortrait,
+      safePadX,
+      lyricPosFrac,
+      currentTime,
+      bass,
+      settings,
+      lyrics,
+      lyricsOnlyTopInset,
+      lyricBeatDrive
+    );
+  }
 
   // Restore screen-space transform after Bass Shake before motion blur capture, glitch FX & safe zone
   ctx.restore();

@@ -13,7 +13,59 @@ export type BuiltInMocapStyleKey =
   | 'mocap-shuffle'
   | 'mocap-kpop'
   | 'mocap-disco'
-  | 'mocap-waltz';
+  | 'mocap-waltz'
+  | 'mocap-popping'
+  | 'mocap-locking'
+  | 'mocap-krump'
+  | 'mocap-tutting'
+  | 'mocap-waving'
+  | 'mocap-boogaloo'
+  | 'mocap-cwalk'
+  | 'mocap-jerkin'
+  | 'mocap-harlem-shake'
+  | 'mocap-dougie'
+  | 'mocap-voguing'
+  | 'mocap-waacking'
+  | 'mocap-tektonik'
+  | 'mocap-jumpstyle'
+  | 'mocap-cutting-shapes'
+  | 'mocap-hakken'
+  | 'mocap-cyber-goth'
+  | 'mocap-trance-flow'
+  | 'mocap-robot-boogie'
+  | 'mocap-bachata'
+  | 'mocap-samba'
+  | 'mocap-merengue'
+  | 'mocap-cumbia'
+  | 'mocap-reggaeton'
+  | 'mocap-chacha'
+  | 'mocap-rumba'
+  | 'mocap-pasodoble'
+  | 'mocap-dancehall'
+  | 'mocap-amapiano'
+  | 'mocap-foxtrot'
+  | 'mocap-quickstep'
+  | 'mocap-jive'
+  | 'mocap-lindy-hop'
+  | 'mocap-charleston'
+  | 'mocap-twist'
+  | 'mocap-mashed-potato'
+  | 'mocap-swing-out'
+  | 'mocap-flamenco'
+  | 'mocap-bollywood'
+  | 'mocap-bhangra'
+  | 'mocap-capoeira'
+  | 'mocap-irish-step'
+  | 'mocap-kazachok'
+  | 'mocap-bellydance'
+  | 'mocap-jazz-square'
+  | 'mocap-tap'
+  | 'mocap-fosse'
+  | 'mocap-aerial-leap'
+  | 'mocap-headbang'
+  | 'mocap-chill-sway';
+
+export type BuiltInMocapFilterTag = 'high-energy' | 'slow' | 'modern' | 'classic';
 
 export interface BuiltInMocapEntry {
   id: BuiltInMocapStyleKey;
@@ -24,6 +76,8 @@ export interface BuiltInMocapEntry {
   fileName: string;
   fps: number;
   frameCount: number;
+  tags: BuiltInMocapFilterTag[];
+  previewTime: number;
 }
 
 export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
@@ -36,6 +90,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'salsa-cubana.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.88,
   },
   {
     id: 'mocap-ballet',
@@ -46,6 +102,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'ballet-pirouette-arabesque.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 3.08,
   },
   {
     id: 'mocap-breakdance',
@@ -56,6 +114,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'breakdance-toprock-freeze.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 3.24,
   },
   {
     id: 'mocap-moonwalk',
@@ -66,6 +126,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'moonwalk-glide.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['classic', 'modern'],
+    previewTime: 1.0,
   },
   {
     id: 'mocap-house',
@@ -76,6 +138,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'house-jack-footwork.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.88,
   },
   {
     id: 'mocap-contemporary',
@@ -86,6 +150,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'contemporary-flow.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['slow', 'modern'],
+    previewTime: 3.0,
   },
   {
     id: 'mocap-afrobeat',
@@ -96,6 +162,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'afrobeat-zanku.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.0,
   },
   {
     id: 'mocap-tango',
@@ -106,6 +174,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'argentine-tango.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.92,
   },
   {
     id: 'mocap-shuffle',
@@ -116,6 +186,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'melbourne-shuffle.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.0,
   },
   {
     id: 'mocap-kpop',
@@ -126,6 +198,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'kpop-point-groove.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.28,
   },
   {
     id: 'mocap-disco',
@@ -136,6 +210,8 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'disco-fever.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.0,
   },
   {
     id: 'mocap-waltz',
@@ -146,6 +222,609 @@ export const BUILT_IN_MOCAP_LIBRARY: BuiltInMocapEntry[] = [
     fileName: 'viennese-waltz.bvh',
     fps: 30,
     frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 0.56,
+  },
+  // 50 Additional Built-In Mocap Styles
+  {
+    id: 'mocap-popping',
+    title: 'Popping Hit',
+    genre: 'Street Funk',
+    bpmLabel: '108 BPM',
+    description: 'Sharp dime-stop muscle hits, chest pops & quantized funk angles',
+    fileName: 'popping-hit.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.72,
+  },
+  {
+    id: 'mocap-locking',
+    title: 'Locking Point',
+    genre: '70s Funk',
+    bpmLabel: '114 BPM',
+    description: 'Uncle Sam sky points, crisp wrist twirls & grounded knee locks',
+    fileName: 'locking-point.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.15,
+  },
+  {
+    id: 'mocap-krump',
+    title: 'Krump Stomp',
+    genre: 'Heavy Street',
+    bpmLabel: '138 BPM',
+    description: 'Explosive chest pops, heavy grounded stomps & aggressive arm swings',
+    fileName: 'krump-stomp.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.92,
+  },
+  {
+    id: 'mocap-tutting',
+    title: 'King Tut Grid',
+    genre: 'Geometric Street',
+    bpmLabel: '102 BPM',
+    description: 'Precision 90-degree forearm frames, box locks & grid isolations',
+    fileName: 'king-tut-grid.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'slow'],
+    previewTime: 1.35,
+  },
+  {
+    id: 'mocap-waving',
+    title: 'Liquid Wave',
+    genre: 'Popping Flow',
+    bpmLabel: '96 BPM',
+    description: 'Continuous sine wave passing through shoulders, spine & wrists',
+    fileName: 'liquid-wave.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'modern'],
+    previewTime: 1.48,
+  },
+  {
+    id: 'mocap-boogaloo',
+    title: 'Electric Boogaloo',
+    genre: 'Old-School Funk',
+    bpmLabel: '110 BPM',
+    description: 'Rolling hip circles, knee pops & liquid neck glides',
+    fileName: 'electric-boogaloo.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['classic', 'modern'],
+    previewTime: 1.12,
+  },
+  {
+    id: 'mocap-cwalk',
+    title: 'C-Walk Glide',
+    genre: 'West Coast',
+    bpmLabel: '98 BPM',
+    description: 'Crisp heel-toe V-steps, quick ankle pivots & relaxed upper posture',
+    fileName: 'cwalk-glide.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'high-energy'],
+    previewTime: 0.85,
+  },
+  {
+    id: 'mocap-jerkin',
+    title: 'Reject Bounce',
+    genre: 'Street Pop',
+    bpmLabel: '106 BPM',
+    description: 'Springy backward hops, high knee kicks & upbeat torso lean',
+    fileName: 'reject-bounce.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.95,
+  },
+  {
+    id: 'mocap-harlem-shake',
+    title: 'Harlem Shoulder',
+    genre: 'Club Hip-Hop',
+    bpmLabel: '114 BPM',
+    description: 'Rapid asymmetric shoulder shakes, torso twist & low knee bounce',
+    fileName: 'harlem-shoulder.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.78,
+  },
+  {
+    id: 'mocap-dougie',
+    title: 'Smooth Dougie',
+    genre: 'Hip-Hop Groove',
+    bpmLabel: '94 BPM',
+    description: 'Laid-back side-to-side swagger, shoulder dip & smooth hand brush',
+    fileName: 'smooth-dougie.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'slow'],
+    previewTime: 1.2,
+  },
+  {
+    id: 'mocap-voguing',
+    title: 'Runway Vogue',
+    genre: 'Ballroom Club',
+    bpmLabel: '124 BPM',
+    description: 'Dramatic face-framing hand poses, duckwalk drop & catwalk spin',
+    fileName: 'runway-vogue.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 2.15,
+  },
+  {
+    id: 'mocap-waacking',
+    title: 'Whacking Whip',
+    genre: 'Disco Club',
+    bpmLabel: '126 BPM',
+    description: 'High-speed overhead arm whips, sharp poses & runway strut',
+    fileName: 'whacking-whip.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.05,
+  },
+  {
+    id: 'mocap-tektonik',
+    title: 'Electro Mill',
+    genre: 'Electro Dance',
+    bpmLabel: '130 BPM',
+    description: 'Fast windmill arm orbits, crisp elbow snaps & agile heel pivots',
+    fileName: 'electro-mill.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.88,
+  },
+  {
+    id: 'mocap-jumpstyle',
+    title: 'Hard Jumpstyle',
+    genre: 'Hardstyle EDM',
+    bpmLabel: '142 BPM',
+    description: 'High-impact alternating forward/back leg kicks & airborne hops',
+    fileName: 'hard-jumpstyle.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.1,
+  },
+  {
+    id: 'mocap-cutting-shapes',
+    title: 'Cutting Shapes',
+    genre: 'Future House',
+    bpmLabel: '126 BPM',
+    description: 'Crisp criss-cross footwork glides, Charleston twists & upbeat bounce',
+    fileName: 'cutting-shapes.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.96,
+  },
+  {
+    id: 'mocap-hakken',
+    title: 'Rave Hakken',
+    genre: 'Gabber Festival',
+    bpmLabel: '148 BPM',
+    description: 'Relentless rapid-fire heel digs, hunched rave lean & tight fists',
+    fileName: 'rave-hakken.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.68,
+  },
+  {
+    id: 'mocap-cyber-goth',
+    title: 'Industrial Stomp',
+    genre: 'Dark Electro',
+    bpmLabel: '128 BPM',
+    description: 'Heavy marched boot stomps, sweeping crossed arms & dramatic head drops',
+    fileName: 'industrial-stomp.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.42,
+  },
+  {
+    id: 'mocap-trance-flow',
+    title: 'Trance Euphoria',
+    genre: 'Uplifting EDM',
+    bpmLabel: '136 BPM',
+    description: 'Hands-to-the-sky festival reach, buoyant bounce & euphoric spin',
+    fileName: 'trance-euphoria.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'slow'],
+    previewTime: 2.05,
+  },
+  {
+    id: 'mocap-robot-boogie',
+    title: 'Servo Staccato',
+    genre: 'Synth Electro',
+    bpmLabel: '118 BPM',
+    description: 'Step-quantized mechanical joint snaps, ticking neck & angular lock',
+    fileName: 'servo-staccato.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'classic'],
+    previewTime: 1.0,
+  },
+  {
+    id: 'mocap-bachata',
+    title: 'Sensual Bachata',
+    genre: 'Latin Romance',
+    bpmLabel: '122 BPM',
+    description: 'Three-step side glide with dramatic fourth-beat hip pop & body roll',
+    fileName: 'sensual-bachata.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.25,
+  },
+  {
+    id: 'mocap-samba',
+    title: 'Rio Samba',
+    genre: 'Brazilian Carnival',
+    bpmLabel: '104 BPM',
+    description: 'Bouncy knee samba bounce, rapid hip tilts & feathered carnival arms',
+    fileName: 'rio-samba.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.92,
+  },
+  {
+    id: 'mocap-merengue',
+    title: 'Merengue March',
+    genre: 'Dominican Latin',
+    bpmLabel: '128 BPM',
+    description: 'Crisp marching steps, swinging cuban hips & lively turn',
+    fileName: 'merengue-march.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.1,
+  },
+  {
+    id: 'mocap-cumbia',
+    title: 'Cumbia Sway',
+    genre: 'Colombian Folk',
+    bpmLabel: '98 BPM',
+    description: 'Grounded circular hip sway, alternating back-rock steps & flowing arms',
+    fileName: 'cumbia-sway.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.32,
+  },
+  {
+    id: 'mocap-reggaeton',
+    title: 'Perreo Bounce',
+    genre: 'Urbano Latin',
+    bpmLabel: '96 BPM',
+    description: 'Deep dembow hip drops, chest isolations & confident urban sway',
+    fileName: 'perreo-bounce.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.9,
+  },
+  {
+    id: 'mocap-chacha',
+    title: 'Cha-Cha Lock',
+    genre: 'Latin Ballroom',
+    bpmLabel: '116 BPM',
+    description: 'Syncopated chasse triple-step, sharp hip snaps & open arm styling',
+    fileName: 'chacha-lock.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['classic', 'high-energy'],
+    previewTime: 1.05,
+  },
+  {
+    id: 'mocap-rumba',
+    title: 'Cuban Rumba',
+    genre: 'Ballroom Romance',
+    bpmLabel: '100 BPM',
+    description: 'Slow expressive hip settles, extended poise & sensual spin',
+    fileName: 'cuban-rumba.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.6,
+  },
+  {
+    id: 'mocap-pasodoble',
+    title: 'Paso Doble Cape',
+    genre: 'Spanish Drama',
+    bpmLabel: '120 BPM',
+    description: 'Arched matador chest, dramatic cape sweeps & crisp heel marches',
+    fileName: 'pasodoble-cape.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.85,
+  },
+  {
+    id: 'mocap-dancehall',
+    title: 'Dancehall Wine',
+    genre: 'Jamaican Groove',
+    bpmLabel: '102 BPM',
+    description: 'Deep waist rotations, butterfly knee bounces & high-energy shoulder hits',
+    fileName: 'dancehall-wine.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 1.08,
+  },
+  {
+    id: 'mocap-amapiano',
+    title: 'Amapiano Shuffle',
+    genre: 'South African Log',
+    bpmLabel: '113 BPM',
+    description: 'Pounce-step leg glides, relaxed log-drum bounce & shoulder roll',
+    fileName: 'amapiano-shuffle.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['modern', 'high-energy'],
+    previewTime: 0.94,
+  },
+  {
+    id: 'mocap-foxtrot',
+    title: 'Slow Foxtrot',
+    genre: 'Classic Ballroom',
+    bpmLabel: '112 BPM',
+    description: 'Long gliding promenade strides, smooth rise & poised ballroom hold',
+    fileName: 'slow-foxtrot.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.4,
+  },
+  {
+    id: 'mocap-quickstep',
+    title: 'Quickstep Dash',
+    genre: 'Swing Ballroom',
+    bpmLabel: '144 BPM',
+    description: 'Airborne chasse hops, brisk ballroom frame & soaring promenade',
+    fileName: 'quickstep-dash.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.12,
+  },
+  {
+    id: 'mocap-jive',
+    title: 'Swing Jive',
+    genre: 'Rock & Roll',
+    bpmLabel: '152 BPM',
+    description: 'Snappy flick-ball-change kicks, springy knees & upbeat rock spin',
+    fileName: 'swing-jive.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.9,
+  },
+  {
+    id: 'mocap-lindy-hop',
+    title: 'Lindy Hop Kick',
+    genre: '1930s Swing',
+    bpmLabel: '136 BPM',
+    description: 'Grounded swing-out bounce, kicking steps & joyful counter-swing arms',
+    fileName: 'lindy-hop-kick.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.02,
+  },
+  {
+    id: 'mocap-charleston',
+    title: 'Charleston Twist',
+    genre: 'Roaring 20s',
+    bpmLabel: '132 BPM',
+    description: 'Inward/outward ankle twists, lively front/back kicks & wing arms',
+    fileName: 'charleston-twist.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.88,
+  },
+  {
+    id: 'mocap-twist',
+    title: '60s Twist',
+    genre: 'Retro Rock',
+    bpmLabel: '128 BPM',
+    description: 'Counter-rotating hips & shoulders with low bend-and-rise swivel',
+    fileName: '60s-twist.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.15,
+  },
+  {
+    id: 'mocap-mashed-potato',
+    title: 'Mashed Potato',
+    genre: 'Motown Soul',
+    bpmLabel: '124 BPM',
+    description: 'Alternating heel-swivel hops with rhythmic Motown arm swings',
+    fileName: 'mashed-potato.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['classic', 'high-energy'],
+    previewTime: 0.98,
+  },
+  {
+    id: 'mocap-swing-out',
+    title: 'East Coast Swing',
+    genre: 'Jazz Swing',
+    bpmLabel: '134 BPM',
+    description: 'Rock-step triple-step cadence, bouncy torso & playful spin',
+    fileName: 'east-coast-swing.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.38,
+  },
+  {
+    id: 'mocap-flamenco',
+    title: 'Flamenco Zapateo',
+    genre: 'Andalusian',
+    bpmLabel: '110 BPM',
+    description: 'Proud arched back, circling overhead wrists & fiery heel stomps',
+    fileName: 'flamenco-zapateo.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['classic', 'high-energy'],
+    previewTime: 1.55,
+  },
+  {
+    id: 'mocap-bollywood',
+    title: 'Bollywood Bhangra',
+    genre: 'Desi Pop',
+    bpmLabel: '126 BPM',
+    description: 'Expressive shoulder bounces, raised festive hands & lively side hops',
+    fileName: 'bollywood-bhangra.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.0,
+  },
+  {
+    id: 'mocap-bhangra',
+    title: 'Punjabi Dhol',
+    genre: 'Folk Energy',
+    bpmLabel: '132 BPM',
+    description: 'High knee-lift dhamaal hops, booming shoulder shakes & twin arms aloft',
+    fileName: 'punjabi-dhol.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.85,
+  },
+  {
+    id: 'mocap-capoeira',
+    title: 'Capoeira Ginga',
+    genre: 'Afro-Brazilian',
+    bpmLabel: '118 BPM',
+    description: 'Fluid defensive ginga lunge weave transitioning into high crescent kick',
+    fileName: 'capoeira-ginga.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 2.35,
+  },
+  {
+    id: 'mocap-irish-step',
+    title: 'Celtic Step',
+    genre: 'Irish Jig',
+    bpmLabel: '128 BPM',
+    description: 'Rigid upright torso with rapid-fire treble hops & crossed-ankle leaps',
+    fileName: 'celtic-step.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 1.04,
+  },
+  {
+    id: 'mocap-kazachok',
+    title: 'Cossack Squat',
+    genre: 'Slavic Folk',
+    bpmLabel: '136 BPM',
+    description: 'Deep crouched prisiadka kicks alternating left/right with folded arms',
+    fileName: 'cossack-squat.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.9,
+  },
+  {
+    id: 'mocap-bellydance',
+    title: 'Oriental Shimmy',
+    genre: 'World Fusion',
+    bpmLabel: '104 BPM',
+    description: 'Rapid hip shimmies, sinuous snake arms & isolated ribcage circles',
+    fileName: 'oriental-shimmy.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.28,
+  },
+  {
+    id: 'mocap-jazz-square',
+    title: 'Broadway Jazz',
+    genre: 'Theater Stage',
+    bpmLabel: '116 BPM',
+    description: 'Crisp jazz-square steps, jazz hands flare & stylized theatrical turn',
+    fileName: 'broadway-jazz.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['classic', 'high-energy'],
+    previewTime: 1.75,
+  },
+  {
+    id: 'mocap-tap',
+    title: 'Tap Shuffle',
+    genre: 'Broadway Tap',
+    bpmLabel: '124 BPM',
+    description: 'Quick buffalo hops, ankle brush-backs & showman cane-swing balance',
+    fileName: 'tap-shuffle.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 0.95,
+  },
+  {
+    id: 'mocap-fosse',
+    title: 'Fosse Snap',
+    genre: 'Cabaret Jazz',
+    bpmLabel: '106 BPM',
+    description: 'Inward-turned knees, angled hat-tilt hunch & razor-sharp wrist snaps',
+    fileName: 'fosse-snap.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'classic'],
+    previewTime: 1.12,
+  },
+  {
+    id: 'mocap-aerial-leap',
+    title: 'Grand Jeté Leap',
+    genre: 'Stage Ballet',
+    bpmLabel: '94 BPM',
+    description: 'Running chasse prep launching into soaring split grand jeté leap',
+    fileName: 'grand-jete-leap.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'classic'],
+    previewTime: 2.2,
+  },
+  {
+    id: 'mocap-headbang',
+    title: 'Arena Headbang',
+    genre: 'Rock & Metal',
+    bpmLabel: '140 BPM',
+    description: 'Wide power stance, heavy rhythmic headbangs & triumphant fist pumps',
+    fileName: 'arena-headbang.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['high-energy', 'modern'],
+    previewTime: 0.85,
+  },
+  {
+    id: 'mocap-chill-sway',
+    title: 'Lo-Fi Breeze',
+    genre: 'Ambient Chill',
+    bpmLabel: '78 BPM',
+    description: 'Unwinding slow shoulder sway, relaxed head bob & gentle weight shift',
+    fileName: 'lofi-breeze.bvh',
+    fps: 30,
+    frameCount: 120,
+    tags: ['slow', 'modern'],
+    previewTime: 1.4,
   },
 ];
 
@@ -565,31 +1244,1461 @@ function solvePoseForStyle(style: BuiltInMocapStyleKey, u: number): PoseChannels
     };
   }
 
-  // 'mocap-contemporary': sweeping lyrical contraction, release, spiral turn & lateral lunge
-  const spiralTurn = bellWindow(u, 0.42, 0.62, 0.82) > 0 ? smoothStep(0.42, 0.78, u) * 360 : 0;
-  const contract = Math.max(0, Math.sin(w1));
-  const release = Math.max(0, -Math.sin(w1));
-  const sway = Math.sin(w1);
+  if (style === 'mocap-contemporary') {
+    // 'mocap-contemporary': sweeping lyrical contraction, release, spiral turn & lateral lunge
+    const spiralTurn = bellWindow(u, 0.42, 0.62, 0.82) > 0 ? smoothStep(0.42, 0.78, u) * 360 : 0;
+    const contract = Math.max(0, Math.sin(w1));
+    const release = Math.max(0, -Math.sin(w1));
+    const sway = Math.sin(w1);
+
+    return {
+      hipsPos: [sway * 10, 89 - contract * 9 + release * 3, Math.sin(w2) * 4],
+      hipsRot: [spiralTurn, sway * 12, contract * 14 - release * 8],
+      spine: [sway * 10, contract * 22 - release * 14, sway * 10],
+      chest: [sway * 12, contract * 24 - release * 18, -sway * 14],
+      neck: [-sway * 6, -release * 10 + contract * 8, 0],
+      head: [-sway * 8, -release * 14 + contract * 10, 0],
+      lShoulder: [28 + Math.sin(w2) * 28, -26 - release * 42 + contract * 44, 0],
+      lElbow: [24 + contract * 34, -18 - release * 24, 0],
+      lWrist: [10, -18 * Math.cos(w1), 0],
+      rShoulder: [-28 + Math.sin(w2) * 28, 26 + release * 42 - contract * 44, 0],
+      rElbow: [-24 - contract * 34, 18 + release * 24, 0],
+      rWrist: [-10, 18 * Math.cos(w1), 0],
+      lHip: [0, -10 - Math.max(0, sway) * 18, -14 - contract * 20],
+      lKnee: [12 + contract * 44 + Math.max(0, sway) * 18, 0, 0],
+      lAnkle: [release * 18, 0, 0],
+      rHip: [0, 10 + Math.max(0, -sway) * 18, -14 + release * 24],
+      rKnee: [12 + contract * 28 + Math.max(0, -sway) * 18, 0, 0],
+      rAnkle: [release * 18, 0, 0],
+    };
+  }
+
+  return solveRecipePose(style, u);
+}
+
+type ArmMode =
+  | 'swing'
+  | 'overhead'
+  | 'vogue'
+  | 'tutting'
+  | 'lock'
+  | 'wave'
+  | 'punch'
+  | 'ballroom'
+  | 'flamenco'
+  | 'bhangra'
+  | 'chill'
+  | 'hip-hands'
+  | 'cape';
+
+type LegMode =
+  | 'step'
+  | 'kick'
+  | 'cross'
+  | 'squat'
+  | 'twist'
+  | 'glide'
+  | 'hop'
+  | 'lunge'
+  | 'tap'
+  | 'arabesque';
+
+interface MocapStyleRecipe {
+  cycles: number;
+  hipHeight: number;
+  bounceAmp: number;
+  swayX: number;
+  swayZ: number;
+  hipTwist: number;
+  hipTilt: number;
+  spinDeg?: number;
+  spinStart?: number;
+  spinEnd?: number;
+  jumpStart?: number;
+  jumpPeak?: number;
+  jumpEnd?: number;
+  jumpLift?: number;
+  quantizeSteps?: number;
+  spineBend: number;
+  chestTwist: number;
+  chestWave: number;
+  headNod: number;
+  headTilt: number;
+  armMode: ArmMode;
+  legMode: LegMode;
+  armAmp: number;
+  legAmp: number;
+  kneeBend: number;
+  stanceWidth: number;
+}
+
+const MOCAP_STYLE_RECIPES: Record<string, MocapStyleRecipe> = {
+  'mocap-popping': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 3.5,
+    swayX: 4,
+    swayZ: 2,
+    hipTwist: 20,
+    hipTilt: 6,
+    quantizeSteps: 12,
+    spineBend: 12,
+    chestTwist: 18,
+    chestWave: 14,
+    headNod: 8,
+    headTilt: 10,
+    armMode: 'tutting',
+    legMode: 'step',
+    armAmp: 1.0,
+    legAmp: 0.75,
+    kneeBend: 18,
+    stanceWidth: 10,
+  },
+  'mocap-locking': {
+    cycles: 2,
+    hipHeight: 86,
+    bounceAmp: 5.5,
+    swayX: 6,
+    swayZ: 3,
+    hipTwist: 26,
+    hipTilt: 8,
+    spineBend: 10,
+    chestTwist: 16,
+    chestWave: 8,
+    headNod: 10,
+    headTilt: 8,
+    armMode: 'lock',
+    legMode: 'step',
+    armAmp: 1.2,
+    legAmp: 0.95,
+    kneeBend: 24,
+    stanceWidth: 12,
+  },
+  'mocap-krump': {
+    cycles: 4,
+    hipHeight: 82,
+    bounceAmp: 7,
+    swayX: 8,
+    swayZ: 6,
+    hipTwist: 32,
+    hipTilt: 10,
+    spineBend: 22,
+    chestTwist: 24,
+    chestWave: 18,
+    headNod: 16,
+    headTilt: 12,
+    armMode: 'punch',
+    legMode: 'lunge',
+    armAmp: 1.3,
+    legAmp: 1.15,
+    kneeBend: 32,
+    stanceWidth: 18,
+  },
+  'mocap-tutting': {
+    cycles: 2,
+    hipHeight: 90,
+    bounceAmp: 1.5,
+    swayX: 3,
+    swayZ: 1,
+    hipTwist: 14,
+    hipTilt: 3,
+    quantizeSteps: 8,
+    spineBend: 4,
+    chestTwist: 12,
+    chestWave: 6,
+    headNod: 4,
+    headTilt: 12,
+    armMode: 'tutting',
+    legMode: 'step',
+    armAmp: 1.15,
+    legAmp: 0.4,
+    kneeBend: 12,
+    stanceWidth: 8,
+  },
+  'mocap-waving': {
+    cycles: 2,
+    hipHeight: 89,
+    bounceAmp: 2.5,
+    swayX: 6,
+    swayZ: 4,
+    hipTwist: 16,
+    hipTilt: 8,
+    spineBend: 12,
+    chestTwist: 14,
+    chestWave: 18,
+    headNod: 8,
+    headTilt: 10,
+    armMode: 'wave',
+    legMode: 'glide',
+    armAmp: 1.1,
+    legAmp: 0.65,
+    kneeBend: 16,
+    stanceWidth: 10,
+  },
+  'mocap-boogaloo': {
+    cycles: 2,
+    hipHeight: 88,
+    bounceAmp: 4.5,
+    swayX: 8,
+    swayZ: 4,
+    hipTwist: 28,
+    hipTilt: 14,
+    spineBend: 10,
+    chestTwist: 20,
+    chestWave: 14,
+    headNod: 6,
+    headTilt: 14,
+    armMode: 'wave',
+    legMode: 'twist',
+    armAmp: 1.0,
+    legAmp: 0.9,
+    kneeBend: 22,
+    stanceWidth: 12,
+  },
+  'mocap-cwalk': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 3,
+    swayX: 7,
+    swayZ: 3,
+    hipTwist: 24,
+    hipTilt: 6,
+    spineBend: 6,
+    chestTwist: 10,
+    chestWave: 4,
+    headNod: 6,
+    headTilt: 4,
+    armMode: 'chill',
+    legMode: 'cross',
+    armAmp: 0.55,
+    legAmp: 1.1,
+    kneeBend: 18,
+    stanceWidth: 11,
+  },
+  'mocap-jerkin': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 6.5,
+    swayX: 5,
+    swayZ: 6,
+    hipTwist: 14,
+    hipTilt: 5,
+    jumpStart: 0.15,
+    jumpPeak: 0.5,
+    jumpEnd: 0.85,
+    jumpLift: 6,
+    spineBend: -12,
+    chestTwist: 12,
+    chestWave: 8,
+    headNod: 10,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'kick',
+    armAmp: 0.95,
+    legAmp: 1.15,
+    kneeBend: 24,
+    stanceWidth: 9,
+  },
+  'mocap-harlem-shake': {
+    cycles: 4,
+    hipHeight: 86,
+    bounceAmp: 5,
+    swayX: 6,
+    swayZ: 3,
+    hipTwist: 22,
+    hipTilt: 10,
+    spineBend: 14,
+    chestTwist: 28,
+    chestWave: 16,
+    headNod: 10,
+    headTilt: 14,
+    armMode: 'punch',
+    legMode: 'step',
+    armAmp: 0.85,
+    legAmp: 0.8,
+    kneeBend: 26,
+    stanceWidth: 14,
+  },
+  'mocap-dougie': {
+    cycles: 2,
+    hipHeight: 89,
+    bounceAmp: 3.5,
+    swayX: 8,
+    swayZ: 2,
+    hipTwist: 18,
+    hipTilt: 10,
+    spineBend: 6,
+    chestTwist: 14,
+    chestWave: 8,
+    headNod: 8,
+    headTilt: 12,
+    armMode: 'chill',
+    legMode: 'step',
+    armAmp: 0.85,
+    legAmp: 0.75,
+    kneeBend: 18,
+    stanceWidth: 12,
+  },
+  'mocap-voguing': {
+    cycles: 2,
+    hipHeight: 86,
+    bounceAmp: 4,
+    swayX: 7,
+    swayZ: 4,
+    hipTwist: 32,
+    hipTilt: 10,
+    spinDeg: 360,
+    spinStart: 0.52,
+    spinEnd: 0.84,
+    quantizeSteps: 8,
+    spineBend: -8,
+    chestTwist: 22,
+    chestWave: 10,
+    headNod: 6,
+    headTilt: 16,
+    armMode: 'vogue',
+    legMode: 'lunge',
+    armAmp: 1.25,
+    legAmp: 1.0,
+    kneeBend: 24,
+    stanceWidth: 10,
+  },
+  'mocap-waacking': {
+    cycles: 4,
+    hipHeight: 90,
+    bounceAmp: 3.5,
+    swayX: 6,
+    swayZ: 3,
+    hipTwist: 24,
+    hipTilt: 10,
+    spineBend: -6,
+    chestTwist: 20,
+    chestWave: 8,
+    headNod: 8,
+    headTilt: 10,
+    armMode: 'overhead',
+    legMode: 'step',
+    armAmp: 1.35,
+    legAmp: 0.85,
+    kneeBend: 14,
+    stanceWidth: 9,
+  },
+  'mocap-tektonik': {
+    cycles: 4,
+    hipHeight: 90,
+    bounceAmp: 3,
+    swayX: 5,
+    swayZ: 3,
+    hipTwist: 26,
+    hipTilt: 6,
+    spineBend: 6,
+    chestTwist: 24,
+    chestWave: 10,
+    headNod: 8,
+    headTilt: 8,
+    armMode: 'overhead',
+    legMode: 'twist',
+    armAmp: 1.25,
+    legAmp: 0.85,
+    kneeBend: 16,
+    stanceWidth: 10,
+  },
+  'mocap-jumpstyle': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 7,
+    swayX: 4,
+    swayZ: 5,
+    hipTwist: 12,
+    hipTilt: 4,
+    jumpStart: 0.1,
+    jumpPeak: 0.5,
+    jumpEnd: 0.9,
+    jumpLift: 9,
+    spineBend: 8,
+    chestTwist: 12,
+    chestWave: 6,
+    headNod: 10,
+    headTilt: 4,
+    armMode: 'swing',
+    legMode: 'kick',
+    armAmp: 1.05,
+    legAmp: 1.35,
+    kneeBend: 22,
+    stanceWidth: 8,
+  },
+  'mocap-cutting-shapes': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 4.5,
+    swayX: 7,
+    swayZ: 3,
+    hipTwist: 22,
+    hipTilt: 6,
+    spineBend: 6,
+    chestTwist: 14,
+    chestWave: 6,
+    headNod: 6,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'cross',
+    armAmp: 0.9,
+    legAmp: 1.2,
+    kneeBend: 20,
+    stanceWidth: 10,
+  },
+  'mocap-hakken': {
+    cycles: 4,
+    hipHeight: 85,
+    bounceAmp: 6,
+    swayX: 4,
+    swayZ: 5,
+    hipTwist: 16,
+    hipTilt: 4,
+    spineBend: 18,
+    chestTwist: 16,
+    chestWave: 6,
+    headNod: 14,
+    headTilt: 4,
+    armMode: 'punch',
+    legMode: 'hop',
+    armAmp: 0.9,
+    legAmp: 1.1,
+    kneeBend: 28,
+    stanceWidth: 10,
+  },
+  'mocap-cyber-goth': {
+    cycles: 2,
+    hipHeight: 86,
+    bounceAmp: 5.5,
+    swayX: 6,
+    swayZ: 4,
+    hipTwist: 22,
+    hipTilt: 6,
+    spineBend: 16,
+    chestTwist: 18,
+    chestWave: 10,
+    headNod: 14,
+    headTilt: 10,
+    armMode: 'vogue',
+    legMode: 'lunge',
+    armAmp: 1.15,
+    legAmp: 1.05,
+    kneeBend: 28,
+    stanceWidth: 16,
+  },
+  'mocap-trance-flow': {
+    cycles: 2,
+    hipHeight: 91,
+    bounceAmp: 4.5,
+    swayX: 6,
+    swayZ: 3,
+    hipTwist: 18,
+    hipTilt: 6,
+    spinDeg: 360,
+    spinStart: 0.45,
+    spinEnd: 0.85,
+    spineBend: -10,
+    chestTwist: 12,
+    chestWave: 12,
+    headNod: 8,
+    headTilt: 6,
+    armMode: 'overhead',
+    legMode: 'step',
+    armAmp: 1.25,
+    legAmp: 0.65,
+    kneeBend: 14,
+    stanceWidth: 11,
+  },
+  'mocap-robot-boogie': {
+    cycles: 4,
+    hipHeight: 90,
+    bounceAmp: 2,
+    swayX: 3,
+    swayZ: 2,
+    hipTwist: 26,
+    hipTilt: 4,
+    quantizeSteps: 10,
+    spineBend: 8,
+    chestTwist: 24,
+    chestWave: 4,
+    headNod: 12,
+    headTilt: 16,
+    armMode: 'tutting',
+    legMode: 'step',
+    armAmp: 1.1,
+    legAmp: 0.65,
+    kneeBend: 14,
+    stanceWidth: 12,
+  },
+  'mocap-bachata': {
+    cycles: 2,
+    hipHeight: 89,
+    bounceAmp: 2.5,
+    swayX: 9,
+    swayZ: 3,
+    hipTwist: 14,
+    hipTilt: 16,
+    spineBend: 4,
+    chestTwist: 12,
+    chestWave: 14,
+    headNod: 4,
+    headTilt: 8,
+    armMode: 'ballroom',
+    legMode: 'glide',
+    armAmp: 0.85,
+    legAmp: 0.85,
+    kneeBend: 16,
+    stanceWidth: 10,
+  },
+  'mocap-samba': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 5.5,
+    swayX: 6,
+    swayZ: 4,
+    hipTwist: 24,
+    hipTilt: 14,
+    spineBend: 4,
+    chestTwist: 18,
+    chestWave: 10,
+    headNod: 6,
+    headTilt: 6,
+    armMode: 'bhangra',
+    legMode: 'hop',
+    armAmp: 1.1,
+    legAmp: 0.95,
+    kneeBend: 24,
+    stanceWidth: 10,
+  },
+  'mocap-merengue': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 3.5,
+    swayX: 6,
+    swayZ: 2,
+    hipTwist: 20,
+    hipTilt: 14,
+    spinDeg: 360,
+    spinStart: 0.55,
+    spinEnd: 0.88,
+    spineBend: 3,
+    chestTwist: 14,
+    chestWave: 8,
+    headNod: 4,
+    headTilt: 6,
+    armMode: 'ballroom',
+    legMode: 'step',
+    armAmp: 0.85,
+    legAmp: 0.85,
+    kneeBend: 18,
+    stanceWidth: 9,
+  },
+  'mocap-cumbia': {
+    cycles: 2,
+    hipHeight: 88,
+    bounceAmp: 3,
+    swayX: 8,
+    swayZ: 4,
+    hipTwist: 22,
+    hipTilt: 12,
+    spineBend: 6,
+    chestTwist: 14,
+    chestWave: 10,
+    headNod: 4,
+    headTilt: 6,
+    armMode: 'wave',
+    legMode: 'glide',
+    armAmp: 0.95,
+    legAmp: 0.8,
+    kneeBend: 20,
+    stanceWidth: 11,
+  },
+  'mocap-reggaeton': {
+    cycles: 2,
+    hipHeight: 85,
+    bounceAmp: 6,
+    swayX: 6,
+    swayZ: 6,
+    hipTwist: 20,
+    hipTilt: 14,
+    spineBend: 14,
+    chestTwist: 18,
+    chestWave: 18,
+    headNod: 10,
+    headTilt: 8,
+    armMode: 'hip-hands',
+    legMode: 'squat',
+    armAmp: 0.85,
+    legAmp: 0.8,
+    kneeBend: 30,
+    stanceWidth: 15,
+  },
+  'mocap-chacha': {
+    cycles: 4,
+    hipHeight: 90,
+    bounceAmp: 3,
+    swayX: 7,
+    swayZ: 3,
+    hipTwist: 24,
+    hipTilt: 14,
+    spineBend: 2,
+    chestTwist: 18,
+    chestWave: 8,
+    headNod: 4,
+    headTilt: 6,
+    armMode: 'flamenco',
+    legMode: 'cross',
+    armAmp: 1.05,
+    legAmp: 0.95,
+    kneeBend: 16,
+    stanceWidth: 9,
+  },
+  'mocap-rumba': {
+    cycles: 2,
+    hipHeight: 90,
+    bounceAmp: 2,
+    swayX: 9,
+    swayZ: 4,
+    hipTwist: 18,
+    hipTilt: 16,
+    spinDeg: 360,
+    spinStart: 0.58,
+    spinEnd: 0.92,
+    spineBend: -4,
+    chestTwist: 14,
+    chestWave: 12,
+    headNod: 4,
+    headTilt: 8,
+    armMode: 'wave',
+    legMode: 'lunge',
+    armAmp: 1.05,
+    legAmp: 0.85,
+    kneeBend: 14,
+    stanceWidth: 11,
+  },
+  'mocap-pasodoble': {
+    cycles: 2,
+    hipHeight: 91,
+    bounceAmp: 3,
+    swayX: 6,
+    swayZ: 5,
+    hipTwist: 28,
+    hipTilt: 6,
+    spinDeg: 360,
+    spinStart: 0.5,
+    spinEnd: 0.82,
+    spineBend: -12,
+    chestTwist: 22,
+    chestWave: 6,
+    headNod: 6,
+    headTilt: 12,
+    armMode: 'cape',
+    legMode: 'lunge',
+    armAmp: 1.25,
+    legAmp: 1.05,
+    kneeBend: 18,
+    stanceWidth: 12,
+  },
+  'mocap-dancehall': {
+    cycles: 4,
+    hipHeight: 85,
+    bounceAmp: 5.5,
+    swayX: 7,
+    swayZ: 5,
+    hipTwist: 26,
+    hipTilt: 16,
+    spineBend: 14,
+    chestTwist: 20,
+    chestWave: 16,
+    headNod: 8,
+    headTilt: 8,
+    armMode: 'hip-hands',
+    legMode: 'squat',
+    armAmp: 0.95,
+    legAmp: 0.95,
+    kneeBend: 28,
+    stanceWidth: 16,
+  },
+  'mocap-amapiano': {
+    cycles: 2,
+    hipHeight: 88,
+    bounceAmp: 4.5,
+    swayX: 7,
+    swayZ: 3,
+    hipTwist: 18,
+    hipTilt: 10,
+    spineBend: 8,
+    chestTwist: 14,
+    chestWave: 12,
+    headNod: 6,
+    headTilt: 8,
+    armMode: 'chill',
+    legMode: 'glide',
+    armAmp: 0.8,
+    legAmp: 1.0,
+    kneeBend: 20,
+    stanceWidth: 11,
+  },
+  'mocap-foxtrot': {
+    cycles: 2,
+    hipHeight: 91,
+    bounceAmp: 3.5,
+    swayX: 8,
+    swayZ: 6,
+    hipTwist: 22,
+    hipTilt: 6,
+    spineBend: -4,
+    chestTwist: 10,
+    chestWave: 4,
+    headNod: 2,
+    headTilt: 8,
+    armMode: 'ballroom',
+    legMode: 'glide',
+    armAmp: 0.95,
+    legAmp: 1.05,
+    kneeBend: 14,
+    stanceWidth: 9,
+  },
+  'mocap-quickstep': {
+    cycles: 4,
+    hipHeight: 91,
+    bounceAmp: 5.5,
+    swayX: 8,
+    swayZ: 5,
+    hipTwist: 28,
+    hipTilt: 6,
+    jumpStart: 0.25,
+    jumpPeak: 0.5,
+    jumpEnd: 0.75,
+    jumpLift: 6,
+    spineBend: -5,
+    chestTwist: 12,
+    chestWave: 4,
+    headNod: 4,
+    headTilt: 8,
+    armMode: 'ballroom',
+    legMode: 'hop',
+    armAmp: 1.0,
+    legAmp: 1.15,
+    kneeBend: 18,
+    stanceWidth: 9,
+  },
+  'mocap-jive': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 6,
+    swayX: 6,
+    swayZ: 4,
+    hipTwist: 24,
+    hipTilt: 8,
+    spinDeg: 360,
+    spinStart: 0.62,
+    spinEnd: 0.92,
+    spineBend: 4,
+    chestTwist: 18,
+    chestWave: 6,
+    headNod: 8,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'kick',
+    armAmp: 1.1,
+    legAmp: 1.25,
+    kneeBend: 24,
+    stanceWidth: 10,
+  },
+  'mocap-lindy-hop': {
+    cycles: 4,
+    hipHeight: 86,
+    bounceAmp: 5.5,
+    swayX: 7,
+    swayZ: 4,
+    hipTwist: 26,
+    hipTilt: 8,
+    spineBend: 10,
+    chestTwist: 18,
+    chestWave: 6,
+    headNod: 8,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'kick',
+    armAmp: 1.1,
+    legAmp: 1.15,
+    kneeBend: 28,
+    stanceWidth: 12,
+  },
+  'mocap-charleston': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 5,
+    swayX: 6,
+    swayZ: 4,
+    hipTwist: 24,
+    hipTilt: 8,
+    spineBend: 6,
+    chestTwist: 20,
+    chestWave: 6,
+    headNod: 8,
+    headTilt: 8,
+    armMode: 'swing',
+    legMode: 'twist',
+    armAmp: 1.15,
+    legAmp: 1.2,
+    kneeBend: 22,
+    stanceWidth: 11,
+  },
+  'mocap-twist': {
+    cycles: 4,
+    hipHeight: 87,
+    bounceAmp: 4.5,
+    swayX: 5,
+    swayZ: 2,
+    hipTwist: 38,
+    hipTilt: 10,
+    spineBend: 8,
+    chestTwist: -32,
+    chestWave: 6,
+    headNod: 6,
+    headTilt: 6,
+    armMode: 'lock',
+    legMode: 'twist',
+    armAmp: 0.95,
+    legAmp: 1.0,
+    kneeBend: 26,
+    stanceWidth: 11,
+  },
+  'mocap-mashed-potato': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 4.5,
+    swayX: 5,
+    swayZ: 3,
+    hipTwist: 28,
+    hipTilt: 8,
+    spineBend: 6,
+    chestTwist: 18,
+    chestWave: 6,
+    headNod: 6,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'twist',
+    armAmp: 1.0,
+    legAmp: 1.05,
+    kneeBend: 22,
+    stanceWidth: 10,
+  },
+  'mocap-swing-out': {
+    cycles: 2,
+    hipHeight: 88,
+    bounceAmp: 4.5,
+    swayX: 8,
+    swayZ: 5,
+    hipTwist: 30,
+    hipTilt: 8,
+    spinDeg: 360,
+    spinStart: 0.45,
+    spinEnd: 0.78,
+    spineBend: 6,
+    chestTwist: 16,
+    chestWave: 6,
+    headNod: 6,
+    headTilt: 6,
+    armMode: 'swing',
+    legMode: 'step',
+    armAmp: 1.1,
+    legAmp: 1.0,
+    kneeBend: 22,
+    stanceWidth: 11,
+  },
+  'mocap-flamenco': {
+    cycles: 2,
+    hipHeight: 90,
+    bounceAmp: 3,
+    swayX: 5,
+    swayZ: 3,
+    hipTwist: 20,
+    hipTilt: 8,
+    spineBend: -14,
+    chestTwist: 18,
+    chestWave: 8,
+    headNod: 4,
+    headTilt: 12,
+    armMode: 'flamenco',
+    legMode: 'tap',
+    armAmp: 1.2,
+    legAmp: 1.0,
+    kneeBend: 18,
+    stanceWidth: 9,
+  },
+  'mocap-bollywood': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 4.5,
+    swayX: 7,
+    swayZ: 3,
+    hipTwist: 20,
+    hipTilt: 12,
+    spineBend: 4,
+    chestTwist: 18,
+    chestWave: 12,
+    headNod: 6,
+    headTilt: 14,
+    armMode: 'bhangra',
+    legMode: 'step',
+    armAmp: 1.15,
+    legAmp: 0.9,
+    kneeBend: 20,
+    stanceWidth: 11,
+  },
+  'mocap-bhangra': {
+    cycles: 4,
+    hipHeight: 88,
+    bounceAmp: 6.5,
+    swayX: 6,
+    swayZ: 3,
+    hipTwist: 18,
+    hipTilt: 10,
+    jumpStart: 0.12,
+    jumpPeak: 0.5,
+    jumpEnd: 0.88,
+    jumpLift: 6,
+    spineBend: 6,
+    chestTwist: 16,
+    chestWave: 10,
+    headNod: 8,
+    headTilt: 10,
+    armMode: 'bhangra',
+    legMode: 'hop',
+    armAmp: 1.3,
+    legAmp: 1.25,
+    kneeBend: 26,
+    stanceWidth: 12,
+  },
+  'mocap-capoeira': {
+    cycles: 2,
+    hipHeight: 80,
+    bounceAmp: 6,
+    swayX: 12,
+    swayZ: 8,
+    hipTwist: 36,
+    hipTilt: 10,
+    jumpStart: 0.58,
+    jumpPeak: 0.72,
+    jumpEnd: 0.86,
+    jumpLift: 5,
+    spineBend: 20,
+    chestTwist: 24,
+    chestWave: 8,
+    headNod: 6,
+    headTilt: 10,
+    armMode: 'punch',
+    legMode: 'kick',
+    armAmp: 1.1,
+    legAmp: 1.4,
+    kneeBend: 36,
+    stanceWidth: 18,
+  },
+  'mocap-irish-step': {
+    cycles: 4,
+    hipHeight: 92,
+    bounceAmp: 5.5,
+    swayX: 3,
+    swayZ: 2,
+    hipTwist: 10,
+    hipTilt: 3,
+    jumpStart: 0.2,
+    jumpPeak: 0.5,
+    jumpEnd: 0.8,
+    jumpLift: 6,
+    spineBend: -4,
+    chestTwist: 4,
+    chestWave: 2,
+    headNod: 2,
+    headTilt: 2,
+    armMode: 'chill',
+    legMode: 'tap',
+    armAmp: 0.18,
+    legAmp: 1.3,
+    kneeBend: 18,
+    stanceWidth: 7,
+  },
+  'mocap-kazachok': {
+    cycles: 4,
+    hipHeight: 70,
+    bounceAmp: 5,
+    swayX: 4,
+    swayZ: 4,
+    hipTwist: 12,
+    hipTilt: 4,
+    spineBend: 10,
+    chestTwist: 8,
+    chestWave: 4,
+    headNod: 6,
+    headTilt: 4,
+    armMode: 'hip-hands',
+    legMode: 'squat',
+    armAmp: 0.5,
+    legAmp: 1.35,
+    kneeBend: 62,
+    stanceWidth: 14,
+  },
+  'mocap-bellydance': {
+    cycles: 4,
+    hipHeight: 89,
+    bounceAmp: 2,
+    swayX: 9,
+    swayZ: 4,
+    hipTwist: 26,
+    hipTilt: 18,
+    spineBend: -4,
+    chestTwist: 16,
+    chestWave: 18,
+    headNod: 4,
+    headTilt: 8,
+    armMode: 'wave',
+    legMode: 'step',
+    armAmp: 1.1,
+    legAmp: 0.45,
+    kneeBend: 14,
+    stanceWidth: 10,
+  },
+  'mocap-jazz-square': {
+    cycles: 2,
+    hipHeight: 90,
+    bounceAmp: 3.5,
+    swayX: 8,
+    swayZ: 6,
+    hipTwist: 24,
+    hipTilt: 8,
+    spinDeg: 360,
+    spinStart: 0.56,
+    spinEnd: 0.86,
+    spineBend: 4,
+    chestTwist: 18,
+    chestWave: 8,
+    headNod: 6,
+    headTilt: 8,
+    armMode: 'vogue',
+    legMode: 'cross',
+    armAmp: 1.15,
+    legAmp: 1.0,
+    kneeBend: 18,
+    stanceWidth: 10,
+  },
+  'mocap-tap': {
+    cycles: 4,
+    hipHeight: 90,
+    bounceAmp: 4,
+    swayX: 5,
+    swayZ: 3,
+    hipTwist: 18,
+    hipTilt: 6,
+    spineBend: 6,
+    chestTwist: 14,
+    chestWave: 4,
+    headNod: 6,
+    headTilt: 8,
+    armMode: 'swing',
+    legMode: 'tap',
+    armAmp: 0.9,
+    legAmp: 1.25,
+    kneeBend: 20,
+    stanceWidth: 8,
+  },
+  'mocap-fosse': {
+    cycles: 2,
+    hipHeight: 87,
+    bounceAmp: 2.5,
+    swayX: 6,
+    swayZ: 2,
+    hipTwist: 20,
+    hipTilt: 12,
+    quantizeSteps: 8,
+    spineBend: 12,
+    chestTwist: 18,
+    chestWave: 10,
+    headNod: 6,
+    headTilt: 16,
+    armMode: 'hip-hands',
+    legMode: 'twist',
+    armAmp: 0.9,
+    legAmp: 0.7,
+    kneeBend: 26,
+    stanceWidth: 8,
+  },
+  'mocap-aerial-leap': {
+    cycles: 1,
+    hipHeight: 91,
+    bounceAmp: 3,
+    swayX: 6,
+    swayZ: 8,
+    hipTwist: 16,
+    hipTilt: 6,
+    jumpStart: 0.35,
+    jumpPeak: 0.58,
+    jumpEnd: 0.82,
+    jumpLift: 16,
+    spineBend: -10,
+    chestTwist: 12,
+    chestWave: 8,
+    headNod: -6,
+    headTilt: 8,
+    armMode: 'overhead',
+    legMode: 'arabesque',
+    armAmp: 1.25,
+    legAmp: 1.35,
+    kneeBend: 14,
+    stanceWidth: 9,
+  },
+  'mocap-headbang': {
+    cycles: 4,
+    hipHeight: 84,
+    bounceAmp: 5.5,
+    swayX: 4,
+    swayZ: 4,
+    hipTwist: 12,
+    hipTilt: 4,
+    spineBend: 22,
+    chestTwist: 12,
+    chestWave: 12,
+    headNod: 28,
+    headTilt: 6,
+    armMode: 'punch',
+    legMode: 'lunge',
+    armAmp: 1.15,
+    legAmp: 0.65,
+    kneeBend: 28,
+    stanceWidth: 18,
+  },
+  'mocap-chill-sway': {
+    cycles: 1,
+    hipHeight: 90,
+    bounceAmp: 2.5,
+    swayX: 6,
+    swayZ: 2,
+    hipTwist: 10,
+    hipTilt: 6,
+    spineBend: 4,
+    chestTwist: 8,
+    chestWave: 6,
+    headNod: 8,
+    headTilt: 8,
+    armMode: 'chill',
+    legMode: 'step',
+    armAmp: 0.65,
+    legAmp: 0.5,
+    kneeBend: 12,
+    stanceWidth: 10,
+  },
+};
+
+function solveRecipePose(style: BuiltInMocapStyleKey, uRaw: number): PoseChannels {
+  const recipe = MOCAP_STYLE_RECIPES[style];
+  const u = recipe.quantizeSteps
+    ? Math.floor(uRaw * recipe.quantizeSteps) / recipe.quantizeSteps +
+      smoothStep(0, 0.35, (uRaw * recipe.quantizeSteps) % 1) / recipe.quantizeSteps
+    : uRaw;
+
+  const tau = Math.PI * 2;
+  const phase = u * tau * recipe.cycles;
+  const halfPhase = u * tau * Math.max(1, recipe.cycles * 0.5);
+  const dblPhase = u * tau * Math.min(8, recipe.cycles * 2);
+
+  const s1 = Math.sin(phase);
+  const c1 = Math.cos(phase);
+  const sHalf = Math.sin(halfPhase);
+  const bounce = Math.abs(Math.sin(phase));
+
+  const spinY =
+    recipe.spinDeg && recipe.spinStart !== undefined && recipe.spinEnd !== undefined
+      ? smoothStep(recipe.spinStart, recipe.spinEnd, uRaw) * recipe.spinDeg
+      : 0;
+  const jumpEnv =
+    recipe.jumpLift && recipe.jumpStart !== undefined && recipe.jumpPeak !== undefined && recipe.jumpEnd !== undefined
+      ? bellWindow(uRaw, recipe.jumpStart, recipe.jumpPeak, recipe.jumpEnd)
+      : 0;
+
+  const hipY =
+    recipe.hipHeight - bounce * recipe.bounceAmp + jumpEnv * (recipe.jumpLift ?? 0);
+
+  // Arm choreography solver by mode
+  let lSh: [number, number, number] = [20, 44, 0];
+  let lEl: [number, number, number] = [44, -22, 0];
+  let lWr: [number, number, number] = [0, -10, 0];
+  let rSh: [number, number, number] = [-20, -44, 0];
+  let rEl: [number, number, number] = [-44, 22, 0];
+  let rWr: [number, number, number] = [0, 10, 0];
+  const a = recipe.armAmp;
+
+  switch (recipe.armMode) {
+    case 'overhead': {
+      const upL = Math.max(0, s1);
+      const upR = Math.max(0, -s1);
+      lSh = [18 * a, 58 - upL * 116 * a, 0];
+      lEl = [32 + (1 - upL) * 28, -24, 0];
+      rSh = [-18 * a, -58 + upR * 116 * a, 0];
+      rEl = [-32 - (1 - upR) * 28, 24, 0];
+      break;
+    }
+    case 'vogue': {
+      lSh = [32 * a, 42 - Math.max(0, s1) * 96 * a, 0];
+      lEl = [88 * a, -36 * c1, 0];
+      lWr = [14, -26 * s1, 0];
+      rSh = [-32 * a, -42 + Math.max(0, -s1) * 96 * a, 0];
+      rEl = [-88 * a, 36 * c1, 0];
+      rWr = [-14, 26 * s1, 0];
+      break;
+    }
+    case 'tutting': {
+      const swap = sHalf >= 0 ? 1 : -1;
+      lSh = [48 * a * swap, 12 - 22 * s1 * a, 0];
+      lEl = [88 * a, -88 * swap, 0];
+      lWr = [0, 88 * s1, 0];
+      rSh = [-48 * a * swap, -12 + 22 * s1 * a, 0];
+      rEl = [-88 * a, 88 * swap, 0];
+      rWr = [0, -88 * s1, 0];
+      break;
+    }
+    case 'lock': {
+      const pointUp = Math.max(0, s1);
+      lSh = [30 * a, 52 - pointUp * 110 * a, 0];
+      lEl = [72 * (1 - pointUp), -32, 0];
+      rSh = [-30 * a, -52 + (1 - pointUp) * 80 * a, 0];
+      rEl = [-68, 28, 0];
+      break;
+    }
+    case 'wave': {
+      const wA = Math.sin(phase);
+      const wB = Math.sin(phase - 0.9);
+      const wC = Math.sin(phase - 1.8);
+      lSh = [22, 20 + wA * 48 * a, 0];
+      lEl = [38, wB * 48 * a, 0];
+      lWr = [0, wC * 32 * a, 0];
+      rSh = [-22, -20 + wA * 48 * a, 0];
+      rEl = [-38, wB * 48 * a, 0];
+      rWr = [0, wC * 32 * a, 0];
+      break;
+    }
+    case 'punch': {
+      const pL = Math.max(0, s1);
+      const pR = Math.max(0, -s1);
+      lSh = [28 + pL * 42 * a, 54 - pL * 42 * a, 0];
+      lEl = [76 * (1 - pL * 0.7), -28, 0];
+      rSh = [-28 - pR * 42 * a, -54 + pR * 42 * a, 0];
+      rEl = [-76 * (1 - pR * 0.7), 28, 0];
+      break;
+    }
+    case 'ballroom': {
+      lSh = [34, 8 + s1 * 10 * a, 0];
+      lEl = [56, -24, 0];
+      lWr = [10, -10, 0];
+      rSh = [-34, -8 - s1 * 10 * a, 0];
+      rEl = [-56, 24, 0];
+      rWr = [-10, 10, 0];
+      break;
+    }
+    case 'flamenco': {
+      lSh = [28, -42 - s1 * 24 * a, 0];
+      lEl = [54, -46, 0];
+      lWr = [18, -32 * c1, 0];
+      rSh = [-28, 38 - c1 * 24 * a, 0];
+      rEl = [-64, 34, 0];
+      rWr = [-18, 32 * s1, 0];
+      break;
+    }
+    case 'bhangra': {
+      lSh = [24 + s1 * 18 * a, -38 + bounce * 18 * a, 0];
+      lEl = [78, -42, 0];
+      lWr = [12, 22 * Math.sin(dblPhase), 0];
+      rSh = [-24 + s1 * 18 * a, 38 - bounce * 18 * a, 0];
+      rEl = [-78, 42, 0];
+      rWr = [-12, -22 * Math.sin(dblPhase), 0];
+      break;
+    }
+    case 'hip-hands': {
+      lSh = [18, 48 + s1 * 14 * a, 0];
+      lEl = [74, 24, 0];
+      rSh = [-18, -48 + s1 * 14 * a, 0];
+      rEl = [-74, -24, 0];
+      break;
+    }
+    case 'cape': {
+      lSh = [38 * a, 12 - Math.max(0, s1) * 52 * a, 0];
+      lEl = [48, -22, 0];
+      rSh = [-38 * a, -24 + Math.max(0, -s1) * 64 * a, 0];
+      rEl = [-54, 24, 0];
+      break;
+    }
+    case 'chill': {
+      lSh = [16 + s1 * 22 * a, 58 - c1 * 10 * a, 0];
+      lEl = [38 + bounce * 14 * a, -20, 0];
+      rSh = [-16 + s1 * 22 * a, -58 - c1 * 10 * a, 0];
+      rEl = [-38 - bounce * 14 * a, 20, 0];
+      break;
+    }
+    default: {
+      // 'swing'
+      lSh = [18 - s1 * 36 * a, 52 - bounce * 14, 0];
+      lEl = [56 + bounce * 16, -24, 0];
+      rSh = [-18 - s1 * 36 * a, -52 + bounce * 14, 0];
+      rEl = [-56 - bounce * 16, 24, 0];
+      break;
+    }
+  }
+
+  // Leg choreography solver by mode
+  const liftL = Math.max(0, s1);
+  const liftR = Math.max(0, -s1);
+  const sw = recipe.stanceWidth;
+  const la = recipe.legAmp;
+  const kb = recipe.kneeBend;
+
+  let lHip: [number, number, number] = [0, -sw, -12];
+  let lKnee: [number, number, number] = [kb, 0, 0];
+  let lAnkle: [number, number, number] = [-6, 0, 0];
+  let rHip: [number, number, number] = [0, sw, -12];
+  let rKnee: [number, number, number] = [kb, 0, 0];
+  let rAnkle: [number, number, number] = [-6, 0, 0];
+
+  switch (recipe.legMode) {
+    case 'kick': {
+      lHip = [liftL * 10, -sw - liftL * 8, -liftL * 64 * la + liftR * 16 * la];
+      lKnee = [kb * (1 - liftL * 0.65) + liftR * 24, 0, 0];
+      lAnkle = [liftL * 24, 0, 0];
+      rHip = [-liftR * 10, sw + liftR * 8, -liftR * 64 * la + liftL * 16 * la];
+      rKnee = [kb * (1 - liftR * 0.65) + liftL * 24, 0, 0];
+      rAnkle = [liftR * 24, 0, 0];
+      break;
+    }
+    case 'cross': {
+      lHip = [s1 * 22 * la, -sw + s1 * 18 * la, -24 * liftL * la - 6];
+      lKnee = [kb + liftL * 42 * la, 0, 0];
+      lAnkle = [-6 + liftL * 14, 0, 0];
+      rHip = [s1 * 22 * la, sw + s1 * 18 * la, -24 * liftR * la - 6];
+      rKnee = [kb + liftR * 42 * la, 0, 0];
+      rAnkle = [-6 + liftR * 14, 0, 0];
+      break;
+    }
+    case 'squat': {
+      lHip = [s1 * 12, -sw - 8, -kb * 0.65 - liftL * 38 * la];
+      lKnee = [kb * 1.15 + liftL * 20, 0, 0];
+      lAnkle = [-14, 0, 0];
+      rHip = [s1 * 12, sw + 8, -kb * 0.65 - liftR * 38 * la];
+      rKnee = [kb * 1.15 + liftR * 20, 0, 0];
+      rAnkle = [-14, 0, 0];
+      break;
+    }
+    case 'twist': {
+      lHip = [s1 * 32 * la, -sw - liftL * 12, -16 - liftL * 20 * la];
+      lKnee = [kb + liftL * 26, 0, 0];
+      lAnkle = [s1 * 18, 0, 0];
+      rHip = [s1 * 32 * la, sw + liftR * 12, -16 - liftR * 20 * la];
+      rKnee = [kb + liftR * 26, 0, 0];
+      rAnkle = [s1 * 18, 0, 0];
+      break;
+    }
+    case 'glide': {
+      lHip = [0, -sw - liftL * 14 * la, -32 * liftL * la + 18 * liftR * la];
+      lKnee = [kb * 0.5 + liftL * 48 * la, 0, 0];
+      lAnkle = [-liftL * 18 + liftR * 16, 0, 0];
+      rHip = [0, sw + liftR * 14 * la, -32 * liftR * la + 18 * liftL * la];
+      rKnee = [kb * 0.5 + liftR * 48 * la, 0, 0];
+      rAnkle = [-liftR * 18 + liftL * 16, 0, 0];
+      break;
+    }
+    case 'hop': {
+      lHip = [0, -sw - liftL * 10, -46 * liftL * la - 6];
+      lKnee = [kb + liftL * 78 * la, 0, 0];
+      lAnkle = [liftL * 22, 0, 0];
+      rHip = [0, sw + liftR * 10, -46 * liftR * la - 6];
+      rKnee = [kb + liftR * 78 * la, 0, 0];
+      rAnkle = [liftR * 22, 0, 0];
+      break;
+    }
+    case 'lunge': {
+      lHip = [s1 * 10, -sw - 10 - liftL * 14, -22 - liftL * 24 * la];
+      lKnee = [kb + liftL * 32, 0, 0];
+      lAnkle = [-10, 0, 0];
+      rHip = [s1 * 10, sw + 10 + liftR * 14, -22 - liftR * 24 * la];
+      rKnee = [kb + liftR * 32, 0, 0];
+      rAnkle = [-10, 0, 0];
+      break;
+    }
+    case 'tap': {
+      const fTap = Math.max(0, Math.sin(dblPhase));
+      const bTap = Math.max(0, -Math.sin(dblPhase));
+      lHip = [0, -sw, -28 * fTap * la + 12 * bTap];
+      lKnee = [kb + fTap * 46, 0, 0];
+      lAnkle = [fTap * 28 - bTap * 18, 0, 0];
+      rHip = [0, sw, -28 * bTap * la + 12 * fTap];
+      rKnee = [kb + bTap * 46, 0, 0];
+      rAnkle = [bTap * 28 - fTap * 18, 0, 0];
+      break;
+    }
+    case 'arabesque': {
+      lHip = [-8, -sw, -jumpEnv * 58 * la - 10];
+      lKnee = [kb * (1 - jumpEnv * 0.7), 0, 0];
+      lAnkle = [jumpEnv * 36, 0, 0];
+      rHip = [8, sw, jumpEnv * 64 * la - 8];
+      rKnee = [kb * (1 - jumpEnv * 0.7), 0, 0];
+      rAnkle = [jumpEnv * 36, 0, 0];
+      break;
+    }
+    default: {
+      // 'step'
+      lHip = [s1 * 8, -sw - liftL * 8 * la, -18 * liftL * la - 6];
+      lKnee = [kb + liftL * 34 * la, 0, 0];
+      lAnkle = [-8 + liftL * 12, 0, 0];
+      rHip = [s1 * 8, sw + liftR * 8 * la, -18 * liftR * la - 6];
+      rKnee = [kb + liftR * 34 * la, 0, 0];
+      rAnkle = [-8 + liftR * 12, 0, 0];
+      break;
+    }
+  }
 
   return {
-    hipsPos: [sway * 10, 89 - contract * 9 + release * 3, Math.sin(w2) * 4],
-    hipsRot: [spiralTurn, sway * 12, contract * 14 - release * 8],
-    spine: [sway * 10, contract * 22 - release * 14, sway * 10],
-    chest: [sway * 12, contract * 24 - release * 18, -sway * 14],
-    neck: [-sway * 6, -release * 10 + contract * 8, 0],
-    head: [-sway * 8, -release * 14 + contract * 10, 0],
-    lShoulder: [28 + Math.sin(w2) * 28, -26 - release * 42 + contract * 44, 0],
-    lElbow: [24 + contract * 34, -18 - release * 24, 0],
-    lWrist: [10, -18 * Math.cos(w1), 0],
-    rShoulder: [-28 + Math.sin(w2) * 28, 26 + release * 42 - contract * 44, 0],
-    rElbow: [-24 - contract * 34, 18 + release * 24, 0],
-    rWrist: [-10, 18 * Math.cos(w1), 0],
-    lHip: [0, -10 - Math.max(0, sway) * 18, -14 - contract * 20],
-    lKnee: [12 + contract * 44 + Math.max(0, sway) * 18, 0, 0],
-    lAnkle: [release * 18, 0, 0],
-    rHip: [0, 10 + Math.max(0, -sway) * 18, -14 + release * 24],
-    rKnee: [12 + contract * 28 + Math.max(0, -sway) * 18, 0, 0],
-    rAnkle: [release * 18, 0, 0],
+    hipsPos: [
+      s1 * recipe.swayX,
+      hipY,
+      c1 * recipe.swayZ,
+    ],
+    hipsRot: [
+      spinY + sHalf * recipe.hipTwist,
+      s1 * recipe.hipTilt,
+      Math.max(0, recipe.spineBend * 0.25),
+    ],
+    spine: [
+      -s1 * recipe.hipTilt * 0.55,
+      recipe.spineBend * 0.55 + Math.sin(phase - 0.5) * recipe.chestWave * 0.5,
+      s1 * recipe.chestTwist * 0.5,
+    ],
+    chest: [
+      -s1 * recipe.hipTilt * 0.65,
+      recipe.spineBend * 0.45 + Math.sin(phase - 1.0) * recipe.chestWave * 0.65,
+      s1 * recipe.chestTwist * 0.85,
+    ],
+    neck: [
+      s1 * recipe.headTilt * 0.5,
+      -recipe.spineBend * 0.3 + Math.sin(phase) * recipe.headNod * 0.5,
+      -s1 * recipe.chestTwist * 0.35,
+    ],
+    head: [
+      s1 * recipe.headTilt,
+      -recipe.spineBend * 0.35 + Math.sin(phase) * recipe.headNod,
+      sHalf * recipe.headTilt * 0.6,
+    ],
+    lShoulder: lSh,
+    lElbow: lEl,
+    lWrist: lWr,
+    rShoulder: rSh,
+    rElbow: rEl,
+    rWrist: rWr,
+    lHip,
+    lKnee,
+    lAnkle,
+    rHip,
+    rKnee,
+    rAnkle,
   };
 }
 

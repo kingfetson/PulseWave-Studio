@@ -158,6 +158,12 @@ export type LyricStyle =
 
 export type LyricsOnlyLayout = 'half-verse' | 'full-verse' | 'full-lyrics';
 
+export type DisplayLayerMode =
+  | 'visualizer-lyrics'
+  | 'visualizer-only'
+  | 'lyrics-only'
+  | 'dance-only';
+
 export type LyricFontKey = 'auto' | 'sans' | 'serif' | 'mono' | 'display' | 'geometric';
 
 export type DanceStyleKey =
@@ -178,6 +184,56 @@ export type DanceStyleKey =
   | 'mocap-kpop'
   | 'mocap-disco'
   | 'mocap-waltz'
+  | 'mocap-popping'
+  | 'mocap-locking'
+  | 'mocap-krump'
+  | 'mocap-tutting'
+  | 'mocap-waving'
+  | 'mocap-boogaloo'
+  | 'mocap-cwalk'
+  | 'mocap-jerkin'
+  | 'mocap-harlem-shake'
+  | 'mocap-dougie'
+  | 'mocap-voguing'
+  | 'mocap-waacking'
+  | 'mocap-tektonik'
+  | 'mocap-jumpstyle'
+  | 'mocap-cutting-shapes'
+  | 'mocap-hakken'
+  | 'mocap-cyber-goth'
+  | 'mocap-trance-flow'
+  | 'mocap-robot-boogie'
+  | 'mocap-bachata'
+  | 'mocap-samba'
+  | 'mocap-merengue'
+  | 'mocap-cumbia'
+  | 'mocap-reggaeton'
+  | 'mocap-chacha'
+  | 'mocap-rumba'
+  | 'mocap-pasodoble'
+  | 'mocap-dancehall'
+  | 'mocap-amapiano'
+  | 'mocap-foxtrot'
+  | 'mocap-quickstep'
+  | 'mocap-jive'
+  | 'mocap-lindy-hop'
+  | 'mocap-charleston'
+  | 'mocap-twist'
+  | 'mocap-mashed-potato'
+  | 'mocap-swing-out'
+  | 'mocap-flamenco'
+  | 'mocap-bollywood'
+  | 'mocap-bhangra'
+  | 'mocap-capoeira'
+  | 'mocap-irish-step'
+  | 'mocap-kazachok'
+  | 'mocap-bellydance'
+  | 'mocap-jazz-square'
+  | 'mocap-tap'
+  | 'mocap-fosse'
+  | 'mocap-aerial-leap'
+  | 'mocap-headbang'
+  | 'mocap-chill-sway'
   | 'mocap-custom';
 
 export type DanceAvatarStyle =
@@ -192,9 +248,45 @@ export type DanceAvatarStyle =
   | 'human-suit'
   | 'human-neon'
   | 'silhouette'
+  | 'human-skater'
+  | 'human-graffiti'
+  | 'human-dj'
+  | 'human-raver'
+  | 'human-kpop'
+  | 'human-tracksuit'
+  | 'human-punk'
+  | 'human-rockstar'
+  | 'human-android'
+  | 'human-astronaut'
+  | 'human-cyborg'
+  | 'human-valkyrie'
+  | 'human-phantom'
+  | 'human-samurai'
+  | 'human-laser-mage'
+  | 'human-mecha-pilot'
+  | 'human-disco'
+  | 'human-synthwave'
+  | 'human-glam'
+  | 'human-jazz-cat'
+  | 'human-flapper'
+  | 'human-mariachi'
+  | 'human-cowboy'
+  | 'human-matador'
+  | 'human-kimono'
+  | 'human-contemporary'
+  | 'human-opera'
+  | 'human-gothic'
+  | 'human-monarch'
+  | 'human-zen'
   | 'neon-cyber'
   | 'holo-wire'
-  | 'minimal-rig';
+  | 'minimal-rig'
+  | 'prism-rig'
+  | 'laser-frame'
+  | 'chrome-doll'
+  | 'pulse-nodes'
+  | 'shadow-wire'
+  | 'voxel-rig';
 
 export type DancePlacement = 'left' | 'center' | 'right';
 
@@ -392,6 +484,7 @@ export interface SavedPreset {
 export interface StudioSettings {
   aspectRatio: AspectRatioKey;
   visualizerMode: VisualizerMode;
+  displayLayer?: DisplayLayerMode;
   lyricsOnly: boolean;
   lyricsOnlyLayout: LyricsOnlyLayout;
   lyricStyle: LyricStyle;
@@ -717,7 +810,47 @@ export interface StudioProjectRecord extends StudioProjectSummary {
   versions?: ProjectStateVersionRecord[];
 }
 
+export function resolveDisplayLayer(
+  settings: Pick<StudioSettings, 'displayLayer' | 'lyricsOnly'>
+): DisplayLayerMode {
+  if (
+    settings.displayLayer === 'visualizer-only' ||
+    settings.displayLayer === 'lyrics-only' ||
+    settings.displayLayer === 'dance-only' ||
+    settings.displayLayer === 'visualizer-lyrics'
+  ) {
+    return settings.displayLayer;
+  }
+  return settings.lyricsOnly ? 'lyrics-only' : 'visualizer-lyrics';
+}
+
 export type MixClipKind = 'audio' | 'video';
+
+export type MixVideoBlendMode =
+  | 'normal'
+  | 'screen'
+  | 'overlay'
+  | 'multiply'
+  | 'lighten'
+  | 'darken'
+  | 'color-dodge'
+  | 'hard-light'
+  | 'soft-light';
+
+export const MIX_VIDEO_BLEND_MODES: Array<{
+  id: MixVideoBlendMode;
+  label: string;
+}> = [
+  { id: 'normal', label: 'Normal' },
+  { id: 'screen', label: 'Screen' },
+  { id: 'overlay', label: 'Overlay' },
+  { id: 'multiply', label: 'Multiply' },
+  { id: 'lighten', label: 'Lighten' },
+  { id: 'darken', label: 'Darken' },
+  { id: 'color-dodge', label: 'Color Dodge' },
+  { id: 'hard-light', label: 'Hard Light' },
+  { id: 'soft-light', label: 'Soft Light' },
+];
 
 export interface MixClipItem {
   id: string;
@@ -735,6 +868,7 @@ export interface MixClipItem {
   fadeIn: number; // seconds
   fadeOut: number; // seconds
   videoOpacity: number; // 0 - 1
+  videoBlendMode?: MixVideoBlendMode;
   hasVideo: boolean;
   videoWidth: number;
   videoHeight: number;
@@ -746,4 +880,72 @@ export interface MixProjectOptions {
   normalizeMixAudio: boolean;
   defaultCrossfadeSec: number;
 }
+
+export type DjMixTriggerMode = 'beats' | 'lyrics' | 'manual';
+
+export type DjTransitionStyle =
+  | 'bass-swap'
+  | 'filter-sweep'
+  | 'echo-out'
+  | 'beat-drop'
+  | 'stutter-cut';
+
+export type DjVideoMixStyle =
+  | 'crossfade'
+  | 'beat-flash'
+  | 'wipe-slide'
+  | 'split-dual'
+  | 'zoom-punch';
+
+export interface DjTriBandPeaks {
+  low: number[];
+  mid: number[];
+  high: number[];
+  overall: number[];
+}
+
+export interface DjCuePoint {
+  id: string;
+  label: string;
+  timeSec: number;
+  color: string;
+}
+
+export interface DjTrackAsset {
+  id: string;
+  name: string;
+  title: string;
+  artist: string;
+  kind: 'audio' | 'video';
+  file: File | null;
+  objectUrl: string | null;
+  duration: number;
+  hasVideo: boolean;
+  videoWidth: number;
+  videoHeight: number;
+  audioBuffer: AudioBuffer;
+  bpm: number;
+  bpmHalfDoubleFactor: 0.5 | 1 | 2;
+  autoBpm?: number;
+  autoDownbeatAnchorSec?: number;
+  beatGridOffsetMs?: number;
+  beatGridLocked?: boolean;
+  beatTimes: number[];
+  downbeatTimes: number[];
+  dropTime: number;
+  recommendedOutTime: number;
+  triBandPeaks: DjTriBandPeaks;
+  lyrics: LyricLine[];
+  cuePoints?: DjCuePoint[];
+  energyScore: number;
+}
+
+export interface DjDeckEqSettings {
+  lowGainDb: number; // -18 to +9
+  midGainDb: number; // -18 to +9
+  highGainDb: number; // -18 to +9
+  filterSweep: number; // -1 (HPF) to 0 (flat) to +1 (LPF)
+  trimGain: number; // 0 to 1.5
+}
+
 

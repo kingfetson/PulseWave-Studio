@@ -8,6 +8,7 @@ import {
   Camera,
   Captions,
   Check,
+  Disc3,
   Download,
   FileJson,
   FileText,
@@ -47,6 +48,7 @@ import {
   LyricStyle,
   MocapClipData,
   MotionBlurPresetKey,
+  resolveDisplayLayer,
   resolveExportDimensions,
   SavedPreset,
   SidebarTab,
@@ -166,6 +168,7 @@ interface ControlSidebarProps {
   onClearMocapClip?: () => void;
   mixClipCount?: number;
   onOpenMixStudio?: () => void;
+  onOpenDjStudio?: () => void;
   containerClassName?: string;
 }
 
@@ -911,6 +914,7 @@ export function ControlSidebar({
   onClearMocapClip,
   mixClipCount = 0,
   onOpenMixStudio,
+  onOpenDjStudio,
   containerClassName,
 }: ControlSidebarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
@@ -920,6 +924,8 @@ export function ControlSidebar({
   const mocapInputRef = useRef<HTMLInputElement>(null);
   const presetJsonInputRef = useRef<HTMLInputElement>(null);
   const autoCaptionsSectionRef = useRef<HTMLElement>(null);
+  const danceSectionRef = useRef<HTMLElement>(null);
+  const displayLayer = resolveDisplayLayer(settings);
 
   useEffect(() => {
     if (activeTab === 'lyrics' && (isGeneratingCaptions || captionsNotice)) {
@@ -1364,6 +1370,16 @@ export function ControlSidebar({
                       ? `Edit Multi-Track Mix (${mixClipCount} clips)`
                       : 'Mix Multiple Audio / Video Files'}
                   </span>
+                </button>
+              )}
+              {onOpenDjStudio && (
+                <button
+                  type="button"
+                  onClick={onOpenDjStudio}
+                  className="w-full px-3 py-2 rounded-lg text-xs font-medium bg-gradient-to-r from-cyan-500/12 to-fuchsia-500/12 hover:from-cyan-500/20 hover:to-fuchsia-500/20 text-slate-100 border border-cyan-400/30 transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Disc3 className="w-3.5 h-3.5 text-fuchsia-400" />
+                  <span>DJ Beat &amp; Lyric Mix Studio</span>
                 </button>
               )}
               <p className="text-[11px] text-slate-400 truncate">
@@ -2359,15 +2375,26 @@ export function ControlSidebar({
               <div className="flex items-center justify-between">
                 <h2 className="text-xs font-semibold text-slate-200">Display Layer</h2>
                 <span className="text-[11px] font-mono text-slate-400">
-                  {settings.lyricsOnly ? 'Lyrics Only' : 'Visualizer + Lyrics'}
+                  {displayLayer === 'lyrics-only'
+                    ? 'Lyrics Only'
+                    : displayLayer === 'visualizer-only'
+                    ? 'Visualizer Only'
+                    : displayLayer === 'dance-only'
+                    ? 'Dance & Mocap Only'
+                    : 'Visualizer + Lyrics'}
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  onClick={() => onUpdateSettings({ lyricsOnly: false })}
-                  className={`px-2.5 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
-                    !settings.lyricsOnly
+                  onClick={() =>
+                    onUpdateSettings({
+                      displayLayer: 'visualizer-lyrics',
+                      lyricsOnly: false,
+                    })
+                  }
+                  className={`px-2 py-2 rounded-lg border text-[11px] leading-tight font-medium transition-colors cursor-pointer ${
+                    displayLayer === 'visualizer-lyrics'
                       ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
                       : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
                   }`}
@@ -2376,17 +2403,116 @@ export function ControlSidebar({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onUpdateSettings({ lyricsOnly: true })}
-                  className={`px-2.5 py-2 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
-                    settings.lyricsOnly
+                  onClick={() =>
+                    onUpdateSettings({
+                      displayLayer: 'visualizer-only',
+                      lyricsOnly: false,
+                    })
+                  }
+                  className={`px-2 py-2 rounded-lg border text-[11px] leading-tight font-medium transition-colors cursor-pointer ${
+                    displayLayer === 'visualizer-only'
+                      ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
+                      : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                  }`}
+                >
+                  Visualizer Only
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSettings({
+                      displayLayer: 'lyrics-only',
+                      lyricsOnly: true,
+                    })
+                  }
+                  className={`px-2 py-2 rounded-lg border text-[11px] leading-tight font-medium transition-colors cursor-pointer ${
+                    displayLayer === 'lyrics-only'
                       ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
                       : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
                   }`}
                 >
                   Lyrics Only
                 </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSettings({
+                      displayLayer: 'dance-only',
+                      lyricsOnly: false,
+                      danceEnabled: true,
+                    })
+                  }
+                  className={`px-2 py-2 rounded-lg border text-[11px] leading-tight font-medium transition-colors cursor-pointer ${
+                    displayLayer === 'dance-only'
+                      ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200'
+                      : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:border-white/[0.16]'
+                  }`}
+                >
+                  Dance &amp; Mocap Only
+                </button>
               </div>
-              {settings.lyricsOnly && (
+              {displayLayer === 'dance-only' && (
+                <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-400/25 space-y-2">
+                  <p className="text-[11px] leading-relaxed text-slate-300">
+                    Visualizer bars and lyrics are hidden. 3D Dance &amp; Motion Capture character, stage lighting, backdrop, and track info remain active.
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        danceSectionRef.current?.scrollIntoView({
+                          behavior: 'smooth',
+                          block: 'start',
+                        })
+                      }
+                      className="flex-1 px-2.5 py-1.5 rounded-md bg-[#090b10] hover:bg-white/[0.06] border border-white/[0.1] text-[11px] font-medium text-cyan-300 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Dance Settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({
+                          displayLayer: 'visualizer-lyrics',
+                          lyricsOnly: false,
+                        })
+                      }
+                      className="px-2.5 py-1.5 rounded-md bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-[11px] font-medium text-cyan-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Show Visualizer
+                    </button>
+                  </div>
+                </div>
+              )}
+              {displayLayer === 'visualizer-only' && (
+                <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-400/25 space-y-2">
+                  <p className="text-[11px] leading-relaxed text-slate-300">
+                    Lyrics overlay is hidden while visualizer modes, bloom, particles, 3D dancers, and backdrop remain active.
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({
+                          displayLayer: 'visualizer-lyrics',
+                          lyricsOnly: false,
+                        })
+                      }
+                      className="flex-1 px-2.5 py-1.5 rounded-md bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-[11px] font-medium text-cyan-200 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Show Lyrics
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onTabChange('lyrics')}
+                      className="px-2.5 py-1.5 rounded-md bg-[#090b10] hover:bg-white/[0.06] border border-white/[0.1] text-[11px] font-medium text-slate-300 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Edit Lyrics
+                    </button>
+                  </div>
+                </div>
+              )}
+              {displayLayer === 'lyrics-only' && (
                 <div className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-400/25 space-y-2.5">
                   <p className="text-[11px] leading-relaxed text-slate-300">
                     Visualizer modes, bloom, and particles are hidden. Background art, track info, and synced lyrics remain active.
@@ -2441,7 +2567,12 @@ export function ControlSidebar({
                     </button>
                     <button
                       type="button"
-                      onClick={() => onUpdateSettings({ lyricsOnly: false })}
+                      onClick={() =>
+                        onUpdateSettings({
+                          displayLayer: 'visualizer-lyrics',
+                          lyricsOnly: false,
+                        })
+                      }
                       className="px-2.5 py-1.5 rounded-md bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-[11px] font-medium text-cyan-200 transition-colors cursor-pointer whitespace-nowrap"
                     >
                       Enable Visualizer
@@ -2457,7 +2588,7 @@ export function ControlSidebar({
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold text-slate-200">Visualizer Mode</h2>
                 <div className="flex items-center gap-1.5">
-                  {settings.lyricsOnly && (
+                  {(displayLayer === 'lyrics-only' || displayLayer === 'dance-only') && (
                     <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/30 text-[10px] font-medium text-amber-200">
                       Hidden
                     </span>
@@ -2511,7 +2642,9 @@ export function ControlSidebar({
               />
               <div
                 className={`space-y-1.5 max-h-[296px] overflow-y-auto studio-scroll pr-0.5 transition-opacity ${
-                  settings.lyricsOnly ? 'opacity-50' : ''
+                  displayLayer === 'lyrics-only' || displayLayer === 'dance-only'
+                    ? 'opacity-50'
+                    : ''
                 }`}
               >
                 {VISUALIZER_MODES.filter((mode) => {
@@ -2526,13 +2659,23 @@ export function ControlSidebar({
                     mode.id.toLowerCase().includes(q)
                   );
                 }).map((mode) => {
-                  const active = !settings.lyricsOnly && settings.visualizerMode === mode.id;
+                  const active =
+                    displayLayer !== 'lyrics-only' &&
+                    displayLayer !== 'dance-only' &&
+                    settings.visualizerMode === mode.id;
                   return (
                     <button
                       key={mode.id}
                       type="button"
                       onClick={() =>
-                        onUpdateSettings({ visualizerMode: mode.id, lyricsOnly: false })
+                        onUpdateSettings({
+                          visualizerMode: mode.id,
+                          displayLayer:
+                            displayLayer === 'visualizer-only'
+                              ? 'visualizer-only'
+                              : 'visualizer-lyrics',
+                          lyricsOnly: false,
+                        })
                       }
                       className={`w-full px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
                         active
@@ -3527,7 +3670,7 @@ export function ControlSidebar({
             <hr className="border-white/[0.07]" />
 
             {/* Dance & Motion Capture */}
-            <section className="space-y-3">
+            <section ref={danceSectionRef} className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
@@ -3543,9 +3686,15 @@ export function ControlSidebar({
                   role="switch"
                   aria-checked={Boolean(settings.danceEnabled)}
                   aria-label="Character Dance Animation"
-                  onClick={() =>
-                    onUpdateSettings({ danceEnabled: !settings.danceEnabled })
-                  }
+                  onClick={() => {
+                    const nextEnabled = !settings.danceEnabled;
+                    onUpdateSettings({
+                      danceEnabled: nextEnabled,
+                      ...(!nextEnabled && displayLayer === 'dance-only'
+                        ? { displayLayer: 'visualizer-lyrics' }
+                        : {}),
+                    });
+                  }}
                   className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
                     settings.danceEnabled
                       ? 'bg-cyan-500/35 border-cyan-400/60'
@@ -4251,56 +4400,9 @@ export function ControlSidebar({
                         ) : (
                           <>
                             {filteredHumanAvatars.length > 0 && (
-                              <div className="grid grid-cols-2 gap-1.5">
-                                {filteredHumanAvatars.map((opt) => {
-                                  const active = activeAvatarId === opt.id;
-                                  const tagLabel = opt.tags
-                                    .map((tag) => DANCE_FILTER_TAG_LABELS[tag])
-                                    .join(' · ');
-                                  return (
-                                    <button
-                                      key={opt.id}
-                                      type="button"
-                                      title={`${opt.label} — ${opt.desc} (${tagLabel})`}
-                                      onClick={() =>
-                                        onUpdateSettings({
-                                          avatarStyle: opt.id as DanceAvatarStyle,
-                                          danceAvatarStyle: opt.id as DanceAvatarStyle,
-                                        })
-                                      }
-                                      className={`text-left px-2.5 py-1.5 rounded-md border transition-colors cursor-pointer ${
-                                        active
-                                          ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-100'
-                                          : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
-                                      }`}
-                                    >
-                                      <div className="flex items-center justify-between gap-1">
-                                        <span className="text-[11px] font-semibold truncate">
-                                          {opt.label}
-                                        </span>
-                                        {active && (
-                                          <Check className="w-3 h-3 text-cyan-300 shrink-0" />
-                                        )}
-                                      </div>
-                                      <div className="text-[10px] text-slate-400 truncate mt-0.5">
-                                        {opt.desc}
-                                      </div>
-                                      <div className="text-[9.5px] text-slate-500 truncate mt-0.5">
-                                        {tagLabel}
-                                      </div>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
-
-                            {filteredRigAvatars.length > 0 && (
-                              <>
-                                <span className="block text-[11px] text-slate-400 pt-0.5">
-                                  Skeleton &amp; Mocap Rigs
-                                </span>
-                                <div className="grid grid-cols-3 gap-1.5">
-                                  {filteredRigAvatars.map((opt) => {
+                              <div className="max-h-72 overflow-y-auto studio-scroll pr-0.5">
+                                <div className="grid grid-cols-2 gap-1.5">
+                                  {filteredHumanAvatars.map((opt) => {
                                     const active = activeAvatarId === opt.id;
                                     const tagLabel = opt.tags
                                       .map((tag) => DANCE_FILTER_TAG_LABELS[tag])
@@ -4309,23 +4411,74 @@ export function ControlSidebar({
                                       <button
                                         key={opt.id}
                                         type="button"
+                                        title={`${opt.label} — ${opt.desc} (${tagLabel})`}
                                         onClick={() =>
                                           onUpdateSettings({
                                             avatarStyle: opt.id as DanceAvatarStyle,
                                             danceAvatarStyle: opt.id as DanceAvatarStyle,
                                           })
                                         }
-                                        className={`px-2 py-1.5 rounded-md border text-[11px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                        className={`text-left px-2.5 py-1.5 rounded-md border transition-colors cursor-pointer ${
                                           active
-                                            ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                            ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-100'
                                             : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
                                         }`}
-                                        title={`${opt.desc} (${tagLabel})`}
                                       >
-                                        {opt.label}
+                                        <div className="flex items-center justify-between gap-1">
+                                          <span className="text-[11px] font-semibold truncate">
+                                            {opt.label}
+                                          </span>
+                                          {active && (
+                                            <Check className="w-3 h-3 text-cyan-300 shrink-0" />
+                                          )}
+                                        </div>
+                                        <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                                          {opt.desc}
+                                        </div>
+                                        <div className="text-[9.5px] text-slate-500 truncate mt-0.5">
+                                          {tagLabel}
+                                        </div>
                                       </button>
                                     );
                                   })}
+                                </div>
+                              </div>
+                            )}
+
+                            {filteredRigAvatars.length > 0 && (
+                              <>
+                                <span className="block text-[11px] text-slate-400 pt-0.5">
+                                  Skeleton &amp; Mocap Rigs
+                                </span>
+                                <div className="max-h-48 overflow-y-auto studio-scroll pr-0.5">
+                                  <div className="grid grid-cols-3 gap-1.5">
+                                    {filteredRigAvatars.map((opt) => {
+                                      const active = activeAvatarId === opt.id;
+                                      const tagLabel = opt.tags
+                                        .map((tag) => DANCE_FILTER_TAG_LABELS[tag])
+                                        .join(' · ');
+                                      return (
+                                        <button
+                                          key={opt.id}
+                                          type="button"
+                                          onClick={() =>
+                                            onUpdateSettings({
+                                              avatarStyle: opt.id as DanceAvatarStyle,
+                                              danceAvatarStyle: opt.id as DanceAvatarStyle,
+                                            })
+                                          }
+                                          className={`px-2 py-1.5 rounded-md border text-[11px] font-medium whitespace-nowrap truncate transition-colors cursor-pointer ${
+                                            active
+                                              ? 'bg-cyan-500/20 border-cyan-400/55 text-cyan-200'
+                                              : 'bg-[#090b10] border-white/[0.08] text-slate-300 hover:bg-white/[0.05]'
+                                          }`}
+                                          title={`${opt.desc} (${tagLabel})`}
+                                        >
+                                          {opt.label}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               </>
                             )}
@@ -4895,7 +5048,13 @@ export function ControlSidebar({
                     role="switch"
                     aria-checked={Boolean(settings.lyricsOnly)}
                     aria-label="Toggle Lyrics-Only Mode"
-                    onClick={() => onUpdateSettings({ lyricsOnly: !settings.lyricsOnly })}
+                    onClick={() =>
+                      onUpdateSettings(
+                        settings.lyricsOnly
+                          ? { lyricsOnly: false, displayLayer: 'visualizer-lyrics' }
+                          : { lyricsOnly: true, displayLayer: 'lyrics-only' }
+                      )
+                    }
                     className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer ${
                       settings.lyricsOnly
                         ? 'bg-cyan-500/35 border-cyan-400/60'

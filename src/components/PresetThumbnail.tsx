@@ -71,6 +71,7 @@ export function PresetThumbnail({ settings }: PresetThumbnailProps) {
     // Step multiple simulated frames for particles or motion blur trails
     const steps =
       (!settings.lyricsOnly &&
+        settings.displayLayer !== 'dance-only' &&
         (settings.visualizerMode === 'hybrid-particles' || settings.particleEnabled)) ||
       settings.motionBlur > 0
         ? 10

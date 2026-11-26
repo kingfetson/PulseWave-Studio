@@ -532,6 +532,8 @@ function BatchJobRow({
             value={
               job.settings.lyricsOnly
                 ? `__lyrics_only__:${job.settings.lyricsOnlyLayout ?? 'full-verse'}`
+                : job.settings.displayLayer === 'dance-only'
+                ? '__dance_only__'
                 : job.settings.visualizerMode
             }
             disabled={isLocked}
@@ -541,13 +543,25 @@ function BatchJobRow({
                 settings: val.startsWith('__lyrics_only__:')
                   ? {
                       ...job.settings,
+                      displayLayer: 'lyrics-only',
                       lyricsOnly: true,
                       lyricsOnlyLayout: val.slice(
                         '__lyrics_only__:'.length
                       ) as LyricsOnlyLayout,
                     }
+                  : val === '__dance_only__'
+                  ? {
+                      ...job.settings,
+                      displayLayer: 'dance-only',
+                      lyricsOnly: false,
+                      danceEnabled: true,
+                    }
                   : {
                       ...job.settings,
+                      displayLayer:
+                        job.settings.displayLayer === 'visualizer-only'
+                          ? 'visualizer-only'
+                          : 'visualizer-lyrics',
                       lyricsOnly: false,
                       visualizerMode: val as VisualizerMode,
                     },
@@ -564,6 +578,7 @@ function BatchJobRow({
             <option value="__lyrics_only__:full-lyrics">
               Lyrics Only · Full Lyrics
             </option>
+            <option value="__dance_only__">Dance &amp; Mocap Only</option>
             {VISUALIZER_OPTIONS.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.label}
@@ -1080,8 +1095,12 @@ export function ExportModal({
         : 'Full Verse';
     const modeLabel = currentSettings.lyricsOnly
       ? `Lyrics Only · ${layoutLabel}`
-      : VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)?.label ??
-        currentSettings.visualizerMode;
+      : currentSettings.displayLayer === 'dance-only'
+      ? 'Dance & Mocap Only'
+      : `${
+          VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)?.label ??
+          currentSettings.visualizerMode
+        }${currentSettings.displayLayer === 'visualizer-only' ? ' (Visualizer Only)' : ''}`;
     onAddBatchJobs([
       {
         label: `${modeLabel} (${startLabel}-${endLabel})`,
@@ -1100,6 +1119,10 @@ export function ExportModal({
         trimEnd: currentTrimEnd,
         settings: {
           ...currentSettings,
+          displayLayer:
+            currentSettings.displayLayer === 'visualizer-only'
+              ? 'visualizer-only'
+              : 'visualizer-lyrics',
           lyricsOnly: false,
           visualizerMode: v.id,
         },
@@ -1638,17 +1661,29 @@ export function ExportModal({
                         <span className="font-mono tabular-nums text-slate-200">
                           {currentSettings.lyricsOnly
                             ? 'Lyrics Only (No Visualizer)'
-                            : VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)
-                                ?.label ?? currentSettings.visualizerMode}
+                            : currentSettings.displayLayer === 'dance-only'
+                            ? 'Dance & Mocap Only'
+                            : `${
+                                VISUALIZER_OPTIONS.find((v) => v.id === currentSettings.visualizerMode)
+                                  ?.label ?? currentSettings.visualizerMode
+                              }${currentSettings.displayLayer === 'visualizer-only' ? ' · Visualizer Only' : ''}`}
                         </span>
                         <button
                           type="button"
                           onClick={() =>
-                            onUpdateSettings({ lyricsOnly: !currentSettings.lyricsOnly })
+                            onUpdateSettings(
+                              currentSettings.lyricsOnly ||
+                                currentSettings.displayLayer === 'dance-only'
+                                ? { lyricsOnly: false, displayLayer: 'visualizer-lyrics' }
+                                : { lyricsOnly: true, displayLayer: 'lyrics-only' }
+                            )
                           }
                           className="px-2 py-0.5 rounded bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-[10.5px] font-medium text-cyan-300 transition-colors cursor-pointer whitespace-nowrap"
                         >
-                          {currentSettings.lyricsOnly ? 'Enable Visualizer' : 'Use Lyrics Only'}
+                          {currentSettings.lyricsOnly ||
+                          currentSettings.displayLayer === 'dance-only'
+                            ? 'Enable Visualizer'
+                            : 'Use Lyrics Only'}
                         </button>
                       </div>
                     </div>

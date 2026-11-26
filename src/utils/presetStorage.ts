@@ -1,3 +1,4 @@
+import { BUILT_IN_MOCAP_LIBRARY } from './builtInMocapLibrary';
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
@@ -11,6 +12,7 @@ import {
   DanceMedleyTriggerMode,
   DancePlacement,
   DanceStyleKey,
+  DisplayLayerMode,
   ExportBitratePreset,
   ExportResolution,
   FadeType,
@@ -21,6 +23,7 @@ import {
   PARTICLE_FLOW_COLS,
   PARTICLE_FLOW_ROWS,
   ParticleShape,
+  resolveDisplayLayer,
   SavedPreset,
   SceneTransitionTarget,
   SceneTransitionType,
@@ -162,6 +165,12 @@ const VALID_LYRICS_ONLY_LAYOUTS: LyricsOnlyLayout[] = [
   'full-verse',
   'full-lyrics',
 ];
+const VALID_DISPLAY_LAYERS: DisplayLayerMode[] = [
+  'visualizer-lyrics',
+  'visualizer-only',
+  'lyrics-only',
+  'dance-only',
+];
 const VALID_BG_FIT_MODES: BackgroundFitMode[] = ['cover', 'contain-blur', 'stretch'];
 const VALID_COVER_CARD_SOURCES: CoverCardSource[] = ['auto', 'bg', 'album'];
 const VALID_COVER_CARD_POSITIONS: CoverCardPosition[] = [
@@ -223,18 +232,7 @@ const VALID_DANCE_STYLES: DanceStyleKey[] = [
   'robot',
   'groove',
   'break-freeze',
-  'mocap-salsa',
-  'mocap-ballet',
-  'mocap-breakdance',
-  'mocap-moonwalk',
-  'mocap-house',
-  'mocap-contemporary',
-  'mocap-afrobeat',
-  'mocap-tango',
-  'mocap-shuffle',
-  'mocap-kpop',
-  'mocap-disco',
-  'mocap-waltz',
+  ...BUILT_IN_MOCAP_LIBRARY.map((entry) => entry.id),
   'mocap-custom',
 ];
 const VALID_DANCE_MEDLEY_TRIGGERS: DanceMedleyTriggerMode[] = [
@@ -260,9 +258,45 @@ const VALID_DANCE_AVATARS: DanceAvatarStyle[] = [
   'human-suit',
   'human-neon',
   'silhouette',
+  'human-skater',
+  'human-graffiti',
+  'human-dj',
+  'human-raver',
+  'human-kpop',
+  'human-tracksuit',
+  'human-punk',
+  'human-rockstar',
+  'human-android',
+  'human-astronaut',
+  'human-cyborg',
+  'human-valkyrie',
+  'human-phantom',
+  'human-samurai',
+  'human-laser-mage',
+  'human-mecha-pilot',
+  'human-disco',
+  'human-synthwave',
+  'human-glam',
+  'human-jazz-cat',
+  'human-flapper',
+  'human-mariachi',
+  'human-cowboy',
+  'human-matador',
+  'human-kimono',
+  'human-contemporary',
+  'human-opera',
+  'human-gothic',
+  'human-monarch',
+  'human-zen',
   'neon-cyber',
   'holo-wire',
   'minimal-rig',
+  'prism-rig',
+  'laser-frame',
+  'chrome-doll',
+  'pulse-nodes',
+  'shadow-wire',
+  'voxel-rig',
 ];
 const VALID_DANCE_PLACEMENTS: DancePlacement[] = ['left', 'center', 'right'];
 
@@ -320,6 +354,7 @@ export function validateAndNormalizeSettings(
   const recognizedKeys = [
     'aspectRatio',
     'visualizerMode',
+    'displayLayer',
     'lyricsOnly',
     'lyricStyle',
     'primaryColor',
@@ -357,11 +392,21 @@ export function validateAndNormalizeSettings(
   const barCountRaw = clampNumber(obj.barCount, 32, 160, fallback.barCount);
   const barCount = Math.round(barCountRaw / 4) * 4;
 
+  const resolvedDisplayLayer: DisplayLayerMode = VALID_DISPLAY_LAYERS.includes(
+    obj.displayLayer as DisplayLayerMode
+  )
+    ? (obj.displayLayer as DisplayLayerMode)
+    : typeof obj.lyricsOnly === 'boolean'
+    ? obj.lyricsOnly
+      ? 'lyrics-only'
+      : 'visualizer-lyrics'
+    : resolveDisplayLayer(fallback);
+
   return {
     aspectRatio,
     visualizerMode,
-    lyricsOnly:
-      typeof obj.lyricsOnly === 'boolean' ? obj.lyricsOnly : fallback.lyricsOnly,
+    displayLayer: resolvedDisplayLayer,
+    lyricsOnly: resolvedDisplayLayer === 'lyrics-only',
     lyricsOnlyLayout: VALID_LYRICS_ONLY_LAYOUTS.includes(
       obj.lyricsOnlyLayout as LyricsOnlyLayout
     )
@@ -462,7 +507,9 @@ export function validateAndNormalizeSettings(
       ? obj.beatColorHigh.trim()
       : fallback.beatColorHigh ?? '#22d3ee',
     danceEnabled:
-      typeof obj.danceEnabled === 'boolean'
+      resolvedDisplayLayer === 'dance-only'
+        ? true
+        : typeof obj.danceEnabled === 'boolean'
         ? obj.danceEnabled
         : fallback.danceEnabled ?? false,
     danceStyle: VALID_DANCE_STYLES.includes(obj.danceStyle as DanceStyleKey)
@@ -884,7 +931,8 @@ export function formatPresetSummary(settings: StudioSettings): string {
     'magnetic-ferrofluid': 'Ferrofluid Spikes',
     'kaleido-tunnels': 'Kaleido Fractals',
   };
-  if (settings.lyricsOnly) {
+  const displayLayer = resolveDisplayLayer(settings);
+  if (displayLayer === 'lyrics-only') {
     const layoutLabels: Record<LyricsOnlyLayout, string> = {
       'half-verse': 'Half Verse',
       'full-verse': 'Full Verse',
@@ -892,6 +940,12 @@ export function formatPresetSummary(settings: StudioSettings): string {
     };
     const layoutText = layoutLabels[settings.lyricsOnlyLayout ?? 'full-verse'] ?? 'Full Verse';
     return `${ratio} · Lyrics Only (${layoutText}) · ${settings.exportFps} FPS`;
+  }
+  if (displayLayer === 'visualizer-only') {
+    return `${ratio} · ${modeLabel[settings.visualizerMode]} (Visualizer Only) · ${settings.exportFps} FPS`;
+  }
+  if (displayLayer === 'dance-only') {
+    return `${ratio} · Dance & Mocap Only · ${settings.exportFps} FPS`;
   }
   return `${ratio} · ${modeLabel[settings.visualizerMode]} · ${settings.exportFps} FPS`;
 }
