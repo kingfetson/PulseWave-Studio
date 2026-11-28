@@ -11,6 +11,7 @@ import {
   History,
   Image as ImageIcon,
   Layers,
+  Link2,
   Loader2,
   Music,
   Redo2,
@@ -61,6 +62,7 @@ interface TopBarProps {
   onOpenProjects: () => void;
   onQuickSaveProject: () => void;
   onLoadDemo: () => void;
+  onOpenLinkDownloader: () => void;
   onOpenMixStudio: () => void;
   onOpenDjStudio: () => void;
   onOpenMidi: () => void;
@@ -133,6 +135,7 @@ export function TopBar({
   onOpenProjects,
   onQuickSaveProject,
   onLoadDemo,
+  onOpenLinkDownloader,
   onOpenMixStudio,
   onOpenDjStudio,
   onOpenMidi,
@@ -443,6 +446,17 @@ export function TopBar({
           <span className="hidden md:inline">
             {isGeneratingDemo ? 'Synthesizing...' : 'Load Demo Beat'}
           </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenLinkDownloader}
+          disabled={isExporting}
+          title="Paste a link to download video/audio or load into Studio"
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 cursor-pointer"
+        >
+          <Link2 className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="hidden md:inline">Paste Link</span>
         </button>
 
         <button

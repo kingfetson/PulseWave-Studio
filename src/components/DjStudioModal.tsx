@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   ArrowDown,
   ArrowUp,
   AudioWaveform,
@@ -8,6 +9,8 @@ import {
   Cable,
   Disc3,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Film,
   Flame,
@@ -16,7 +19,10 @@ import {
   Layers,
   Loader2,
   Lock,
+  Magnet,
   MapPin,
+  Mic,
+  Monitor,
   Music,
   PanelLeftClose,
   PanelLeftOpen,
@@ -26,8 +32,10 @@ import {
   Redo2,
   Repeat,
   RotateCcw,
+  ShieldCheck,
   Sliders,
   Sparkles,
+  Square,
   Trash2,
   Undo2,
   Unlock,
@@ -37,6 +45,8 @@ import {
   Wand2,
   X,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import type { MidiMappableParamKey } from '../types/midi';
 import {
@@ -63,6 +73,7 @@ import {
   computeLowPassRms,
   createInitialBeatState,
   OfflineAudioAnalyzer,
+  OfflineLowPassBeatTracker,
   stepBeatDetector,
 } from '../utils/audioEngine';
 import { renderVisualizerFrame } from '../utils/canvasRenderer';
@@ -78,6 +89,8 @@ import {
   calculateBpmTransitionTiming,
   computeBeatMatchPhaseComparison,
   computeBeatPhaseMetrics,
+  computeBpmCalibratedEqCrossovers,
+  createBrickWallClipperCurve,
   createDjCuePointId,
   createDjVideoFrameResolver,
   cycleTrackDownbeatPhase,
@@ -86,6 +99,7 @@ import {
   DjBpmTimingPreset,
   DjScheduleRenderPlan,
   DjTransitionPlan,
+  DjTransitionPreviewRender,
   extractTriBandWindowPeaks,
   findBestLyricHandoffPair,
   findNearestBeat,
@@ -94,7 +108,9 @@ import {
   getEffectiveBpm,
   parseAndSyncDjTrackLyrics,
   renderOfflineDjSchedule,
+  renderTransitionPreview5s,
   resetTrackBeatGridToAuto,
+  scanAudioBufferPeakLinear,
   setTrackBeatGridOffsetMs,
   setTrackDownbeatAtTime,
   shiftTrackBeatGrid,
@@ -105,8 +121,58 @@ import {
   createDjVinylScratchSession,
   DjVinylScratchSession,
 } from '../utils/djScratchEngine';
+import {
+  cycleCamelotKey,
+  detectMusicalKeyFromBuffer,
+  evaluateHarmonicCompatibility,
+  getCamelotEntry,
+  getCompatibleCamelotKeys,
+  HarmonicCompatibilityResult,
+} from '../utils/djKeyDetection';
+import {
+  DjSpectrogramMode,
+  extractSpectrogramWindow,
+  frequencyPeakToColor,
+  spectrogramIntensityToRgba,
+} from '../utils/djSpectrogram';
+import {
+  computeNextQuantizedTriggerDelay,
+  createInitialSamplerPads,
+  extractSamplerPeaks,
+  SAMPLER_PAD_META,
+  SAMPLER_QUANTIZE_OPTIONS,
+  SamplerPadData,
+  SamplerQuantizeMode,
+  SamplerRecordSource,
+  sliceDeckOneShotBuffer,
+  synthesizeStarterOneShot,
+  trimSilentEdgesFromBuffer,
+} from '../utils/djSamplerEngine';
+import {
+  buildTransientEnvelopeCurvePoints,
+  createLiveTransientShaper,
+  formatTransientDitherReadout,
+  LiveTransientShaperNode,
+  TransientFocusMode,
+} from '../utils/djTransientShaper';
+import {
+  createLiveNoiseGate,
+  formatNoiseGateThreshold,
+  LiveNoiseGateNode,
+} from '../utils/djNoiseGate';
+import {
+  AiAutoMixAnalysisResult,
+  AiAutoMixSuggestion,
+  AutoMixPreference,
+  requestAiAutoMixSuggestions,
+} from '../utils/djAutoMixAi';
 import { MixVideoFrameResolver } from '../utils/mixEngine';
 import { captureCanvasSnapshotPng } from '../utils/presetStorage';
+import {
+  computeTapTempoCalibration,
+  TAP_TEMPO_IDLE_RESET_MS,
+  TapSample,
+} from '../utils/tapTempo';
 import { ControlSidebar } from './ControlSidebar';
 import { buildSyntheticAudioFrame } from './PresetThumbnail';
 import { PreviewStage } from './PreviewStage';
@@ -187,6 +253,7 @@ interface DjStudioModalProps {
 
 interface LiveDeckAudioChain {
   source: AudioBufferSourceNode | null;
+  sourceGain: GainNode | null;
   scratchSession: DjVinylScratchSession | null;
   isScratching: boolean;
   lowEq: BiquadFilterNode;
@@ -198,6 +265,10 @@ interface LiveDeckAudioChain {
   delayFeedback: GainNode;
   delayWet: GainNode;
   trimGain: GainNode;
+  preFaderMonitorGain: GainNode;
+  analyser: AnalyserNode;
+  beatLowPass: BiquadFilterNode;
+  beatAnalyser: AnalyserNode;
   crossfadeGain: GainNode;
   startedAtAudioTime: number;
   startedAtPerfMs: number;
@@ -212,6 +283,9 @@ const DEFAULT_DECK_EQ: DjDeckEqSettings = {
   highGainDb: 0,
   filterSweep: 0,
   trimGain: 1,
+  lowCrossoverHz: 230,
+  midCenterHz: 1100,
+  highCrossoverHz: 4000,
 };
 
 const TRANSITION_STYLE_LABELS: Array<{ id: DjTransitionStyle; label: string }> = [
@@ -261,6 +335,79 @@ const LOOP_BEAT_OPTIONS: Array<{ beats: LoopBeatLength; label: string }> = [
   { beats: 2, label: '2' },
   { beats: 4, label: '4' },
 ];
+
+type FxFilterLfoDivision = 0.5 | 1 | 2 | 4 | 8;
+type FxDelayDivision = 0.125 | 0.25 | 0.375 | 0.5 | 0.75 | 1;
+type FxGateDivision = 0.25 | 0.5 | 1 | 2;
+
+const FX_FILTER_LFO_DIVISIONS: Array<{ beats: FxFilterLfoDivision; label: string }> = [
+  { beats: 0.5, label: '1/2B' },
+  { beats: 1, label: '1B' },
+  { beats: 2, label: '2B' },
+  { beats: 4, label: '4B' },
+  { beats: 8, label: '8B' },
+];
+
+const FX_DELAY_DIVISIONS: Array<{ beats: FxDelayDivision; label: string }> = [
+  { beats: 0.125, label: '1/8' },
+  { beats: 0.25, label: '1/4' },
+  { beats: 0.375, label: '3/8•' },
+  { beats: 0.5, label: '1/2' },
+  { beats: 0.75, label: '3/4•' },
+  { beats: 1, label: '1B' },
+];
+
+const FX_GATE_DIVISIONS: Array<{ beats: FxGateDivision; label: string }> = [
+  { beats: 0.25, label: '1/4' },
+  { beats: 0.5, label: '1/2' },
+  { beats: 1, label: '1B' },
+  { beats: 2, label: '2B' },
+];
+
+interface LiveMasterFxNodes {
+  inputBus: GainNode;
+  sweepFilter: BiquadFilterNode;
+  filterLfoOsc: OscillatorNode;
+  filterLfoGain: GainNode;
+  dryGain: GainNode;
+  delayDampFilter: BiquadFilterNode;
+  delayLeft: DelayNode;
+  delayRight: DelayNode;
+  delayPanLeft: StereoPannerNode;
+  delayPanRight: StereoPannerNode;
+  delayFeedbackGain: GainNode;
+  delayWetGain: GainNode;
+  gateGain: GainNode;
+  gateLfoOsc: OscillatorNode;
+  gateLfoGain: GainNode;
+  transientShaper: LiveTransientShaperNode;
+  noiseGate: LiveNoiseGateNode;
+}
+
+interface LiveMasterLimiterNodes {
+  preLimiterAnalyser: AnalyserNode;
+  autoTrimGain: GainNode;
+  compressor: DynamicsCompressorNode;
+  clipper: WaveShaperNode;
+}
+
+const LIMITER_CEILING_PRESETS = [-0.1, -0.3, -1.0, -2.0] as const;
+const LIMITER_RELEASE_PRESETS = [
+  { sec: 0.04, label: '40ms' },
+  { sec: 0.08, label: '80ms' },
+  { sec: 0.15, label: '150ms' },
+  { sec: 0.25, label: '250ms' },
+] as const;
+
+interface DjTapBpmLogEntry {
+  id: string;
+  bpm: number;
+  tapCount: number;
+  timestampLabel: string;
+  deltaFromPrev: number | null;
+}
+
+const MAX_DJ_TAP_BPM_LOG = 5;
 
 function extractWindowPeaks(
   buffer: AudioBuffer,
@@ -314,6 +461,51 @@ function parseDjTimeInput(raw: string): number | null {
   return Number.isFinite(num) && num >= 0 ? num : null;
 }
 
+interface MasterBeatClockState {
+  phase: number;
+  beatIndex: number;
+}
+
+function computeMasterBeatGlowPulse(beatPhase: number): number {
+  const p = ((beatPhase % 1) + 1) % 1;
+  if (p < 0.06) {
+    return 0.35 + (p / 0.06) * 0.65;
+  }
+  const decayNorm = (p - 0.06) / 0.94;
+  return Math.pow(1 - decayNorm, 2.35);
+}
+
+function drawPulsingBeatGridGlow(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  h: number,
+  rgbCore: string,
+  rgbHalo: string,
+  pulse: number,
+  isDownbeat: boolean,
+  emphasis = 1
+): void {
+  const scaled = Math.max(0, Math.min(1, pulse * emphasis));
+  if (scaled < 0.02 || h <= 0) return;
+
+  const haloHalfW = isDownbeat ? 5.5 + scaled * 4.5 : 3.2 + scaled * 2.8;
+  const haloAlpha = (isDownbeat ? 0.24 : 0.13) * scaled;
+
+  const grad = ctx.createLinearGradient(x - haloHalfW, 0, x + haloHalfW, 0);
+  grad.addColorStop(0, `rgba(${rgbHalo}, 0)`);
+  grad.addColorStop(0.5, `rgba(${rgbHalo}, ${haloAlpha.toFixed(3)})`);
+  grad.addColorStop(1, `rgba(${rgbHalo}, 0)`);
+
+  ctx.fillStyle = grad;
+  ctx.fillRect(x - haloHalfW, y, haloHalfW * 2, h);
+
+  const coreAlpha = (isDownbeat ? 0.6 : 0.34) * scaled;
+  const coreW = isDownbeat ? 1.6 : 1.1;
+  ctx.fillStyle = `rgba(${rgbCore}, ${coreAlpha.toFixed(3)})`;
+  ctx.fillRect(x - coreW * 0.5, y, coreW, h);
+}
+
 interface TriBandWaveformCanvasProps {
   track: DjTrackAsset | null;
   playheadSec: number;
@@ -323,16 +515,35 @@ interface TriBandWaveformCanvasProps {
   showBeatGrid?: boolean;
   beatGridSubdivision?: 1 | 2 | 4;
   viewMode?: 'overview' | 'zoom';
+  zoomPct?: number;
+  freeTransientSeek?: boolean;
+  syncToBeatGrid?: boolean;
+  loopWindowStartSec?: number | null;
+  loopWindowEndSec?: number | null;
+  nudgeAccumMs?: number;
+  nudgeFlash?: { deltaMs: number; nonce: number } | null;
+  harmonicCompatibility?: HarmonicCompatibilityResult | null;
+  spectrogramMode?: DjSpectrogramMode;
   isGridEditMode?: boolean;
   isScratchMode?: boolean;
   isScratching?: boolean;
   scratchRate?: number | null;
   scratchSensitivitySec?: number;
+  masterBeatClockRef?: { current: MasterBeatClockState };
+  registerBeatPulseDraw?: (fn: () => void) => () => void;
   onDragBeatGridMs?: (deltaMs: number) => void;
   onScratchStart?: () => void;
   onScratchMove?: (deltaSec: number, velocityRate: number) => void;
   onScratchEnd?: () => void;
   onSeekOrCue: (timeSec: number) => void;
+}
+
+function computeWaveformZoomSpanSec(track: DjTrackAsset, zoomPct: number): number {
+  const beatSec = 60 / Math.max(40, getEffectiveBpm(track));
+  const maxSpan = Math.max(beatSec * 16, Math.min(track.duration, 40));
+  const minSpan = Math.max(0.22, beatSec * 0.5);
+  const norm = Math.max(0, Math.min(1, (zoomPct - 1) / 99));
+  return maxSpan * Math.pow(minSpan / maxSpan, norm);
 }
 
 function TriBandWaveformCanvas({
@@ -344,11 +555,22 @@ function TriBandWaveformCanvas({
   showBeatGrid = true,
   beatGridSubdivision = 2,
   viewMode = 'overview',
+  zoomPct = 0,
+  freeTransientSeek = false,
+  syncToBeatGrid = true,
+  loopWindowStartSec = null,
+  loopWindowEndSec = null,
+  nudgeAccumMs = 0,
+  nudgeFlash = null,
+  harmonicCompatibility = null,
+  spectrogramMode = 'overlay',
   isGridEditMode = false,
   isScratchMode = false,
   isScratching = false,
   scratchRate = null,
   scratchSensitivitySec = 1.8,
+  masterBeatClockRef,
+  registerBeatPulseDraw,
   onDragBeatGridMs,
   onScratchStart,
   onScratchMove,
@@ -356,27 +578,49 @@ function TriBandWaveformCanvas({
   onSeekOrCue,
 }: TriBandWaveformCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glowCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glowLayoutRef = useRef<{
+    width: number;
+    height: number;
+    winStart: number;
+    winEnd: number;
+    winSpan: number;
+    beatPeriod: number;
+    pxPerBeat: number;
+    duration: number;
+    isZoom: boolean;
+    isGridEditMode: boolean;
+    showBeatGrid: boolean;
+    beatGridSubdivision: 1 | 2 | 4;
+    gridPoints: ReturnType<typeof getEffectiveBeatGridPoints>;
+    accentHex: string;
+    hasNudgeActive: boolean;
+  } | null>(null);
   const gridDragLastXRef = useRef<number | null>(null);
   const gridDragTotalPxRef = useRef(0);
   const dragLastTimeRef = useRef<number>(0);
   const scratchEngagedRef = useRef(false);
 
+  const effectiveZoomPct = zoomPct > 0 ? zoomPct : viewMode === 'zoom' ? 45 : 0;
+  const isZoomedView = Boolean(track && (viewMode === 'zoom' || zoomPct > 0));
+
   const gridPoints = useMemo(
     () => (track ? getEffectiveBeatGridPoints(track) : []),
     [track]
   );
+  const gridBeatTimes = useMemo(() => gridPoints.map((p) => p.timeSec), [gridPoints]);
 
   const zoomBounds = useMemo(() => {
-    if (!track || viewMode !== 'zoom') {
+    if (!track || !isZoomedView) {
       return { start: 0, end: track?.duration ?? 1 };
     }
-    const beatSec = 60 / Math.max(40, getEffectiveBpm(track));
-    const halfWin = beatSec * 4;
+    const winSpan = computeWaveformZoomSpanSec(track, effectiveZoomPct);
+    const halfWin = winSpan * 0.5;
     return {
       start: playheadSec - halfWin,
       end: playheadSec + halfWin,
     };
-  }, [playheadSec, track, viewMode]);
+  }, [effectiveZoomPct, isZoomedView, playheadSec, track]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -406,41 +650,219 @@ function TriBandWaveformCanvas({
       return;
     }
 
-    const isZoom = viewMode === 'zoom';
+    const isZoom = isZoomedView;
     const winStart = isZoom ? zoomBounds.start : 0;
     const winEnd = isZoom ? zoomBounds.end : Math.max(0.1, track.duration);
-    const winSpan = Math.max(0.1, winEnd - winStart);
+    const winSpan = Math.max(0.05, winEnd - winStart);
     const toX = (t: number) => ((t - winStart) / winSpan) * width;
 
+    const peakBarCount = !isZoom
+      ? 112
+      : effectiveZoomPct >= 75
+        ? 240
+        : effectiveZoomPct >= 35
+          ? 184
+          : 132;
     const peaks = isZoom
-      ? extractTriBandWindowPeaks(track.audioBuffer, winStart, winEnd, 112)
+      ? extractTriBandWindowPeaks(track.audioBuffer, winStart, winEnd, peakBarCount)
       : track.triBandPeaks;
 
-    const { low, mid, high } = peaks;
+    const { low, mid, high, overall } = peaks;
     const n = low.length;
     const midY = height * 0.54;
     const barSlot = width / Math.max(1, n);
 
-    // Draw Tri-band bars: Low (Cyan/Blue), Mid (Emerald/Amber), High (Rose/White)
-    for (let i = 0; i < n; i++) {
-      const x = i * barSlot;
-      const bw = Math.max(1.2, barSlot - 0.6);
-      const tAtBar = winStart + (i / Math.max(1, n - 1)) * winSpan;
-      if (tAtBar < 0 || tAtBar > track.duration) continue;
-      const played = tAtBar <= playheadSec;
+    const specActive = spectrogramMode !== 'off';
+    const specData = specActive
+      ? isZoom
+        ? extractSpectrogramWindow(
+            track.audioBuffer,
+            winStart,
+            winEnd,
+            effectiveZoomPct >= 75 ? 112 : 96,
+            24
+          )
+        : track.spectrogram ?? extractSpectrogramWindow(track.audioBuffer, 0, track.duration, 160, 24)
+      : null;
 
-      const lowH = Math.max(2, low[i] * (height * 0.42));
-      const midH = Math.max(1, mid[i] * (height * 0.34));
-      const highH = Math.max(1, high[i] * (height * 0.22));
+    // 1. Frequency-Domain STFT Spectrogram Layer (Bass Kick -> Melodic Mid -> Snare/Hat)
+    if (specData && specData.cols > 0 && specData.rows > 0) {
+      const sCols = specData.cols;
+      const sRows = specData.rows;
+      const colW = width / sCols;
+      const rowH = height / sRows;
+      const alphaScale = spectrogramMode === 'full' ? 0.94 : 0.44;
 
-      ctx.fillStyle = played ? 'rgba(34,211,238,0.88)' : 'rgba(56,189,248,0.42)';
-      ctx.fillRect(x, midY - lowH, bw, lowH * 1.45);
+      for (let c = 0; c < sCols; c++) {
+        const sx = c * colW;
+        const tCol = winStart + ((c + 0.5) / sCols) * winSpan;
+        if (tCol < 0 || tCol > track.duration) continue;
+        const colPlayed = tCol <= playheadSec;
+        const playedBoost = colPlayed ? alphaScale : alphaScale * 0.68;
+        const colBase = c * sRows;
 
-      ctx.fillStyle = played ? 'rgba(245,158,11,0.78)' : 'rgba(16,185,129,0.38)';
-      ctx.fillRect(x, midY - midH * 0.85, bw, midH * 1.2);
+        for (let r = 0; r < sRows; r++) {
+          const cellNorm = specData.cells[colBase + r] / 255;
+          if (cellNorm < 0.08) continue;
+          const rowFrac = r / Math.max(1, sRows - 1);
+          const sy = height - (r + 1) * rowH;
+          ctx.fillStyle = spectrogramIntensityToRgba(rowFrac, cellNorm, playedBoost);
+          ctx.fillRect(sx, sy, Math.ceil(colW) + 0.4, rowH + 0.4);
+        }
+      }
 
-      ctx.fillStyle = played ? 'rgba(244,114,182,0.72)' : 'rgba(226,232,240,0.28)';
-      ctx.fillRect(x, midY - highH * 0.6, bw, highH * 0.8);
+      // Subtle horizontal crossover guide lines separating Kick (~240 Hz) / Melodic / Snare (~2.4 kHz)
+      const kickTopY = height * (1 - 0.3);
+      const midTopY = height * (1 - 0.68);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.07)';
+      ctx.fillRect(0, kickTopY, width, 1);
+      ctx.fillRect(0, midTopY, width, 1);
+
+      if (spectrogramMode === 'full') {
+        ctx.fillStyle = 'rgba(226, 232, 240, 0.45)';
+        ctx.font = '7.5px "JetBrains Mono", monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('2.4kHz · SNARE/HAT', 5, midTopY - 2);
+        ctx.fillText('240Hz · KICK', 5, kickTopY - 2);
+      }
+    }
+
+    if (isZoom) {
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.14)';
+      ctx.fillRect(0, midY, width, 1);
+    }
+
+    // Active Loop Window Region Overlay
+    if (
+      loopWindowStartSec !== null &&
+      loopWindowEndSec !== null &&
+      loopWindowEndSec > loopWindowStartSec &&
+      loopWindowEndSec >= winStart &&
+      loopWindowStartSec <= winEnd
+    ) {
+      const lx0 = Math.max(0, toX(loopWindowStartSec));
+      const lx1 = Math.min(width, toX(loopWindowEndSec));
+      if (lx1 > lx0) {
+        ctx.fillStyle = 'rgba(52, 211, 153, 0.14)';
+        ctx.fillRect(lx0, 0, lx1 - lx0, height);
+        ctx.fillStyle = 'rgba(52, 211, 153, 0.85)';
+        ctx.fillRect(lx0, 0, 1.5, height);
+        ctx.fillRect(lx1 - 1.5, 0, 1.5, height);
+      }
+    }
+
+    // 2. Waveform Peak Bars (Frequency-Intensity Colored in Overlay, Envelope Contour in Full Spec, Tri-Band in Off)
+    if (spectrogramMode === 'full') {
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.52)';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < n; i++) {
+        const x = i * barSlot;
+        const tAtBar = winStart + (i / Math.max(1, n - 1)) * winSpan;
+        if (tAtBar < 0 || tAtBar > track.duration) continue;
+        const py = midY - Math.max(1.5, overall[i] * (height * 0.42));
+        if (!started) {
+          ctx.moveTo(x, py);
+          started = true;
+        } else {
+          ctx.lineTo(x, py);
+        }
+      }
+      ctx.stroke();
+    } else if (spectrogramMode === 'overlay' && specData) {
+      const sCols = specData.cols;
+      for (let i = 0; i < n; i++) {
+        const x = i * barSlot;
+        const bw = Math.max(1.25, barSlot - 0.55);
+        const tAtBar = winStart + (i / Math.max(1, n - 1)) * winSpan;
+        if (tAtBar < 0 || tAtBar > track.duration) continue;
+        const played = tAtBar <= playheadSec;
+
+        const specIdx = Math.min(
+          sCols - 1,
+          Math.max(0, Math.round((i / Math.max(1, n - 1)) * (sCols - 1)))
+        );
+        const kickNorm = specData.kickPeaks[specIdx] / 255;
+        const melodicNorm = specData.melodicPeaks[specIdx] / 255;
+        const snareNorm = specData.snarePeaks[specIdx] / 255;
+
+        const peakH = Math.max(2, overall[i] * (height * 0.42));
+        ctx.fillStyle = frequencyPeakToColor(kickNorm, melodicNorm, snareNorm, overall[i], played);
+        ctx.fillRect(x, midY - peakH, bw, peakH * 1.46);
+
+        // Anchor heavy kick bottoms & sharp snare upper spikes visually
+        if (kickNorm > 0.58) {
+          const kickAnchorH = Math.max(2, kickNorm * height * 0.24);
+          ctx.fillStyle = played ? 'rgba(251, 113, 133, 0.88)' : 'rgba(244, 63, 94, 0.45)';
+          ctx.fillRect(x, midY + peakH * 0.46 - kickAnchorH, bw, kickAnchorH);
+        }
+        if (snareNorm > 0.54) {
+          const snareTipH = Math.max(1.5, snareNorm * height * 0.16);
+          ctx.fillStyle = played ? 'rgba(253, 224, 71, 0.86)' : 'rgba(250, 204, 21, 0.44)';
+          ctx.fillRect(x, midY - peakH, bw, snareTipH);
+        }
+
+        if (isZoom && effectiveZoomPct >= 55 && i > 0) {
+          const rise = overall[i] - overall[i - 1];
+          if (rise > 0.2 && overall[i] > 0.34) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.78)';
+            ctx.fillRect(x, 2, 1, 6);
+          }
+        }
+      }
+    } else {
+      // Standard Tri-band bars: Low (Cyan/Blue), Mid (Emerald/Amber), High (Rose/White)
+      for (let i = 0; i < n; i++) {
+        const x = i * barSlot;
+        const bw = Math.max(1.2, barSlot - 0.6);
+        const tAtBar = winStart + (i / Math.max(1, n - 1)) * winSpan;
+        if (tAtBar < 0 || tAtBar > track.duration) continue;
+        const played = tAtBar <= playheadSec;
+
+        const lowH = Math.max(2, low[i] * (height * 0.42));
+        const midH = Math.max(1, mid[i] * (height * 0.34));
+        const highH = Math.max(1, high[i] * (height * 0.22));
+
+        ctx.fillStyle = played ? 'rgba(34,211,238,0.88)' : 'rgba(56,189,248,0.42)';
+        ctx.fillRect(x, midY - lowH, bw, lowH * 1.45);
+
+        ctx.fillStyle = played ? 'rgba(245,158,11,0.78)' : 'rgba(16,185,129,0.38)';
+        ctx.fillRect(x, midY - midH * 0.85, bw, midH * 1.2);
+
+        ctx.fillStyle = played ? 'rgba(244,114,182,0.72)' : 'rgba(226,232,240,0.28)';
+        ctx.fillRect(x, midY - highH * 0.6, bw, highH * 0.8);
+
+        // Highlight sharp transient attack spikes when zoomed in for tight cue/loop placement
+        if (isZoom && effectiveZoomPct >= 55 && i > 0) {
+          const rise = overall[i] - overall[i - 1];
+          if (rise > 0.2 && overall[i] > 0.34) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+            ctx.fillRect(x, 2, 1, 6);
+          }
+        }
+      }
+    }
+
+    // Sub-second millisecond offset ticks when zoomed closely onto transients
+    if (isZoom && winSpan <= 4.5) {
+      const stepSec = winSpan <= 0.8 ? 0.05 : winSpan <= 2.0 ? 0.1 : 0.25;
+      const firstOffset = Math.ceil((-winSpan * 0.5) / stepSec) * stepSec;
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.28)';
+      ctx.font = '7.5px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      for (let off = firstOffset; off <= winSpan * 0.5; off += stepSec) {
+        if (Math.abs(off) < 0.01) continue;
+        const tx = toX(playheadSec + off);
+        if (tx < 16 || tx > width - 16) continue;
+        ctx.fillRect(tx, height - 4, 1, 4);
+        if (Math.abs(Math.round(off / stepSec)) % 2 === 0 || winSpan <= 1.2) {
+          const ms = Math.round(off * 1000);
+          ctx.fillText(`${ms > 0 ? '+' : ''}${ms}ms`, tx, height - 4);
+        }
+      }
     }
 
     // Draw Visual Beat Grid Overlay (4/4 Bars, Beats, and Sub-Beat Divisions)
@@ -663,6 +1085,117 @@ function TriBandWaveformCanvas({
       ctx.fillText(badgeText, width - 9, 9.5);
     }
 
+    // Directional Playhead Nudge Chevron & Alignment HUD Badge
+    if (track && (nudgeFlash || Math.abs(nudgeAccumMs) >= 0.5)) {
+      if (nudgeFlash) {
+        const isForward = nudgeFlash.deltaMs >= 0;
+        ctx.fillStyle = accentHex;
+        ctx.globalAlpha = 0.28;
+        ctx.fillRect(isForward ? px + 1 : px - 10, 0, 9, height);
+        ctx.globalAlpha = 1;
+
+        ctx.beginPath();
+        const cy = height * 0.5;
+        if (isForward) {
+          ctx.moveTo(px + 4, cy - 5);
+          ctx.lineTo(px + 10, cy);
+          ctx.lineTo(px + 4, cy + 5);
+        } else {
+          ctx.moveTo(px - 3, cy - 5);
+          ctx.lineTo(px - 9, cy);
+          ctx.lineTo(px - 3, cy + 5);
+        }
+        ctx.closePath();
+        ctx.fillStyle = accentHex;
+        ctx.fill();
+      }
+
+      const nudgeBadgeText = nudgeFlash
+        ? `NUDGE ${nudgeFlash.deltaMs >= 0 ? '+' : ''}${nudgeFlash.deltaMs}ms · Σ ${nudgeAccumMs >= 0 ? '+' : ''}${nudgeAccumMs.toFixed(0)}ms`
+        : `ALIGN ${nudgeAccumMs >= 0 ? '+' : ''}${nudgeAccumMs.toFixed(0)}ms`;
+      ctx.font = 'bold 8px "JetBrains Mono", monospace';
+      const nbw = ctx.measureText(nudgeBadgeText).width + 10;
+      const nby = isGridEditMode || isScratchMode ? 19 : 3;
+      ctx.fillStyle = 'rgba(9, 11, 16, 0.88)';
+      ctx.fillRect(width - nbw - 4, nby, nbw, 13);
+      ctx.strokeStyle = nudgeFlash ? accentHex : 'rgba(148, 163, 184, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(width - nbw - 4, nby, nbw, 13);
+      ctx.fillStyle = nudgeFlash ? accentHex : '#cbd5e1';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(nudgeBadgeText, width - 9, nby + 6.5);
+    }
+
+    // Camelot Wheel Harmonic Key HUD badge inside top-left of waveform view
+    if (track && (track.camelotKey || track.musicalKey)) {
+      const camelotEntry = getCamelotEntry(track.camelotKey);
+      const keyColor = camelotEntry?.colorHex ?? accentHex;
+      const keyLabel = track.camelotKey
+        ? `${track.camelotKey} · ${track.musicalKey ?? camelotEntry?.musicalKey ?? ''}`
+        : `${track.musicalKey}`;
+
+      const cueOverlapsTopLeft =
+        cueTimeSec !== null &&
+        cueTimeSec >= winStart &&
+        cueTimeSec <= winEnd &&
+        toX(cueTimeSec) < 96;
+      const keyBoxY = cueOverlapsTopLeft ? 17 : 3;
+
+      ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+      const hasMatchDot = Boolean(
+        harmonicCompatibility && harmonicCompatibility.tier !== 'unknown'
+      );
+      const textW = ctx.measureText(keyLabel).width;
+      const boxW = Math.round(textW + (hasMatchDot ? 24 : 15));
+      const boxX = 4;
+
+      ctx.fillStyle = 'rgba(9, 11, 16, 0.90)';
+      ctx.fillRect(boxX, keyBoxY, boxW, 13);
+      ctx.strokeStyle = keyColor;
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(boxX, keyBoxY, boxW, 13);
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = keyColor;
+      ctx.beginPath();
+      ctx.arc(boxX + 6, keyBoxY + 6.5, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#f8fafc';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(keyLabel, boxX + 11, keyBoxY + 6.5);
+
+      if (hasMatchDot && harmonicCompatibility) {
+        ctx.fillStyle = harmonicCompatibility.accentHex;
+        ctx.beginPath();
+        ctx.arc(boxX + boxW - 6, keyBoxY + 6.5, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    const beatPeriod = track ? 60 / Math.max(40, getEffectiveBpm(track)) : 0.5;
+    const pxPerBeat = (beatPeriod / Math.max(0.05, winSpan)) * width;
+    glowLayoutRef.current = {
+      width,
+      height,
+      winStart,
+      winEnd,
+      winSpan,
+      beatPeriod,
+      pxPerBeat,
+      duration: track.duration,
+      isZoom,
+      isGridEditMode,
+      showBeatGrid,
+      beatGridSubdivision,
+      gridPoints,
+      accentHex,
+      hasNudgeActive: Boolean(nudgeFlash || isGridEditMode || Math.abs(nudgeAccumMs) >= 0.5),
+    };
+
     ctx.restore();
   }, [
     track,
@@ -673,6 +1206,14 @@ function TriBandWaveformCanvas({
     showBeatGrid,
     beatGridSubdivision,
     viewMode,
+    effectiveZoomPct,
+    isZoomedView,
+    loopWindowStartSec,
+    loopWindowEndSec,
+    nudgeAccumMs,
+    nudgeFlash,
+    harmonicCompatibility,
+    spectrogramMode,
     isGridEditMode,
     isScratchMode,
     isScratching,
@@ -681,125 +1222,272 @@ function TriBandWaveformCanvas({
     zoomBounds,
   ]);
 
+  const drawGlowOverlay = useCallback(() => {
+    const glowCanvas = glowCanvasRef.current;
+    if (!glowCanvas) return;
+    const layout = glowLayoutRef.current;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const width = glowCanvas.clientWidth || layout?.width || 420;
+    const height = glowCanvas.clientHeight || layout?.height || 68;
+    if (
+      glowCanvas.width !== Math.round(width * dpr) ||
+      glowCanvas.height !== Math.round(height * dpr)
+    ) {
+      glowCanvas.width = Math.round(width * dpr);
+      glowCanvas.height = Math.round(height * dpr);
+    }
+    const gCtx = glowCanvas.getContext('2d');
+    if (!gCtx) return;
+
+    gCtx.save();
+    gCtx.scale(dpr, dpr);
+    gCtx.clearRect(0, 0, width, height);
+
+    if (!layout || !layout.showBeatGrid || layout.gridPoints.length === 0) {
+      gCtx.restore();
+      return;
+    }
+
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const clock = masterBeatClockRef?.current ?? { phase: 0, beatIndex: 0 };
+    const pulse = reducedMotion ? 0.28 : computeMasterBeatGlowPulse(clock.phase);
+    const nudgeBoost = layout.hasNudgeActive ? 1.18 : 1;
+    const downbeatAccent = clock.beatIndex === 0 ? 1.2 : 1;
+
+    const rgbPair =
+      layout.accentHex.toLowerCase() === '#f59e0b'
+        ? { core: '252, 211, 77', halo: '245, 158, 11' }
+        : { core: '103, 232, 249', halo: '34, 211, 238' };
+
+    gCtx.beginPath();
+    gCtx.rect(1, 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    gCtx.clip();
+
+    const toX = (t: number) => ((t - layout.winStart) / layout.winSpan) * width;
+    for (let idx = 0; idx < layout.gridPoints.length; idx++) {
+      const pt = layout.gridPoints[idx];
+      if (pt.timeSec < layout.winStart - layout.beatPeriod || pt.timeSec > layout.winEnd + layout.beatPeriod) {
+        continue;
+      }
+
+      if (layout.beatGridSubdivision > 1 && layout.pxPerBeat >= 20) {
+        for (let sub = 1; sub < layout.beatGridSubdivision; sub++) {
+          const subT = pt.timeSec + (sub / layout.beatGridSubdivision) * layout.beatPeriod;
+          if (subT < layout.winStart || subT > layout.winEnd || subT > layout.duration) continue;
+          const sx = toX(subT);
+          drawPulsingBeatGridGlow(
+            gCtx,
+            sx,
+            height * 0.18,
+            height * 0.68,
+            rgbPair.core,
+            rgbPair.halo,
+            pulse,
+            false,
+            0.34 * nudgeBoost
+          );
+        }
+      }
+
+      const bx = toX(pt.timeSec);
+      if (bx < 0 || bx > width) continue;
+
+      if (pt.isDownbeat) {
+        drawPulsingBeatGridGlow(
+          gCtx,
+          bx,
+          0,
+          height,
+          '253, 224, 71',
+          '250, 204, 21',
+          pulse,
+          true,
+          downbeatAccent * nudgeBoost
+        );
+      } else if (layout.pxPerBeat >= 5) {
+        const y0 = layout.isZoom || layout.isGridEditMode ? 8 : height * 0.72;
+        const hBar = layout.isZoom || layout.isGridEditMode ? height - 8 : height * 0.28;
+        drawPulsingBeatGridGlow(
+          gCtx,
+          bx,
+          y0,
+          hBar,
+          rgbPair.core,
+          rgbPair.halo,
+          pulse,
+          false,
+          0.95 * nudgeBoost
+        );
+      }
+    }
+
+    gCtx.restore();
+  }, [masterBeatClockRef]);
+
+  useEffect(() => {
+    drawGlowOverlay();
+  }, [
+    drawGlowOverlay,
+    track,
+    playheadSec,
+    showBeatGrid,
+    beatGridSubdivision,
+    viewMode,
+    effectiveZoomPct,
+    isGridEditMode,
+    nudgeFlash,
+  ]);
+
+  useEffect(() => {
+    if (!registerBeatPulseDraw) return;
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+    return registerBeatPulseDraw(drawGlowOverlay);
+  }, [drawGlowOverlay, registerBeatPulseDraw]);
+
   const interactiveDragEnabled = Boolean(track && (isGridEditMode || isScratchMode));
+  const useExactTransientSeek = Boolean(
+    isGridEditMode ||
+      freeTransientSeek ||
+      (!syncToBeatGrid && isZoomedView && effectiveZoomPct >= 55)
+  );
+  const snapTargetBeats = gridBeatTimes.length > 0 ? gridBeatTimes : track?.beatTimes ?? [];
 
   return (
-    <canvas
-      ref={canvasRef}
-      onPointerDown={(e) => {
-        if (!interactiveDragEnabled || !track) return;
-        gridDragLastXRef.current = e.clientX;
-        dragLastTimeRef.current = performance.now();
-        gridDragTotalPxRef.current = 0;
-        scratchEngagedRef.current = false;
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        if (!interactiveDragEnabled || !track || gridDragLastXRef.current === null) return;
-        const now = performance.now();
-        const dx = e.clientX - gridDragLastXRef.current;
-        const dtSec = Math.max(0.008, Math.min(0.08, (now - dragLastTimeRef.current) / 1000));
-        gridDragLastXRef.current = e.clientX;
-        dragLastTimeRef.current = now;
-        gridDragTotalPxRef.current += Math.abs(dx);
+    <div className="relative w-full">
+      <canvas
+        ref={canvasRef}
+        onPointerDown={(e) => {
+          if (!interactiveDragEnabled || !track) return;
+          gridDragLastXRef.current = e.clientX;
+          dragLastTimeRef.current = performance.now();
+          gridDragTotalPxRef.current = 0;
+          scratchEngagedRef.current = false;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!interactiveDragEnabled || !track || gridDragLastXRef.current === null) return;
+          const now = performance.now();
+          const dx = e.clientX - gridDragLastXRef.current;
+          const dtSec = Math.max(0.008, Math.min(0.08, (now - dragLastTimeRef.current) / 1000));
+          gridDragLastXRef.current = e.clientX;
+          dragLastTimeRef.current = now;
+          gridDragTotalPxRef.current += Math.abs(dx);
 
-        if (isGridEditMode) {
-          if (track.beatGridLocked || !onDragBeatGridMs || Math.abs(dx) < 0.2) return;
-          const width = e.currentTarget.clientWidth || 420;
-          const winSpan =
-            viewMode === 'zoom'
-              ? Math.max(0.2, zoomBounds.end - zoomBounds.start)
+          if (isGridEditMode) {
+            if (track.beatGridLocked || !onDragBeatGridMs || Math.abs(dx) < 0.2) return;
+            const width = e.currentTarget.clientWidth || 420;
+            const winSpan = isZoomedView
+              ? Math.max(0.15, zoomBounds.end - zoomBounds.start)
               : Math.min(2.4, Math.max(0.4, track.duration * 0.04));
-          const deltaMs = (dx / Math.max(80, width)) * winSpan * 1000;
-          onDragBeatGridMs(deltaMs);
-          return;
-        }
-
-        if (isScratchMode && gridDragTotalPxRef.current >= 3.5) {
-          if (!scratchEngagedRef.current) {
-            scratchEngagedRef.current = true;
-            onScratchStart?.();
+            const deltaMs = (dx / Math.max(80, width)) * winSpan * 1000;
+            onDragBeatGridMs(deltaMs);
+            return;
           }
-          const width = Math.max(120, e.currentTarget.clientWidth || 420);
-          const deltaSec =
-            viewMode === 'zoom'
+
+          if (isScratchMode && gridDragTotalPxRef.current >= 3.5) {
+            if (!scratchEngagedRef.current) {
+              scratchEngagedRef.current = true;
+              onScratchStart?.();
+            }
+            const width = Math.max(120, e.currentTarget.clientWidth || 420);
+            const deltaSec = isZoomedView
               ? -(dx / width) *
-                Math.max(0.9, Math.min(3.5, zoomBounds.end - zoomBounds.start)) *
+                Math.max(0.6, Math.min(3.5, zoomBounds.end - zoomBounds.start)) *
                 (scratchSensitivitySec / 1.8)
               : (dx / width) * scratchSensitivitySec;
-          const velocityRate = deltaSec / dtSec;
-          onScratchMove?.(deltaSec, velocityRate);
-        }
-      }}
-      onPointerUp={(e) => {
-        if (!interactiveDragEnabled) return;
-        const wasScratching = scratchEngagedRef.current;
-        const wasClick = gridDragTotalPxRef.current < 3.5;
-        gridDragLastXRef.current = null;
-        gridDragTotalPxRef.current = 0;
-        scratchEngagedRef.current = false;
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        }
-        if (wasScratching && !isGridEditMode) {
-          onScratchEnd?.();
-          return;
-        }
-        if (wasClick && track) {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-          const rawTime =
-            viewMode === 'zoom'
+            const velocityRate = deltaSec / dtSec;
+            onScratchMove?.(deltaSec, velocityRate);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (!interactiveDragEnabled) return;
+          const wasScratching = scratchEngagedRef.current;
+          const wasClick = gridDragTotalPxRef.current < 3.5;
+          gridDragLastXRef.current = null;
+          gridDragTotalPxRef.current = 0;
+          scratchEngagedRef.current = false;
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+          if (wasScratching && !isGridEditMode) {
+            onScratchEnd?.();
+            return;
+          }
+          if (wasClick && track) {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+            const rawTime = isZoomedView
               ? zoomBounds.start + frac * (zoomBounds.end - zoomBounds.start)
               : frac * track.duration;
-          const clamped = Math.max(0, Math.min(track.duration - 0.05, rawTime));
-          onSeekOrCue(isGridEditMode ? clamped : findNearestBeat(track.beatTimes, clamped));
-        }
-      }}
-      onPointerCancel={() => {
-        const wasScratching = scratchEngagedRef.current;
-        gridDragLastXRef.current = null;
-        gridDragTotalPxRef.current = 0;
-        scratchEngagedRef.current = false;
-        if (wasScratching && !isGridEditMode) {
-          onScratchEnd?.();
-        }
-      }}
-      onClick={(e) => {
-        if (!track || interactiveDragEnabled) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-        const rawTime =
-          viewMode === 'zoom'
+            const clamped = Math.max(0, Math.min(track.duration - 0.05, rawTime));
+            onSeekOrCue(
+              useExactTransientSeek
+                ? Number(clamped.toFixed(3))
+                : findNearestBeat(snapTargetBeats, clamped)
+            );
+          }
+        }}
+        onPointerCancel={() => {
+          const wasScratching = scratchEngagedRef.current;
+          gridDragLastXRef.current = null;
+          gridDragTotalPxRef.current = 0;
+          scratchEngagedRef.current = false;
+          if (wasScratching && !isGridEditMode) {
+            onScratchEnd?.();
+          }
+        }}
+        onClick={(e) => {
+          if (!track || interactiveDragEnabled) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+          const rawTime = isZoomedView
             ? zoomBounds.start + frac * (zoomBounds.end - zoomBounds.start)
             : frac * track.duration;
-        const clamped = Math.max(0, Math.min(track.duration - 0.05, rawTime));
-        const snapped = findNearestBeat(track.beatTimes, clamped);
-        onSeekOrCue(snapped);
-      }}
-      title={
-        !track
-          ? undefined
-          : isGridEditMode
-            ? track.beatGridLocked
-              ? 'Beat grid is locked — unlock in Grid Editor to drag'
-              : 'Drag horizontally to slide beat-grid lines onto audio transients, or click to seek'
-            : isScratchMode
-              ? 'Drag horizontally to vinyl-scratch playback speed (forward & reverse), or click to beat-seek'
-              : 'Click anywhere to snap playhead / cue to nearest beat'
-      }
-      className={`w-full rounded-lg border block touch-none select-none ${
-        isGridEditMode
-          ? track?.beatGridLocked
-            ? 'h-[76px] border-slate-500/40 cursor-not-allowed'
-            : 'h-[76px] border-amber-400/55 ring-1 ring-amber-400/25 cursor-grab active:cursor-grabbing'
-          : isScratchMode && track
-            ? isScratching
-              ? 'h-[68px] border-cyan-400/75 ring-1 ring-cyan-400/40 cursor-grabbing'
-              : 'h-[68px] border-white/[0.1] hover:border-cyan-400/40 cursor-grab active:cursor-grabbing'
-            : 'h-[68px] border-white/[0.08] cursor-pointer'
-      }`}
-    />
+          const clamped = Math.max(0, Math.min(track.duration - 0.05, rawTime));
+          onSeekOrCue(
+            useExactTransientSeek
+              ? Number(clamped.toFixed(3))
+              : findNearestBeat(snapTargetBeats, clamped)
+          );
+        }}
+        title={
+          !track
+            ? undefined
+            : isGridEditMode
+              ? track.beatGridLocked
+                ? 'Beat grid is locked — unlock in Grid Editor to drag'
+                : 'Drag horizontally to slide beat-grid lines onto audio transients, or click to seek'
+              : isScratchMode
+                ? 'Drag horizontally to vinyl-scratch playback speed (forward & reverse), or click to seek'
+                : useExactTransientSeek
+                  ? 'Click anywhere to jump directly to exact millisecond transient (Free Seek)'
+                  : 'Click anywhere to snap playhead / cue to nearest beat'
+        }
+        className={`w-full rounded-lg border block touch-none select-none ${
+          isGridEditMode
+            ? track?.beatGridLocked
+              ? 'h-[86px] border-slate-500/40 cursor-not-allowed'
+              : 'h-[86px] border-amber-400/55 ring-1 ring-amber-400/25 cursor-grab active:cursor-grabbing'
+            : isScratchMode && track
+              ? isScratching
+                ? `${spectrogramMode !== 'off' ? 'h-[82px]' : 'h-[68px]'} border-cyan-400/75 ring-1 ring-cyan-400/40 cursor-grabbing`
+                : `${spectrogramMode !== 'off' ? 'h-[82px]' : 'h-[68px]'} border-white/[0.1] hover:border-cyan-400/40 cursor-grab active:cursor-grabbing`
+              : `${spectrogramMode !== 'off' ? 'h-[82px]' : 'h-[68px]'} border-white/[0.08] cursor-pointer`
+        }`}
+      />
+      <canvas
+        ref={glowCanvasRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 w-full h-full rounded-lg"
+      />
+    </div>
   );
 }
 
@@ -811,6 +1499,10 @@ interface SmartCrossfadeOverlapCanvasProps {
   playheadSec: number;
   showBeatGrid?: boolean;
   beatGridSubdivision?: 1 | 2 | 4;
+  previewHighlight?: { startSec: number; endSec: number; label: string } | null;
+  previewPlayheadSec?: number | null;
+  masterBeatClockRef?: { current: MasterBeatClockState };
+  registerBeatPulseDraw?: (fn: () => void) => () => void;
   onSeekTimeline: (timelineSec: number) => void;
 }
 
@@ -837,9 +1529,28 @@ function SmartCrossfadeOverlapCanvas({
   playheadSec,
   showBeatGrid = true,
   beatGridSubdivision = 2,
+  previewHighlight = null,
+  previewPlayheadSec = null,
+  masterBeatClockRef,
+  registerBeatPulseDraw,
   onSeekTimeline,
 }: SmartCrossfadeOverlapCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glowCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gridA = useMemo(() => (deckA ? getEffectiveBeatGridPoints(deckA) : []), [deckA]);
+  const gridB = useMemo(() => (deckB ? getEffectiveBeatGridPoints(deckB) : []), [deckB]);
+  const glowLayoutRef = useRef<{
+    width: number;
+    height: number;
+    winStart: number;
+    winEnd: number;
+    winSpan: number;
+    showBeatGrid: boolean;
+    beatGridSubdivision: 1 | 2 | 4;
+    deckA: DjTrackAsset;
+    deckB: DjTrackAsset;
+    plan: DjTransitionPlan;
+  } | null>(null);
 
   const windowBounds = useMemo(() => {
     if (!deckA || !deckB || !plan) {
@@ -849,10 +1560,12 @@ function SmartCrossfadeOverlapCanvas({
       return { start: 0, end: Math.max(2, plan.totalDurationSec) };
     }
     const pad = Math.max(3.5, plan.overlapDurationSec * 0.75);
-    const start = Math.max(0, plan.transitionStartSec - pad);
-    const end = Math.min(plan.totalDurationSec, plan.transitionEndSec + pad);
+    const baseStart = Math.max(0, plan.transitionStartSec - pad);
+    const baseEnd = Math.min(plan.totalDurationSec, plan.transitionEndSec + pad);
+    const start = previewHighlight ? Math.min(baseStart, previewHighlight.startSec) : baseStart;
+    const end = previewHighlight ? Math.max(baseEnd, previewHighlight.endSec) : baseEnd;
     return { start, end: Math.max(start + 2, end) };
-  }, [deckA, deckB, plan, zoomMode]);
+  }, [deckA, deckB, plan, previewHighlight, zoomMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1106,6 +1819,53 @@ function SmartCrossfadeOverlapCanvas({
       ctx.fillText(tagText, midTagX, height * 0.5);
     }
 
+    // 5s AI Auto-Mix Preview Window Bracket
+    if (previewHighlight && previewHighlight.endSec > previewHighlight.startSec) {
+      const pvX1 = toX(previewHighlight.startSec);
+      const pvX2 = toX(previewHighlight.endSec);
+      if (pvX2 > 0 && pvX1 < width) {
+        const clampedX1 = Math.max(0, pvX1);
+        const clampedX2 = Math.min(width, pvX2);
+        const pvW = Math.max(2, clampedX2 - clampedX1);
+        ctx.fillStyle = 'rgba(217, 70, 239, 0.09)';
+        ctx.fillRect(clampedX1, 0, pvW, height);
+
+        ctx.fillStyle = 'rgba(232, 121, 249, 0.85)';
+        ctx.fillRect(clampedX1, 0, pvW, 2);
+        ctx.fillRect(clampedX1, height - 2, pvW, 2);
+
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(232, 121, 249, 0.75)';
+        ctx.lineWidth = 1;
+        if (pvX1 >= 0 && pvX1 <= width) {
+          ctx.beginPath();
+          ctx.moveTo(pvX1, 0);
+          ctx.lineTo(pvX1, height);
+          ctx.stroke();
+        }
+        if (pvX2 >= 0 && pvX2 <= width) {
+          ctx.beginPath();
+          ctx.moveTo(pvX2, 0);
+          ctx.lineTo(pvX2, height);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        if (pvW > 88) {
+          const badgeText = `5S PREVIEW · ${previewHighlight.label.slice(0, 18).toUpperCase()}`;
+          const badgeW = Math.min(pvW - 8, 176);
+          ctx.fillStyle = 'rgba(9, 11, 16, 0.9)';
+          ctx.fillRect(clampedX1 + 4, height - 18, badgeW, 14);
+          ctx.fillStyle = '#f0abfc';
+          ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(badgeText, clampedX1 + 8, height - 11);
+        }
+      }
+    }
+
     // Playhead cursor if inside visible window
     if (playheadSec >= winStart && playheadSec <= winEnd) {
       const px = toX(playheadSec);
@@ -1113,22 +1873,210 @@ function SmartCrossfadeOverlapCanvas({
       ctx.fillRect(px - 1, 0, 2, height);
     }
 
+    // Active 5-second Preview Playhead
+    if (
+      typeof previewPlayheadSec === 'number' &&
+      previewPlayheadSec >= winStart &&
+      previewPlayheadSec <= winEnd
+    ) {
+      const pvx = toX(previewPlayheadSec);
+      ctx.fillStyle = '#f0abfc';
+      ctx.fillRect(pvx - 1, 0, 2, height);
+      ctx.beginPath();
+      ctx.moveTo(pvx - 4, 0);
+      ctx.lineTo(pvx + 4, 0);
+      ctx.lineTo(pvx, 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    glowLayoutRef.current = {
+      width,
+      height,
+      winStart,
+      winEnd,
+      winSpan,
+      showBeatGrid,
+      beatGridSubdivision,
+      deckA,
+      deckB,
+      plan,
+    };
+
     ctx.restore();
-  }, [deckA, deckB, plan, playheadSec, showBeatGrid, beatGridSubdivision, windowBounds]);
+  }, [
+    deckA,
+    deckB,
+    plan,
+    playheadSec,
+    previewHighlight,
+    previewPlayheadSec,
+    showBeatGrid,
+    beatGridSubdivision,
+    windowBounds,
+  ]);
+
+  const drawGlowOverlay = useCallback(() => {
+    const glowCanvas = glowCanvasRef.current;
+    if (!glowCanvas) return;
+    const layout = glowLayoutRef.current;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const width = glowCanvas.clientWidth || layout?.width || 720;
+    const height = glowCanvas.clientHeight || layout?.height || 116;
+    if (
+      glowCanvas.width !== Math.round(width * dpr) ||
+      glowCanvas.height !== Math.round(height * dpr)
+    ) {
+      glowCanvas.width = Math.round(width * dpr);
+      glowCanvas.height = Math.round(height * dpr);
+    }
+    const gCtx = glowCanvas.getContext('2d');
+    if (!gCtx) return;
+
+    gCtx.save();
+    gCtx.scale(dpr, dpr);
+    gCtx.clearRect(0, 0, width, height);
+
+    if (!layout || !layout.showBeatGrid) {
+      gCtx.restore();
+      return;
+    }
+
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const clock = masterBeatClockRef?.current ?? { phase: 0, beatIndex: 0 };
+    const pulse = reducedMotion ? 0.28 : computeMasterBeatGlowPulse(clock.phase);
+    const downbeatAccent = clock.beatIndex === 0 ? 1.2 : 1;
+
+    gCtx.beginPath();
+    gCtx.rect(1, 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    gCtx.clip();
+
+    const toX = (t: number) => ((t - layout.winStart) / layout.winSpan) * width;
+    const beatSecA = 60 / Math.max(40, getEffectiveBpm(layout.deckA));
+    const visibleBeatsA: Array<{ t: number; isDown: boolean }> = [];
+
+    for (const pt of gridA) {
+      if (
+        pt.timeSec < layout.winStart - beatSecA ||
+        pt.timeSec > Math.min(layout.winEnd, layout.plan.deckAEndSec)
+      ) {
+        continue;
+      }
+      if (pt.timeSec >= layout.winStart && pt.timeSec <= Math.min(layout.winEnd, layout.plan.deckAEndSec)) {
+        visibleBeatsA.push({ t: pt.timeSec, isDown: pt.isDownbeat });
+        const bx = toX(pt.timeSec);
+        drawPulsingBeatGridGlow(
+          gCtx,
+          bx,
+          pt.isDownbeat ? 15 : 20,
+          height * 0.34,
+          pt.isDownbeat ? '253, 224, 71' : '103, 232, 249',
+          pt.isDownbeat ? '250, 204, 21' : '34, 211, 238',
+          pulse,
+          pt.isDownbeat,
+          pt.isDownbeat ? downbeatAccent : 0.9
+        );
+      }
+    }
+
+    const beatSecBTimeline =
+      60 / Math.max(40, getEffectiveBpm(layout.deckB)) / Math.max(0.5, layout.plan.deckBPlaybackRate);
+    for (const pt of gridB) {
+      if (pt.timeSec < layout.plan.deckBInTime - 0.02) continue;
+      const tlB =
+        layout.plan.deckBTimelineStartSec +
+        (pt.timeSec - layout.plan.deckBInTime) / Math.max(0.5, layout.plan.deckBPlaybackRate);
+      if (tlB < layout.winStart - beatSecBTimeline || tlB > layout.winEnd) continue;
+      if (tlB >= layout.winStart && tlB <= layout.winEnd) {
+        const bx = toX(tlB);
+        let isAligned = false;
+        if (
+          tlB >= layout.plan.transitionStartSec - 0.05 &&
+          tlB <= layout.plan.transitionEndSec + 0.05 &&
+          visibleBeatsA.length > 0
+        ) {
+          let bestDist = Infinity;
+          for (const ba of visibleBeatsA) {
+            const d = Math.abs(ba.t - tlB);
+            if (d < bestDist) bestDist = d;
+          }
+          isAligned = bestDist <= 0.012;
+        }
+
+        drawPulsingBeatGridGlow(
+          gCtx,
+          bx,
+          height * 0.52,
+          height * 0.46,
+          isAligned
+            ? '110, 231, 183'
+            : pt.isDownbeat
+              ? '252, 211, 77'
+              : '253, 186, 116',
+          isAligned
+            ? '52, 211, 153'
+            : pt.isDownbeat
+              ? '251, 191, 36'
+              : '245, 158, 11',
+          pulse,
+          pt.isDownbeat || isAligned,
+          isAligned ? 1.25 : pt.isDownbeat ? downbeatAccent : 0.9
+        );
+
+        if (isAligned) {
+          const midY = height * 0.5;
+          const r = 3 + pulse * 3;
+          const rad = gCtx.createRadialGradient(bx, midY, 0, bx, midY, r * 2);
+          rad.addColorStop(0, `rgba(110, 231, 183, ${(0.55 * pulse).toFixed(3)})`);
+          rad.addColorStop(1, 'rgba(52, 211, 153, 0)');
+          gCtx.fillStyle = rad;
+          gCtx.beginPath();
+          gCtx.arc(bx, midY, r * 2, 0, Math.PI * 2);
+          gCtx.fill();
+        }
+      }
+    }
+
+    gCtx.restore();
+  }, [gridA, gridB, masterBeatClockRef]);
+
+  useEffect(() => {
+    drawGlowOverlay();
+  }, [drawGlowOverlay, deckA, deckB, plan, showBeatGrid, beatGridSubdivision, windowBounds]);
+
+  useEffect(() => {
+    if (!registerBeatPulseDraw) return;
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+    return registerBeatPulseDraw(drawGlowOverlay);
+  }, [drawGlowOverlay, registerBeatPulseDraw]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      onClick={(e) => {
-        if (!deckA || !deckB || !plan) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-        const t = windowBounds.start + frac * (windowBounds.end - windowBounds.start);
-        onSeekTimeline(Math.max(0, Math.min(plan.totalDurationSec, t)));
-      }}
-      title={plan ? 'Click anywhere along the overlap timeline to seek & audition' : undefined}
-      className="w-full h-28 rounded-lg border border-white/[0.08] cursor-pointer block"
-    />
+    <div className="relative w-full">
+      <canvas
+        ref={canvasRef}
+        onClick={(e) => {
+          if (!deckA || !deckB || !plan) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+          const t = windowBounds.start + frac * (windowBounds.end - windowBounds.start);
+          onSeekTimeline(Math.max(0, Math.min(plan.totalDurationSec, t)));
+        }}
+        title={plan ? 'Click anywhere along the overlap timeline to seek & audition' : undefined}
+        className="w-full h-28 rounded-lg border border-white/[0.08] cursor-pointer block"
+      />
+      <canvas
+        ref={glowCanvasRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 w-full h-full rounded-lg"
+      />
+    </div>
   );
 }
 
@@ -1142,6 +2090,8 @@ interface BeatGridPhaseAlignmentCanvasProps {
   showBeatGrid: boolean;
   beatGridSubdivision: 1 | 2 | 4;
   phaseComparison: BeatMatchPhaseComparison | null;
+  masterBeatClockRef?: { current: MasterBeatClockState };
+  registerBeatPulseDraw?: (fn: () => void) => () => void;
   onDragSlipDeckBMs: (deltaMs: number) => void;
 }
 
@@ -1155,9 +2105,26 @@ function BeatGridPhaseAlignmentCanvas({
   showBeatGrid,
   beatGridSubdivision,
   phaseComparison,
+  masterBeatClockRef,
+  registerBeatPulseDraw,
   onDragSlipDeckBMs,
 }: BeatGridPhaseAlignmentCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glowCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glowLayoutRef = useRef<{
+    width: number;
+    height: number;
+    deckA: DjTrackAsset;
+    deckB: DjTrackAsset;
+    timeA: number;
+    timeB: number;
+    safeRateA: number;
+    safeRateB: number;
+    realHalfWinSec: number;
+    showBeatGrid: boolean;
+    beatGridSubdivision: 1 | 2 | 4;
+    phaseComparison: BeatMatchPhaseComparison | null;
+  } | null>(null);
   const dragLastXRef = useRef<number | null>(null);
 
   const gridA = useMemo(() => (deckA ? getEffectiveBeatGridPoints(deckA) : []), [deckA]);
@@ -1403,6 +2370,21 @@ function BeatGridPhaseAlignmentCanvas({
       midStripY + midStripH * 0.5
     );
 
+    glowLayoutRef.current = {
+      width,
+      height,
+      deckA,
+      deckB,
+      timeA,
+      timeB,
+      safeRateA,
+      safeRateB,
+      realHalfWinSec,
+      showBeatGrid,
+      beatGridSubdivision,
+      phaseComparison,
+    };
+
     ctx.restore();
   }, [
     deckA,
@@ -1419,39 +2401,263 @@ function BeatGridPhaseAlignmentCanvas({
     realHalfWinSec,
   ]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      onPointerDown={(e) => {
-        if (!deckA || !deckB) return;
-        dragLastXRef.current = e.clientX;
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        if (dragLastXRef.current === null || !deckA || !deckB) return;
-        const dx = e.clientX - dragLastXRef.current;
-        dragLastXRef.current = e.clientX;
-        if (Math.abs(dx) < 0.25) return;
-        const width = e.currentTarget.clientWidth || 720;
-        const deltaSourceSec = -(dx / Math.max(100, width)) * (2 * realHalfWinSec * Math.max(0.5, rateB));
-        onDragSlipDeckBMs(deltaSourceSec * 1000);
-      }}
-      onPointerUp={(e) => {
-        dragLastXRef.current = null;
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-          e.currentTarget.releasePointerCapture(e.pointerId);
+  const drawGlowOverlay = useCallback(() => {
+    const glowCanvas = glowCanvasRef.current;
+    if (!glowCanvas) return;
+    const layout = glowLayoutRef.current;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const width = glowCanvas.clientWidth || layout?.width || 720;
+    const height = glowCanvas.clientHeight || layout?.height || 144;
+    if (
+      glowCanvas.width !== Math.round(width * dpr) ||
+      glowCanvas.height !== Math.round(height * dpr)
+    ) {
+      glowCanvas.width = Math.round(width * dpr);
+      glowCanvas.height = Math.round(height * dpr);
+    }
+    const gCtx = glowCanvas.getContext('2d');
+    if (!gCtx) return;
+
+    gCtx.save();
+    gCtx.scale(dpr, dpr);
+    gCtx.clearRect(0, 0, width, height);
+
+    if (!layout || !layout.showBeatGrid) {
+      gCtx.restore();
+      return;
+    }
+
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const clock = masterBeatClockRef?.current ?? { phase: 0, beatIndex: 0 };
+    const pulse = reducedMotion ? 0.28 : computeMasterBeatGlowPulse(clock.phase);
+    const downbeatAccent = clock.beatIndex === 0 ? 1.2 : 1;
+
+    gCtx.beginPath();
+    gCtx.rect(1, 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    gCtx.clip();
+
+    const laneAH = 62;
+    const midStripY = 62;
+    const midStripH = 20;
+    const laneBY = 82;
+    const laneBH = 62;
+
+    const winStartA = layout.timeA - layout.realHalfWinSec * layout.safeRateA;
+    const winEndA = layout.timeA + layout.realHalfWinSec * layout.safeRateA;
+    const winStartB = layout.timeB - layout.realHalfWinSec * layout.safeRateB;
+    const winEndB = layout.timeB + layout.realHalfWinSec * layout.safeRateB;
+
+    const toXA = (sourceT: number) =>
+      width * 0.5 +
+      (((sourceT - layout.timeA) / layout.safeRateA) / layout.realHalfWinSec) * (width * 0.5);
+    const toXB = (sourceT: number) =>
+      width * 0.5 +
+      (((sourceT - layout.timeB) / layout.safeRateB) / layout.realHalfWinSec) * (width * 0.5);
+
+    const rawBeatSecA = 60 / Math.max(40, getEffectiveBpm(layout.deckA));
+    const beatPointsA: Array<{ x: number; isDown: boolean }> = [];
+    for (const pt of gridA) {
+      if (pt.timeSec < winStartA - rawBeatSecA || pt.timeSec > winEndA + rawBeatSecA) continue;
+      if (layout.beatGridSubdivision > 1) {
+        for (let sub = 1; sub < layout.beatGridSubdivision; sub++) {
+          const subT = pt.timeSec + (sub / layout.beatGridSubdivision) * rawBeatSecA;
+          if (subT < winStartA || subT > winEndA || subT > layout.deckA.duration) continue;
+          drawPulsingBeatGridGlow(
+            gCtx,
+            toXA(subT),
+            14,
+            laneAH - 14,
+            '103, 232, 249',
+            '34, 211, 238',
+            pulse,
+            false,
+            0.34
+          );
         }
-      }}
-      onPointerCancel={() => {
-        dragLastXRef.current = null;
-      }}
-      title={
-        deckA && deckB
-          ? 'Drag horizontally to micro-align Deck B waveform & beat grid against Deck A'
-          : undefined
       }
-      className="w-full h-36 rounded-lg border border-white/[0.08] cursor-ew-resize block touch-none select-none"
-    />
+      if (pt.timeSec >= winStartA && pt.timeSec <= winEndA) {
+        const x = toXA(pt.timeSec);
+        beatPointsA.push({ x, isDown: pt.isDownbeat });
+        drawPulsingBeatGridGlow(
+          gCtx,
+          x,
+          0,
+          laneAH + 6,
+          pt.isDownbeat ? '253, 224, 71' : '103, 232, 249',
+          pt.isDownbeat ? '250, 204, 21' : '34, 211, 238',
+          pulse,
+          pt.isDownbeat,
+          pt.isDownbeat ? downbeatAccent : 1
+        );
+      }
+    }
+
+    const rawBeatSecB = 60 / Math.max(40, getEffectiveBpm(layout.deckB));
+    const beatPointsB: Array<{ x: number; isDown: boolean }> = [];
+    for (const pt of gridB) {
+      if (pt.timeSec < winStartB - rawBeatSecB || pt.timeSec > winEndB + rawBeatSecB) continue;
+      if (layout.beatGridSubdivision > 1) {
+        for (let sub = 1; sub < layout.beatGridSubdivision; sub++) {
+          const subT = pt.timeSec + (sub / layout.beatGridSubdivision) * rawBeatSecB;
+          if (subT < winStartB || subT > winEndB || subT > layout.deckB.duration) continue;
+          drawPulsingBeatGridGlow(
+            gCtx,
+            toXB(subT),
+            laneBY,
+            laneBH - 14,
+            '253, 186, 116',
+            '245, 158, 11',
+            pulse,
+            false,
+            0.34
+          );
+        }
+      }
+      if (pt.timeSec >= winStartB && pt.timeSec <= winEndB) {
+        const x = toXB(pt.timeSec);
+        beatPointsB.push({ x, isDown: pt.isDownbeat });
+        let isNearAligned = false;
+        for (const ba of beatPointsA) {
+          if (Math.abs(ba.x - x) <= 4) {
+            isNearAligned = true;
+            break;
+          }
+        }
+        drawPulsingBeatGridGlow(
+          gCtx,
+          x,
+          laneBY - 6,
+          laneBH + 6,
+          isNearAligned
+            ? '110, 231, 183'
+            : pt.isDownbeat
+              ? '252, 211, 77'
+              : '253, 186, 116',
+          isNearAligned
+            ? '52, 211, 153'
+            : pt.isDownbeat
+              ? '251, 191, 36'
+              : '245, 158, 11',
+          pulse,
+          pt.isDownbeat || isNearAligned,
+          isNearAligned ? 1.25 : pt.isDownbeat ? downbeatAccent : 1
+        );
+      }
+    }
+
+    // Subtle beat-synced phase lock pulse along center reticle when locked or drifting closely
+    if (layout.phaseComparison?.status === 'locked') {
+      drawPulsingBeatGridGlow(
+        gCtx,
+        width * 0.5,
+        0,
+        height,
+        '110, 231, 183',
+        '52, 211, 153',
+        pulse,
+        true,
+        0.78
+      );
+    } else if (beatPointsB.length > 0 && beatPointsA.length > 0) {
+      // Pulse emerald on any aligned pair bridge inside the center strip
+      for (const ba of beatPointsA) {
+        let nearestB = beatPointsB[0];
+        let minDx = Infinity;
+        for (const bb of beatPointsB) {
+          const d = Math.abs(bb.x - ba.x);
+          if (d < minDx) {
+            minDx = d;
+            nearestB = bb;
+          }
+        }
+        if (minDx <= 4) {
+          drawPulsingBeatGridGlow(
+            gCtx,
+            (ba.x + nearestB.x) * 0.5,
+            midStripY,
+            midStripH,
+            '110, 231, 183',
+            '52, 211, 153',
+            pulse,
+            true,
+            0.9
+          );
+        }
+      }
+    }
+
+    gCtx.restore();
+  }, [gridA, gridB, masterBeatClockRef]);
+
+  useEffect(() => {
+    drawGlowOverlay();
+  }, [
+    drawGlowOverlay,
+    deckA,
+    deckB,
+    timeA,
+    timeB,
+    rateA,
+    rateB,
+    showBeatGrid,
+    beatGridSubdivision,
+    phaseComparison,
+  ]);
+
+  useEffect(() => {
+    if (!registerBeatPulseDraw) return;
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+    return registerBeatPulseDraw(drawGlowOverlay);
+  }, [drawGlowOverlay, registerBeatPulseDraw]);
+
+  return (
+    <div className="relative w-full">
+      <canvas
+        ref={canvasRef}
+        onPointerDown={(e) => {
+          if (!deckA || !deckB) return;
+          dragLastXRef.current = e.clientX;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (dragLastXRef.current === null || !deckA || !deckB) return;
+          const dx = e.clientX - dragLastXRef.current;
+          dragLastXRef.current = e.clientX;
+          if (Math.abs(dx) < 0.25) return;
+          const width = e.currentTarget.clientWidth || 720;
+          const deltaSourceSec =
+            -(dx / Math.max(100, width)) * (2 * realHalfWinSec * Math.max(0.5, rateB));
+          onDragSlipDeckBMs(deltaSourceSec * 1000);
+        }}
+        onPointerUp={(e) => {
+          dragLastXRef.current = null;
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        }}
+        onPointerCancel={() => {
+          dragLastXRef.current = null;
+        }}
+        title={
+          deckA && deckB
+            ? 'Drag horizontally to micro-align Deck B waveform & beat grid against Deck A'
+            : undefined
+        }
+        className="w-full h-36 rounded-lg border border-white/[0.08] cursor-ew-resize block touch-none select-none"
+      />
+      <canvas
+        ref={glowCanvasRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 w-full h-full rounded-lg"
+      />
+    </div>
   );
 }
 
@@ -1526,8 +2732,18 @@ export function DjStudioModal({
   const [activeBpmPreset, setActiveBpmPreset] = useState<DjBpmTimingPreset | null>(null);
   const [showBeatGridOverlay, setShowBeatGridOverlay] = useState(true);
   const [beatGridSubdivision, setBeatGridSubdivision] = useState<1 | 2 | 4>(2);
+  const [spectrogramMode, setSpectrogramMode] = useState<DjSpectrogramMode>('overlay');
   const [deckAWaveformView, setDeckAWaveformView] = useState<'overview' | 'zoom'>('overview');
   const [deckBWaveformView, setDeckBWaveformView] = useState<'overview' | 'zoom'>('overview');
+  const [deckAWaveformZoomPct, setDeckAWaveformZoomPct] = useState(0); // 0 = full overview, 1..100 = granular transient zoom
+  const [deckBWaveformZoomPct, setDeckBWaveformZoomPct] = useState(0);
+  const [deckATransientSeek, setDeckATransientSeek] = useState(false);
+  const [deckBTransientSeek, setDeckBTransientSeek] = useState(false);
+  const [syncToBeatGrid, setSyncToBeatGrid] = useState(true);
+  const [deckANudgeMs, setDeckANudgeMs] = useState(0);
+  const [deckBNudgeMs, setDeckBNudgeMs] = useState(0);
+  const [deckANudgeFlash, setDeckANudgeFlash] = useState<{ deltaMs: number; nonce: number } | null>(null);
+  const [deckBNudgeFlash, setDeckBNudgeFlash] = useState<{ deltaMs: number; nonce: number } | null>(null);
   const [deckAGridEditorOpen, setDeckAGridEditorOpen] = useState(false);
   const [deckBGridEditorOpen, setDeckBGridEditorOpen] = useState(false);
   const [phaseAlignScopeMode, setPhaseAlignScopeMode] = useState<'overlap' | 'live'>('overlap');
@@ -1541,6 +2757,8 @@ export function DjStudioModal({
 
   const [eqA, setEqA] = useState<DjDeckEqSettings>({ ...DEFAULT_DECK_EQ });
   const [eqB, setEqB] = useState<DjDeckEqSettings>({ ...DEFAULT_DECK_EQ });
+  const [eqAAutoXover, setEqAAutoXover] = useState(true);
+  const [eqBAutoXover, setEqBAutoXover] = useState(true);
   const [crossfader, setCrossfader] = useState(0); // -1 Deck A, 0 center, +1 Deck B
   const [masterVolume, setMasterVolume] = useState(0.9);
   const [isMasterMuted, setIsMasterMuted] = useState(false);
@@ -1607,18 +2825,121 @@ export function DjStudioModal({
   const [loopDeckQuantize, setLoopDeckQuantize] = useState(true);
   const [capturedLoop, setCapturedLoop] = useState<CapturedLoopData | null>(null);
 
+  // Master BPM-Synced Filter & FX Rack state
+  const [fxBpmSyncEnabled, setFxBpmSyncEnabled] = useState(true);
+  const [fxBypassed, setFxBypassed] = useState(false);
+  const [fxFilterMode, setFxFilterMode] = useState<'lowpass' | 'highpass'>('lowpass');
+  const [fxFilterLfoBeats, setFxFilterLfoBeats] = useState<FxFilterLfoDivision>(2);
+  const [fxDelayBeats, setFxDelayBeats] = useState<FxDelayDivision>(0.5);
+  const [fxManualDelayMs, setFxManualDelayMs] = useState(320);
+  const [fxGateBeats, setFxGateBeats] = useState<FxGateDivision>(0.5);
+  const [fxTransientFocus, setFxTransientFocus] = useState<TransientFocusMode>('full');
+
+  // AI Auto-Mix Assistant (Energy Match transition suggestions + 5s waveform preview)
+  const [aiAutoMixPreference, setAiAutoMixPreference] = useState<AutoMixPreference>('balanced');
+  const [aiAutoMixLoading, setAiAutoMixLoading] = useState(false);
+  const [aiAutoMixError, setAiAutoMixError] = useState<string | null>(null);
+  const [aiAutoMixResult, setAiAutoMixResult] = useState<AiAutoMixAnalysisResult | null>(null);
+  const [activeAiSuggestionId, setActiveAiSuggestionId] = useState<string | null>(null);
+  const [aiTransitionPreview, setAiTransitionPreview] = useState<DjTransitionPreviewRender | null>(null);
+  const [isPreviewRendering, setIsPreviewRendering] = useState(false);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [previewTimeSec, setPreviewTimeSec] = useState(0);
+  const [previewLoop, setPreviewLoop] = useState(true);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Master Output Brick-Wall Limiter & Auto Peak-Gain state
+  const [limiterEnabled, setLimiterEnabled] = useState(true);
+  const [limiterAutoGainEnabled, setLimiterAutoGainEnabled] = useState(true);
+  const [limiterCeilingDb, setLimiterCeilingDb] = useState<number>(-0.3);
+  const [limiterReleaseSec, setLimiterReleaseSec] = useState<number>(0.08);
+  const [limiterPeakResetNonce, setLimiterPeakResetNonce] = useState(0);
+
+  // DJ Tap Tempo & Last-5 Session BPM Log state
+  const [tapTempoBpm, setTapTempoBpm] = useState<number | null>(null);
+  const [tapTempoCount, setTapTempoCount] = useState(0);
+  const [tapPulseFlash, setTapPulseFlash] = useState(false);
+  const [tapBpmHistory, setTapBpmHistory] = useState<DjTapBpmLogEntry[]>([]);
+
+  // One-Shot BPM-Quantized Sampler Deck state
+  const [samplerPads, setSamplerPads] = useState<SamplerPadData[]>(() =>
+    createInitialSamplerPads()
+  );
+  const [samplerQuantize, setSamplerQuantize] = useState<SamplerQuantizeMode>(0.25);
+  const [samplerMasterVolume, setSamplerMasterVolume] = useState(0.95);
+  const [samplerChokeMode, setSamplerChokeMode] = useState(false);
+  const [samplerRecordSource, setSamplerRecordSource] = useState<SamplerRecordSource>('mic');
+  const [samplerRecordingPadId, setSamplerRecordingPadId] = useState<string | null>(null);
+  const [samplerRecordElapsedSec, setSamplerRecordElapsedSec] = useState(0);
+  const [samplerMicLevel, setSamplerMicLevel] = useState(0);
+  const [samplerPadQueuedState, setSamplerPadQueuedState] = useState<Record<string, boolean>>({});
+  const [samplerPadPlayingState, setSamplerPadPlayingState] = useState<Record<string, boolean>>({});
+  const [editingSamplerPadId, setEditingSamplerPadId] = useState<string | null>(null);
+  const [editingSamplerPadName, setEditingSamplerPadName] = useState('');
+  const [samplerKeyTriggersEnabled, setSamplerKeyTriggersEnabled] = useState(true);
+
+  const [showDeckVisualizers, setShowDeckVisualizers] = useState(true);
+  const [deckVisualizerTintMode, setDeckVisualizerTintMode] = useState<'deck-accent' | 'studio'>(
+    'deck-accent'
+  );
+
   // DOM & WebAudio Refs
   const deckAInputRef = useRef<HTMLInputElement | null>(null);
   const deckBInputRef = useRef<HTMLInputElement | null>(null);
   const crateInputRef = useRef<HTMLInputElement | null>(null);
+  const samplerPadInputRef = useRef<HTMLInputElement | null>(null);
+  const samplerTargetUploadPadIdRef = useRef<string | null>(null);
   const sidebarAudioInputRef = useRef<HTMLInputElement | null>(null);
   const deckALyricInputRef = useRef<HTMLInputElement | null>(null);
   const deckBLyricInputRef = useRef<HTMLInputElement | null>(null);
   const stageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const deckACanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const deckBCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const deckALowBarRef = useRef<HTMLDivElement | null>(null);
+  const deckAMidBarRef = useRef<HTMLDivElement | null>(null);
+  const deckAHighBarRef = useRef<HTMLDivElement | null>(null);
+  const deckAMonitorModeRef = useRef<HTMLSpanElement | null>(null);
+  const deckABeatBurstTextRef = useRef<HTMLSpanElement | null>(null);
+  const deckABeatBorderRef = useRef<HTMLDivElement | null>(null);
+  const deckBLowBarRef = useRef<HTMLDivElement | null>(null);
+  const deckBMidBarRef = useRef<HTMLDivElement | null>(null);
+  const deckBHighBarRef = useRef<HTMLDivElement | null>(null);
+  const deckBMonitorModeRef = useRef<HTMLSpanElement | null>(null);
+  const deckBBeatBurstTextRef = useRef<HTMLSpanElement | null>(null);
+  const deckBBeatBorderRef = useRef<HTMLDivElement | null>(null);
   const beatMeterBarRef = useRef<HTMLDivElement | null>(null);
   const loopPlayheadBarRef = useRef<HTMLDivElement | null>(null);
+  const limiterPreBarRef = useRef<HTMLDivElement | null>(null);
+  const limiterOutBarRef = useRef<HTMLDivElement | null>(null);
+  const limiterGrBarRef = useRef<HTMLDivElement | null>(null);
+  const limiterStackPeakTextRef = useRef<HTMLSpanElement | null>(null);
+  const limiterAutoGainTextRef = useRef<HTMLSpanElement | null>(null);
+  const limiterGrTextRef = useRef<HTMLSpanElement | null>(null);
+  const limiterOutTextRef = useRef<HTMLSpanElement | null>(null);
+  const limiterStatusBadgeRef = useRef<HTMLSpanElement | null>(null);
+  const mixerLimiterLedBarRef = useRef<HTMLDivElement | null>(null);
+  const mixerLimiterStatusRef = useRef<HTMLSpanElement | null>(null);
+  const transientAttackBarRef = useRef<HTMLDivElement | null>(null);
+  const transientSustainBarRef = useRef<HTMLDivElement | null>(null);
+  const transientAttackTextRef = useRef<HTMLSpanElement | null>(null);
+  const transientSustainTextRef = useRef<HTMLSpanElement | null>(null);
+  const noiseGateBadgeRef = useRef<HTMLSpanElement | null>(null);
+  const noiseGateGrBarRef = useRef<HTMLDivElement | null>(null);
 
   const sessionUrlsRef = useRef<Set<string>>(new Set());
+  const fxRackRef = useRef<LiveMasterFxNodes | null>(null);
+  const masterLimiterNodesRef = useRef<LiveMasterLimiterNodes | null>(null);
+  const loudestStackPeakRef = useRef(0);
+  const lastAutoTrimGainRef = useRef(1);
+  const lastLimiterMeterUpdateMsRef = useRef(0);
+  const limiterEnabledRef = useRef(limiterEnabled);
+  limiterEnabledRef.current = limiterEnabled;
+  const limiterAutoGainEnabledRef = useRef(limiterAutoGainEnabled);
+  limiterAutoGainEnabledRef.current = limiterAutoGainEnabled;
+  const limiterCeilingDbRef = useRef(limiterCeilingDb);
+  limiterCeilingDbRef.current = limiterCeilingDb;
+  const limiterReleaseSecRef = useRef(limiterReleaseSec);
+  limiterReleaseSecRef.current = limiterReleaseSec;
   const masterGainRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const beatAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -1634,10 +2955,49 @@ export function DjStudioModal({
   const autoSetStartPerfRef = useRef(0);
   const autoSetStartOffsetRef = useRef(0);
   const autoSetVideoResolverRef = useRef<MixVideoFrameResolver | null>(null);
+  const previewSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const previewStartPerfRef = useRef(0);
+  const previewStartOffsetRef = useRef(0);
+  const previewRenderSeqRef = useRef(0);
+  const masterBeatClockRef = useRef<MasterBeatClockState>({ phase: 0, beatIndex: 0 });
+  const beatGridGlowSubscribersRef = useRef<Set<() => void>>(new Set());
+  const registerBeatPulseDraw = useCallback((fn: () => void) => {
+    beatGridGlowSubscribersRef.current.add(fn);
+    return () => {
+      beatGridGlowSubscribersRef.current.delete(fn);
+    };
+  }, []);
   const offlineSetAnalyzerRef = useRef<OfflineAudioAnalyzer | null>(null);
+  const deckAOfflineAnalyzerRef = useRef<OfflineAudioAnalyzer | null>(null);
+  const deckBOfflineAnalyzerRef = useRef<OfflineAudioAnalyzer | null>(null);
+  const deckAOfflineBeatTrackerRef = useRef<OfflineLowPassBeatTracker | null>(null);
+  const deckBOfflineBeatTrackerRef = useRef<OfflineLowPassBeatTracker | null>(null);
+  const tapSamplesRef = useRef<TapSample[]>([]);
+  const tapResetTimerRef = useRef<number | null>(null);
+  const tapPulseTimerRef = useRef<number | null>(null);
+  const tapSequenceIdRef = useRef<string>('');
+  const nudgeFlashTimerRef = useRef<{ A: number | null; B: number | null }>({ A: null, B: null });
+  const samplerPadsRef = useRef<SamplerPadData[]>(samplerPads);
+  samplerPadsRef.current = samplerPads;
+  const samplerMasterVolumeRef = useRef(samplerMasterVolume);
+  samplerMasterVolumeRef.current = samplerMasterVolume;
+  const samplerActiveVoicesRef = useRef<
+    { padId: string; source: AudioBufferSourceNode; gainNode: GainNode }[]
+  >([]);
+  const samplerTimersRef = useRef<number[]>([]);
+  const samplerRecorderRef = useRef<MediaRecorder | null>(null);
+  const samplerMicStreamRef = useRef<MediaStream | null>(null);
+  const samplerRecordIntervalRef = useRef<number | null>(null);
+  const samplerRecordAutoStopRef = useRef<number | null>(null);
+  const samplerMicMeterRafRef = useRef<number | null>(null);
+  const samplerMicMeterCleanupRef = useRef<(() => void) | null>(null);
+  const samplerStarterLoadedRef = useRef(false);
+  const masterStreamDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
   // Visualizer & canvas state refs
   const particlesRef = useRef<Particle[]>([]);
+  const deckAParticlesRef = useRef<Particle[]>([]);
+  const deckBParticlesRef = useRef<Particle[]>([]);
   const motionBlurRef = useRef<MotionBlurState>({ canvas: null, hasFrame: false });
   const sceneTransRef = useRef<SceneTransitionState>({
     activeMode: null,
@@ -1645,9 +3005,29 @@ export function DjStudioModal({
     elapsed: 0,
     duration: 0.45,
   });
+  const deckASceneTransRef = useRef<SceneTransitionState>({
+    activeMode: null,
+    fromMode: null,
+    elapsed: 0,
+    duration: 0.45,
+  });
+  const deckBSceneTransRef = useRef<SceneTransitionState>({
+    activeMode: null,
+    fromMode: null,
+    elapsed: 0,
+    duration: 0.45,
+  });
   const prevVisualizerModeRef = useRef(settings.visualizerMode);
   const beatStateRef = useRef<BeatState>(createInitialBeatState());
+  const deckABeatStateRef = useRef<BeatState>(createInitialBeatState());
+  const deckBBeatStateRef = useRef<BeatState>(createInitialBeatState());
   const albumRotRef = useRef<{ angle: number }>({ angle: 0 });
+  const deckAAlbumRotRef = useRef<{ angle: number }>({ angle: 0 });
+  const deckBAlbumRotRef = useRef<{ angle: number }>({ angle: 0 });
+  const showDeckVisualizersRef = useRef(showDeckVisualizers);
+  showDeckVisualizersRef.current = showDeckVisualizers;
+  const deckVisualizerTintModeRef = useRef(deckVisualizerTintMode);
+  deckVisualizerTintModeRef.current = deckVisualizerTintMode;
 
   const deckATrack = useMemo(
     () => crate.find((t) => t.id === deckATrackId) ?? null,
@@ -1657,6 +3037,39 @@ export function DjStudioModal({
     () => crate.find((t) => t.id === deckBTrackId) ?? null,
     [crate, deckBTrackId]
   );
+
+  // Prepare per-deck offline spectral & beat trackers when tracks load (for Auto-Mix pre-fader monitoring)
+  useEffect(() => {
+    deckABeatStateRef.current = createInitialBeatState();
+    deckAParticlesRef.current = [];
+    if (!deckATrack?.audioBuffer) {
+      deckAOfflineAnalyzerRef.current = null;
+      deckAOfflineBeatTrackerRef.current = null;
+      return;
+    }
+    deckAOfflineAnalyzerRef.current = new OfflineAudioAnalyzer(deckATrack.audioBuffer, 2048);
+    deckAOfflineBeatTrackerRef.current = new OfflineLowPassBeatTracker(
+      deckATrack.audioBuffer,
+      140,
+      1.2
+    );
+  }, [deckATrack]);
+
+  useEffect(() => {
+    deckBBeatStateRef.current = createInitialBeatState();
+    deckBParticlesRef.current = [];
+    if (!deckBTrack?.audioBuffer) {
+      deckBOfflineAnalyzerRef.current = null;
+      deckBOfflineBeatTrackerRef.current = null;
+      return;
+    }
+    deckBOfflineAnalyzerRef.current = new OfflineAudioAnalyzer(deckBTrack.audioBuffer, 2048);
+    deckBOfflineBeatTrackerRef.current = new OfflineLowPassBeatTracker(
+      deckBTrack.audioBuffer,
+      140,
+      1.2
+    );
+  }, [deckBTrack]);
 
   // Keep reactive refs for 60fps animation loop
   const isOpenRef = useRef(isOpen);
@@ -1681,6 +3094,12 @@ export function DjStudioModal({
   renderedScheduleRef.current = renderedSchedule;
   const loopAutoSetRef = useRef(loopAutoSet);
   loopAutoSetRef.current = loopAutoSet;
+  const aiTransitionPreviewRef = useRef(aiTransitionPreview);
+  aiTransitionPreviewRef.current = aiTransitionPreview;
+  const isPreviewPlayingRef = useRef(isPreviewPlaying);
+  isPreviewPlayingRef.current = isPreviewPlaying;
+  const previewLoopRef = useRef(previewLoop);
+  previewLoopRef.current = previewLoop;
   const crossfaderRef = useRef(crossfader);
   crossfaderRef.current = crossfader;
   const deckAPlayingRef = useRef(deckAPlaying);
@@ -1689,6 +3108,10 @@ export function DjStudioModal({
   deckBPlayingRef.current = deckBPlaying;
   const deckATimeRef = useRef(deckATime);
   deckATimeRef.current = deckATime;
+  const deckAPitchPctRef = useRef(deckAPitchPct);
+  deckAPitchPctRef.current = deckAPitchPct;
+  const deckBPitchPctRef = useRef(deckBPitchPct);
+  deckBPitchPctRef.current = deckBPitchPct;
   const deckBTimeRef = useRef(deckBTime);
   deckBTimeRef.current = deckBTime;
   const deckAScratchingRef = useRef(deckAScratching);
@@ -1800,6 +3223,16 @@ export function DjStudioModal({
     [deckBPitchPct, deckBTime, deckBTrack]
   );
 
+  const harmonicComparison = useMemo(
+    () => evaluateHarmonicCompatibility(deckATrack?.camelotKey, deckBTrack?.camelotKey),
+    [deckATrack?.camelotKey, deckBTrack?.camelotKey]
+  );
+
+  const deckACompatibleKeys = useMemo(
+    () => getCompatibleCamelotKeys(deckATrack?.camelotKey),
+    [deckATrack?.camelotKey]
+  );
+
   const lastDragLiveRestartMsRef = useRef(0);
 
   const stopDeckChain = useCallback((deck: 'A' | 'B') => {
@@ -1824,6 +3257,36 @@ export function DjStudioModal({
           chain.source.disconnect();
         } catch {
           // ignore stopped source
+        }
+      }
+      if (chain.sourceGain) {
+        try {
+          chain.sourceGain.disconnect();
+        } catch {
+          // ignore
+        }
+      }
+      const nodesToDisconnect: AudioNode[] = [
+        chain.lowEq,
+        chain.midEq,
+        chain.highEq,
+        chain.sweepFilter,
+        chain.trimGain,
+        chain.delayDry,
+        chain.delayNode,
+        chain.delayFeedback,
+        chain.delayWet,
+        chain.preFaderMonitorGain,
+        chain.analyser,
+        chain.beatLowPass,
+        chain.beatAnalyser,
+        chain.crossfadeGain,
+      ];
+      for (const node of nodesToDisconnect) {
+        try {
+          node.disconnect();
+        } catch {
+          // ignore
         }
       }
       ref.current = null;
@@ -1853,6 +3316,20 @@ export function DjStudioModal({
     setIsAutoSetPlaying(false);
   }, []);
 
+  const stopTransitionPreviewPlayback = useCallback(() => {
+    if (previewSourceRef.current) {
+      try {
+        previewSourceRef.current.onended = null;
+        previewSourceRef.current.stop();
+        previewSourceRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      previewSourceRef.current = null;
+    }
+    setIsPreviewPlaying(false);
+  }, []);
+
   const stopLoopDeckPlayback = useCallback(() => {
     const chain = loopDeckChainRef.current;
     if (chain) {
@@ -1871,23 +3348,304 @@ export function DjStudioModal({
     }
   }, []);
 
+  const stopAllSamplerVoices = useCallback(() => {
+    samplerTimersRef.current.forEach((tid) => window.clearTimeout(tid));
+    samplerTimersRef.current = [];
+    samplerActiveVoicesRef.current.forEach((v) => {
+      try {
+        v.source.onended = null;
+        v.source.stop();
+        v.source.disconnect();
+        v.gainNode.disconnect();
+      } catch {
+        // ignore already stopped voice
+      }
+    });
+    samplerActiveVoicesRef.current = [];
+    setSamplerPadQueuedState({});
+    setSamplerPadPlayingState({});
+  }, []);
+
   const stopAllDjPlayback = useCallback(() => {
     stopDeckChain('A');
     stopDeckChain('B');
     stopAutoSetPlayback();
+    stopTransitionPreviewPlayback();
     stopLoopDeckPlayback();
-  }, [stopAutoSetPlayback, stopDeckChain, stopLoopDeckPlayback]);
+    stopAllSamplerVoices();
+  }, [
+    stopAllSamplerVoices,
+    stopAutoSetPlayback,
+    stopDeckChain,
+    stopLoopDeckPlayback,
+    stopTransitionPreviewPlayback,
+  ]);
 
-  // Ensure shared master WebAudio bus exists
+  // Live detected master BPM (follows active playing deck + live pitch, or Auto-Mix segment BPM)
+  const detectedMasterBpm = useMemo(() => {
+    if (isAutoSetPlaying && renderedSchedule && renderedSchedule.segments.length > 0) {
+      const activeSeg =
+        renderedSchedule.segments.find((seg) => {
+          const segEnd =
+            seg.timelineStartSec +
+            seg.sourcePlayDurationSec / Math.max(0.25, seg.playbackRate || 1);
+          return autoSetTime >= seg.timelineStartSec && autoSetTime <= segEnd;
+        }) ?? renderedSchedule.segments[0];
+      if (activeSeg?.targetBpm) {
+        return Math.max(40, Math.min(240, activeSeg.targetBpm));
+      }
+    }
+    const liveA = deckAPlaying || deckAScratching;
+    const liveB = deckBPlaying || deckBScratching;
+    if (liveB && !liveA && deckBTrack) {
+      return Math.max(40, Math.min(240, getEffectiveBpm(deckBTrack) * (1 + deckBPitchPct / 100)));
+    }
+    if (crossfader > 0.35 && liveB && deckBTrack) {
+      return Math.max(40, Math.min(240, getEffectiveBpm(deckBTrack) * (1 + deckBPitchPct / 100)));
+    }
+    if (deckATrack) {
+      return Math.max(40, Math.min(240, getEffectiveBpm(deckATrack) * (1 + deckAPitchPct / 100)));
+    }
+    if (deckBTrack) {
+      return Math.max(40, Math.min(240, getEffectiveBpm(deckBTrack) * (1 + deckBPitchPct / 100)));
+    }
+    return 120;
+  }, [
+    autoSetTime,
+    crossfader,
+    deckAPitchPct,
+    deckAPlaying,
+    deckAScratching,
+    deckATrack,
+    deckBPitchPct,
+    deckBPlaying,
+    deckBScratching,
+    deckBTrack,
+    isAutoSetPlaying,
+    renderedSchedule,
+  ]);
+  const detectedMasterBpmRef = useRef(detectedMasterBpm);
+  detectedMasterBpmRef.current = detectedMasterBpm;
+
+  const fxFilterCutoff = settings.djFilterCutoff ?? 1;
+  const fxFilterResonance = settings.djFilterResonance ?? 1.6;
+  const fxAutoFilterDepth = settings.djAutoFilterDepth ?? 0;
+  const fxDelayMix = settings.djDelayMix ?? 0;
+  const fxDelayFeedback = settings.djDelayFeedback ?? 0.38;
+  const fxBeatGateDepth = settings.djBeatGateDepth ?? 0;
+  const fxTransientAttack = settings.djTransientAttack ?? 0;
+  const fxTransientSustain = settings.djTransientSustain ?? 0;
+  const fxTransientDither = settings.djTransientDither ?? 0;
+  const fxNoiseGateThreshold = settings.djNoiseGateThreshold ?? -80;
+
+  const transientCurve = useMemo(
+    () => buildTransientEnvelopeCurvePoints(fxTransientAttack, fxTransientSustain, 60),
+    [fxTransientAttack, fxTransientSustain]
+  );
+
+  const computedFxDelaySec = useMemo(
+    () =>
+      fxBpmSyncEnabled
+        ? Math.min(1.9, Math.max(0.05, (60 / detectedMasterBpm) * fxDelayBeats))
+        : Math.min(1.9, Math.max(0.05, fxManualDelayMs / 1000)),
+    [detectedMasterBpm, fxBpmSyncEnabled, fxDelayBeats, fxManualDelayMs]
+  );
+
+  // Scan loaded buffers in the mix stack to estimate peak headroom before/during overlap
+  const deckABufferPeak = useMemo(
+    () => scanAudioBufferPeakLinear(deckATrack?.audioBuffer),
+    [deckATrack]
+  );
+  const deckBBufferPeak = useMemo(
+    () => scanAudioBufferPeakLinear(deckBTrack?.audioBuffer),
+    [deckBTrack]
+  );
+  const loopBufferPeak = useMemo(
+    () => scanAudioBufferPeakLinear(capturedLoop?.audioBuffer),
+    [capturedLoop]
+  );
+  const renderedSetBufferPeak = useMemo(
+    () => scanAudioBufferPeakLinear(renderedMixBuffer),
+    [renderedMixBuffer]
+  );
+
+  const mixStackBaselinePeak = useMemo(() => {
+    const t = (Math.max(-1, Math.min(1, crossfader)) + 1) * 0.5;
+    const xA = Math.cos(t * Math.PI * 0.5);
+    const xB = Math.sin(t * Math.PI * 0.5);
+
+    const boostDbA = Math.max(0, eqA.lowGainDb, eqA.midGainDb, eqA.highGainDb);
+    const boostDbB = Math.max(0, eqB.lowGainDb, eqB.midGainDb, eqB.highGainDb);
+    const estA =
+      deckATrack && deckABufferPeak > 0
+        ? deckABufferPeak * eqA.trimGain * xA * Math.pow(10, boostDbA / 32)
+        : 0;
+    const estB =
+      deckBTrack && deckBBufferPeak > 0
+        ? deckBBufferPeak * eqB.trimGain * xB * Math.pow(10, boostDbB / 32)
+        : 0;
+    const estLoop =
+      capturedLoop && loopDeckPlaying && loopBufferPeak > 0
+        ? loopBufferPeak * loopDeckVolume
+        : 0;
+    const fxHeadroomFactor =
+      1 +
+      Math.max(0, fxDelayMix) * 0.35 +
+      Math.max(0, (fxFilterResonance - 1.6) / 24);
+    const liveStack = (estA + estB + estLoop) * fxHeadroomFactor * (isMasterMuted ? 0 : masterVolume);
+    const autoSetStack =
+      isAutoSetPlaying && renderedSetBufferPeak > 0
+        ? renderedSetBufferPeak * (isMasterMuted ? 0 : masterVolume)
+        : 0;
+    return Math.max(liveStack, autoSetStack, renderedSetBufferPeak > 0 ? renderedSetBufferPeak * masterVolume : 0);
+  }, [
+    capturedLoop,
+    crossfader,
+    deckABufferPeak,
+    deckATrack,
+    deckBBufferPeak,
+    deckBTrack,
+    eqA.highGainDb,
+    eqA.lowGainDb,
+    eqA.midGainDb,
+    eqA.trimGain,
+    eqB.highGainDb,
+    eqB.lowGainDb,
+    eqB.midGainDb,
+    eqB.trimGain,
+    fxDelayMix,
+    fxFilterResonance,
+    isAutoSetPlaying,
+    isMasterMuted,
+    loopBufferPeak,
+    loopDeckPlaying,
+    loopDeckVolume,
+    masterVolume,
+    renderedSetBufferPeak,
+  ]);
+
+  // Seed loudest stack peak when tracks change or user triggers recalibration
+  useEffect(() => {
+    loudestStackPeakRef.current = mixStackBaselinePeak;
+  }, [deckATrackId, deckBTrackId, limiterPeakResetNonce]);
+
+  useEffect(() => {
+    if (mixStackBaselinePeak > loudestStackPeakRef.current) {
+      loudestStackPeakRef.current = mixStackBaselinePeak;
+    }
+  }, [mixStackBaselinePeak]);
+
+  // Ensure shared master WebAudio bus + BPM-synced Master Filter & FX Rack + Brick-Wall Limiter exist
   const ensureMasterBus = useCallback(async () => {
     const ctx = await ensureAudioContext();
     if (!ctx) return null;
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
-    if (!masterGainRef.current || masterGainRef.current.context !== ctx) {
+    if (
+      !masterGainRef.current ||
+      !fxRackRef.current ||
+      !masterLimiterNodesRef.current ||
+      masterGainRef.current.context !== ctx
+    ) {
+      fxRackRef.current?.transientShaper.dispose();
+      fxRackRef.current?.noiseGate.dispose();
+      const inputBus = ctx.createGain();
+      inputBus.gain.value = 1;
+
+      const noiseGate = createLiveNoiseGate(ctx);
+      noiseGate.setParams({
+        thresholdDb: settingsRef.current.djNoiseGateThreshold ?? -80,
+        bypassed: fxBypassed,
+      });
+
+      const transientShaper = createLiveTransientShaper(ctx);
+      transientShaper.setParams({
+        attack: settingsRef.current.djTransientAttack ?? 0,
+        sustain: settingsRef.current.djTransientSustain ?? 0,
+        dither: settingsRef.current.djTransientDither ?? 0,
+        focus: fxTransientFocus,
+        bypassed: fxBypassed,
+      });
+
+      const sweepFilter = ctx.createBiquadFilter();
+      sweepFilter.type = 'lowpass';
+      sweepFilter.frequency.value = 18000;
+      sweepFilter.Q.value = 1.6;
+
+      const filterLfoOsc = ctx.createOscillator();
+      filterLfoOsc.type = 'sine';
+      filterLfoOsc.frequency.value = 1;
+      const filterLfoGain = ctx.createGain();
+      filterLfoGain.gain.value = 0;
+      filterLfoOsc.connect(filterLfoGain);
+      filterLfoGain.connect(sweepFilter.detune);
+      filterLfoOsc.start();
+
+      const dryGain = ctx.createGain();
+      dryGain.gain.value = 1;
+
+      // Warm Stereo Ping-Pong Delay Loop
+      const delayDampFilter = ctx.createBiquadFilter();
+      delayDampFilter.type = 'lowpass';
+      delayDampFilter.frequency.value = 4200;
+      delayDampFilter.Q.value = 0.7;
+
+      const delayLeft = ctx.createDelay(2.0);
+      delayLeft.delayTime.value = 0.25;
+      const delayRight = ctx.createDelay(2.0);
+      delayRight.delayTime.value = 0.25;
+
+      const delayPanLeft = ctx.createStereoPanner();
+      delayPanLeft.pan.value = -0.65;
+      const delayPanRight = ctx.createStereoPanner();
+      delayPanRight.pan.value = 0.65;
+
+      const delayFeedbackGain = ctx.createGain();
+      delayFeedbackGain.gain.value = 0.38;
+      const delayWetGain = ctx.createGain();
+      delayWetGain.gain.value = 0;
+
+      // BPM Beat Gate / Pump stage
+      const gateGain = ctx.createGain();
+      gateGain.gain.value = 1;
+      const gateLfoOsc = ctx.createOscillator();
+      gateLfoOsc.type = 'triangle';
+      gateLfoOsc.frequency.value = 2;
+      const gateLfoGain = ctx.createGain();
+      gateLfoGain.gain.value = 0;
+      gateLfoOsc.connect(gateLfoGain);
+      gateLfoGain.connect(gateGain.gain);
+      gateLfoOsc.start();
+
       const master = ctx.createGain();
       master.gain.value = isMasterMuted ? 0 : masterVolume;
+
+      // Pre-Limiter Analyser (measures raw mix stack peak before auto-gain & brick-wall stage)
+      const preLimiterAnalyser = ctx.createAnalyser();
+      preLimiterAnalyser.fftSize = 2048;
+      preLimiterAnalyser.smoothingTimeConstant = 0.1;
+
+      // Automatic Peak-Calibrated Trim Gain
+      const autoTrimGain = ctx.createGain();
+      autoTrimGain.gain.value = 1;
+
+      // Brick-Wall Master Limiter (20:1 hard-knee compressor + 4x oversampled ceiling clipper)
+      const ceilingLinear = Math.pow(10, limiterCeilingDbRef.current / 20);
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = limiterEnabledRef.current
+        ? Math.max(-24, limiterCeilingDbRef.current - 0.6)
+        : 0;
+      compressor.knee.value = 0;
+      compressor.ratio.value = limiterEnabledRef.current ? 20 : 1;
+      compressor.attack.value = 0.001;
+      compressor.release.value = limiterReleaseSecRef.current;
+
+      const clipper = ctx.createWaveShaper();
+      clipper.oversample = '4x';
+      clipper.curve = limiterEnabledRef.current
+        ? createBrickWallClipperCurve(ceilingLinear)
+        : null;
 
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
@@ -1902,16 +3660,71 @@ export function DjStudioModal({
       beatAnalyser.fftSize = 2048;
       beatAnalyser.smoothingTimeConstant = 0.2;
 
-      master.connect(analyser);
-      analyser.connect(ctx.destination);
-      master.connect(lowPass);
-      lowPass.connect(beatAnalyser);
+      // Signal routing: Input -> Noise Gate -> Transient Shaper -> Sweep Filter -> Dry + Ping-Pong Delay -> Gate -> Master
+      inputBus.connect(noiseGate.input);
+      noiseGate.output.connect(transientShaper.input);
+      transientShaper.output.connect(sweepFilter);
+      sweepFilter.connect(dryGain);
+      dryGain.connect(gateGain);
 
+      sweepFilter.connect(delayDampFilter);
+      delayDampFilter.connect(delayLeft);
+      delayLeft.connect(delayRight);
+      delayLeft.connect(delayPanLeft);
+      delayRight.connect(delayPanRight);
+      delayPanLeft.connect(delayWetGain);
+      delayPanRight.connect(delayWetGain);
+      delayRight.connect(delayFeedbackGain);
+      delayFeedbackGain.connect(delayDampFilter);
+      delayWetGain.connect(gateGain);
+
+      gateGain.connect(master);
+      master.connect(preLimiterAnalyser);
+      preLimiterAnalyser.connect(autoTrimGain);
+      autoTrimGain.connect(compressor);
+      compressor.connect(clipper);
+      clipper.connect(analyser);
+      analyser.connect(ctx.destination);
+      clipper.connect(lowPass);
+      lowPass.connect(beatAnalyser);
+      if (typeof ctx.createMediaStreamDestination === 'function') {
+        const streamDest = ctx.createMediaStreamDestination();
+        clipper.connect(streamDest);
+        masterStreamDestRef.current = streamDest;
+      } else {
+        masterStreamDestRef.current = null;
+      }
+
+      fxRackRef.current = {
+        inputBus,
+        sweepFilter,
+        filterLfoOsc,
+        filterLfoGain,
+        dryGain,
+        delayDampFilter,
+        delayLeft,
+        delayRight,
+        delayPanLeft,
+        delayPanRight,
+        delayFeedbackGain,
+        delayWetGain,
+        gateGain,
+        gateLfoOsc,
+        gateLfoGain,
+        transientShaper,
+        noiseGate,
+      };
+      masterLimiterNodesRef.current = {
+        preLimiterAnalyser,
+        autoTrimGain,
+        compressor,
+        clipper,
+      };
       masterGainRef.current = master;
       analyserRef.current = analyser;
       beatAnalyserRef.current = beatAnalyser;
     }
-    return { ctx, master: masterGainRef.current };
+    return { ctx, master: fxRackRef.current.inputBus };
   }, [ensureAudioContext, isMasterMuted, masterVolume]);
 
   // Helper: compute crossfade gain for Deck A & B using equal-power curve
@@ -1935,8 +3748,11 @@ export function DjStudioModal({
     ) => {
       if (!chain) return;
       const now = chain.lowEq.context.currentTime;
+      chain.lowEq.frequency.setTargetAtTime(eq.lowCrossoverHz ?? 230, now, 0.025);
       chain.lowEq.gain.setTargetAtTime(eq.lowGainDb, now, 0.02);
+      chain.midEq.frequency.setTargetAtTime(eq.midCenterHz ?? 1100, now, 0.025);
       chain.midEq.gain.setTargetAtTime(eq.midGainDb, now, 0.02);
+      chain.highEq.frequency.setTargetAtTime(eq.highCrossoverHz ?? 4000, now, 0.025);
       chain.highEq.gain.setTargetAtTime(eq.highGainDb, now, 0.02);
       chain.trimGain.gain.setTargetAtTime(eq.trimGain, now, 0.02);
       chain.crossfadeGain.gain.setTargetAtTime(xfadeGain, now, 0.02);
@@ -1960,6 +3776,7 @@ export function DjStudioModal({
 
       const rate = Math.max(0.7, Math.min(1.35, 1 + pitchPct / 100));
       chain.playbackRate = rate;
+      chain.analyser.smoothingTimeConstant = Math.max(0.05, Math.min(0.95, settings.smoothing));
       if (chain.source) {
         chain.source.playbackRate.setTargetAtTime(rate, now, 0.02);
         if (chain.loopBeats > 0 && track) {
@@ -1997,7 +3814,92 @@ export function DjStudioModal({
     eqA,
     eqB,
     getCrossfadeGains,
+    settings.smoothing,
   ]);
+
+  // Auto-calibrate Deck A & Deck B 3-Band EQ crossover points from each deck's detected BPM
+  const deckALiveBpm = useMemo(() => {
+    if (!deckATrack) return null;
+    return Math.max(40, Math.min(240, getEffectiveBpm(deckATrack) * (1 + deckAPitchPct / 100)));
+  }, [deckAPitchPct, deckATrack]);
+
+  const deckBLiveBpm = useMemo(() => {
+    if (!deckBTrack) return null;
+    return Math.max(40, Math.min(240, getEffectiveBpm(deckBTrack) * (1 + deckBPitchPct / 100)));
+  }, [deckBPitchPct, deckBTrack]);
+
+  useEffect(() => {
+    if (!eqAAutoXover) return;
+    const cal = computeBpmCalibratedEqCrossovers(deckALiveBpm ?? detectedMasterBpm);
+    setEqA((prev) => {
+      if (
+        prev.lowCrossoverHz === cal.lowCrossoverHz &&
+        prev.midCenterHz === cal.midCenterHz &&
+        prev.highCrossoverHz === cal.highCrossoverHz
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        lowCrossoverHz: cal.lowCrossoverHz,
+        midCenterHz: cal.midCenterHz,
+        highCrossoverHz: cal.highCrossoverHz,
+      };
+    });
+  }, [deckALiveBpm, detectedMasterBpm, eqAAutoXover]);
+
+  useEffect(() => {
+    if (!eqBAutoXover) return;
+    const cal = computeBpmCalibratedEqCrossovers(deckBLiveBpm ?? detectedMasterBpm);
+    setEqB((prev) => {
+      if (
+        prev.lowCrossoverHz === cal.lowCrossoverHz &&
+        prev.midCenterHz === cal.midCenterHz &&
+        prev.highCrossoverHz === cal.highCrossoverHz
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        lowCrossoverHz: cal.lowCrossoverHz,
+        midCenterHz: cal.midCenterHz,
+        highCrossoverHz: cal.highCrossoverHz,
+      };
+    });
+  }, [deckBLiveBpm, detectedMasterBpm, eqBAutoXover]);
+
+  const handleCalibrateDeckCrossovers = useCallback(
+    (target: 'A' | 'B' | 'both') => {
+      if (target === 'A' || target === 'both') {
+        const bpmA = deckALiveBpm ?? detectedMasterBpm;
+        const calA = computeBpmCalibratedEqCrossovers(bpmA);
+        setEqAAutoXover(true);
+        setEqA((prev) => ({
+          ...prev,
+          lowCrossoverHz: calA.lowCrossoverHz,
+          midCenterHz: calA.midCenterHz,
+          highCrossoverHz: calA.highCrossoverHz,
+        }));
+      }
+      if (target === 'B' || target === 'both') {
+        const bpmB = deckBLiveBpm ?? detectedMasterBpm;
+        const calB = computeBpmCalibratedEqCrossovers(bpmB);
+        setEqBAutoXover(true);
+        setEqB((prev) => ({
+          ...prev,
+          lowCrossoverHz: calB.lowCrossoverHz,
+          midCenterHz: calB.midCenterHz,
+          highCrossoverHz: calB.highCrossoverHz,
+        }));
+      }
+      setStatusMessage(
+        target === 'both'
+          ? 'Auto-calibrated 3-band EQ crossover frequencies for Deck A & Deck B from detected BPM.'
+          : `Auto-calibrated Deck ${target} 3-band EQ crossovers to ${((target === 'A' ? deckALiveBpm : deckBLiveBpm) ?? detectedMasterBpm).toFixed(1)} BPM.`
+      );
+    },
+    [deckALiveBpm, deckBLiveBpm, detectedMasterBpm]
+  );
 
   useEffect(() => {
     if (masterGainRef.current) {
@@ -2008,6 +3910,962 @@ export function DjStudioModal({
       );
     }
   }, [isMasterMuted, masterVolume]);
+
+  // Sync Master Brick-Wall Limiter threshold, release, ceiling curve & baseline auto-gain
+  useEffect(() => {
+    const nodes = masterLimiterNodesRef.current;
+    if (!nodes) return;
+    const now = nodes.compressor.context.currentTime;
+    const ceilingLinear = Math.pow(10, limiterCeilingDb / 20);
+
+    if (limiterEnabled) {
+      nodes.compressor.threshold.setTargetAtTime(
+        Math.max(-24, limiterCeilingDb - 0.6),
+        now,
+        0.02
+      );
+      nodes.compressor.knee.setTargetAtTime(0, now, 0.02);
+      nodes.compressor.ratio.setTargetAtTime(20, now, 0.02);
+      nodes.compressor.attack.setTargetAtTime(0.001, now, 0.02);
+      nodes.compressor.release.setTargetAtTime(limiterReleaseSec, now, 0.02);
+      nodes.clipper.curve = createBrickWallClipperCurve(ceilingLinear);
+
+      if (limiterAutoGainEnabled) {
+        const refPeak = Math.max(0.15, loudestStackPeakRef.current);
+        let trim = 1;
+        if (refPeak > ceilingLinear) {
+          trim = Math.max(0.25, ceilingLinear / refPeak);
+        } else if (refPeak < ceilingLinear * 0.85) {
+          trim = Math.min(1.5, ceilingLinear / refPeak);
+        }
+        lastAutoTrimGainRef.current = trim;
+        nodes.autoTrimGain.gain.setTargetAtTime(trim, now, 0.03);
+      } else {
+        lastAutoTrimGainRef.current = 1;
+        nodes.autoTrimGain.gain.setTargetAtTime(1, now, 0.025);
+      }
+    } else {
+      nodes.compressor.threshold.setTargetAtTime(0, now, 0.02);
+      nodes.compressor.ratio.setTargetAtTime(1, now, 0.02);
+      nodes.clipper.curve = null;
+      lastAutoTrimGainRef.current = 1;
+      nodes.autoTrimGain.gain.setTargetAtTime(1, now, 0.025);
+    }
+  }, [
+    limiterAutoGainEnabled,
+    limiterCeilingDb,
+    limiterEnabled,
+    limiterPeakResetNonce,
+    limiterReleaseSec,
+    mixStackBaselinePeak,
+  ]);
+
+  // Sync Master Filter & FX Rack parameters + BPM-locked LFOs and Delay in real time
+  useEffect(() => {
+    const fx = fxRackRef.current;
+    if (!fx) return;
+    const now = fx.sweepFilter.context.currentTime;
+
+    fx.noiseGate.setParams({
+      thresholdDb: fxNoiseGateThreshold,
+      bypassed: fxBypassed,
+    });
+    fx.transientShaper.setParams({
+      attack: fxTransientAttack,
+      sustain: fxTransientSustain,
+      dither: fxTransientDither,
+      focus: fxTransientFocus,
+      bypassed: fxBypassed,
+    });
+
+    if (fxBypassed) {
+      fx.sweepFilter.type = 'lowpass';
+      fx.sweepFilter.frequency.setTargetAtTime(20000, now, 0.025);
+      fx.sweepFilter.Q.setTargetAtTime(0.7, now, 0.025);
+      fx.filterLfoGain.gain.setTargetAtTime(0, now, 0.025);
+      fx.delayWetGain.gain.setTargetAtTime(0, now, 0.025);
+      fx.gateGain.gain.setTargetAtTime(1, now, 0.025);
+      fx.gateLfoGain.gain.setTargetAtTime(0, now, 0.025);
+      return;
+    }
+
+    const clampedCutoff = Math.max(0, Math.min(1, fxFilterCutoff));
+    fx.sweepFilter.type = fxFilterMode;
+    let baseFreq =
+      fxFilterMode === 'lowpass'
+        ? 160 * Math.pow(112.5, clampedCutoff)
+        : 30 * Math.pow(160, 1 - clampedCutoff);
+
+    if (fxAutoFilterDepth > 0.01 && fxFilterMode === 'lowpass') {
+      const biasFactor = Math.pow(0.24, fxAutoFilterDepth * Math.max(0, clampedCutoff - 0.3));
+      baseFreq = Math.max(160, baseFreq * biasFactor);
+    }
+
+    fx.sweepFilter.frequency.setTargetAtTime(baseFreq, now, 0.025);
+    fx.sweepFilter.Q.setTargetAtTime(Math.max(0.7, Math.min(12, fxFilterResonance)), now, 0.025);
+
+    const filterLfoHz = fxBpmSyncEnabled
+      ? detectedMasterBpm / 60 / fxFilterLfoBeats
+      : 0.5 / fxFilterLfoBeats;
+    fx.filterLfoOsc.frequency.setTargetAtTime(
+      Math.max(0.05, Math.min(18, filterLfoHz)),
+      now,
+      0.04
+    );
+    fx.filterLfoGain.gain.setTargetAtTime(
+      Math.max(0, Math.min(1, fxAutoFilterDepth)) * 2600,
+      now,
+      0.03
+    );
+
+    fx.delayLeft.delayTime.setTargetAtTime(computedFxDelaySec, now, 0.045);
+    fx.delayRight.delayTime.setTargetAtTime(computedFxDelaySec, now, 0.045);
+    fx.delayWetGain.gain.setTargetAtTime(Math.max(0, Math.min(1, fxDelayMix)) * 0.85, now, 0.025);
+    fx.delayFeedbackGain.gain.setTargetAtTime(
+      Math.max(0, Math.min(0.85, fxDelayFeedback)),
+      now,
+      0.025
+    );
+
+    const gateHz = fxBpmSyncEnabled ? detectedMasterBpm / 60 / fxGateBeats : 2 / fxGateBeats;
+    fx.gateLfoOsc.frequency.setTargetAtTime(Math.max(0.1, Math.min(20, gateHz)), now, 0.03);
+    const gateDepth = Math.max(0, Math.min(1, fxBeatGateDepth));
+    fx.gateGain.gain.setTargetAtTime(1 - gateDepth * 0.45, now, 0.025);
+    fx.gateLfoGain.gain.setTargetAtTime(gateDepth * 0.45, now, 0.025);
+  }, [
+    computedFxDelaySec,
+    detectedMasterBpm,
+    fxAutoFilterDepth,
+    fxBeatGateDepth,
+    fxBpmSyncEnabled,
+    fxBypassed,
+    fxDelayFeedback,
+    fxDelayMix,
+    fxFilterCutoff,
+    fxFilterLfoBeats,
+    fxFilterMode,
+    fxFilterResonance,
+    fxGateBeats,
+    fxNoiseGateThreshold,
+    fxTransientAttack,
+    fxTransientDither,
+    fxTransientFocus,
+    fxTransientSustain,
+  ]);
+
+  const handleResetFxRack = useCallback(() => {
+    setFxBypassed(false);
+    setFxFilterMode('lowpass');
+    setFxBpmSyncEnabled(true);
+    setFxFilterLfoBeats(2);
+    setFxDelayBeats(0.5);
+    setFxGateBeats(0.5);
+    setFxTransientFocus('full');
+    onUpdateSettings({
+      djFilterCutoff: 1,
+      djFilterResonance: 1.6,
+      djAutoFilterDepth: 0,
+      djDelayMix: 0,
+      djDelayFeedback: 0.38,
+      djBeatGateDepth: 0,
+      djTransientAttack: 0,
+      djTransientSustain: 0,
+      djTransientDither: 0,
+      djNoiseGateThreshold: -80,
+    });
+    setStatusMessage('Reset Filter & FX Rack to clean bypass state.');
+  }, [onUpdateSettings]);
+
+  const handleClearFxDelayTail = useCallback(() => {
+    onUpdateSettings({ djDelayMix: 0 });
+    const fx = fxRackRef.current;
+    if (!fx) return;
+    const now = fx.delayFeedbackGain.context.currentTime;
+    fx.delayWetGain.gain.setTargetAtTime(0, now, 0.015);
+    fx.delayFeedbackGain.gain.setTargetAtTime(0, now, 0.015);
+    window.setTimeout(() => {
+      const latest = fxRackRef.current;
+      if (latest) {
+        latest.delayFeedbackGain.gain.setTargetAtTime(
+          settingsRef.current.djDelayFeedback ?? 0.38,
+          latest.delayFeedbackGain.context.currentTime,
+          0.02
+        );
+      }
+    }, 150);
+  }, [onUpdateSettings]);
+
+  // Cleanup Tap Tempo & Nudge flash timers on unmount, and reset nudge counters on track swap
+  useEffect(() => {
+    setDeckANudgeMs(0);
+    setDeckANudgeFlash(null);
+  }, [deckATrackId]);
+
+  useEffect(() => {
+    setDeckBNudgeMs(0);
+    setDeckBNudgeFlash(null);
+  }, [deckBTrackId]);
+
+  useEffect(() => {
+    previewRenderSeqRef.current += 1;
+    stopTransitionPreviewPlayback();
+    setAiTransitionPreview(null);
+    setPreviewTimeSec(0);
+    setPreviewError(null);
+    setIsPreviewRendering(false);
+    setAiAutoMixResult(null);
+    setAiAutoMixError(null);
+    setActiveAiSuggestionId(null);
+  }, [deckATrackId, deckBTrackId, stopTransitionPreviewPlayback]);
+
+  useEffect(() => {
+    const nudgeTimers = nudgeFlashTimerRef.current;
+    return () => {
+      if (tapResetTimerRef.current !== null) {
+        window.clearTimeout(tapResetTimerRef.current);
+      }
+      if (tapPulseTimerRef.current !== null) {
+        window.clearTimeout(tapPulseTimerRef.current);
+      }
+      if (nudgeTimers.A !== null) {
+        window.clearTimeout(nudgeTimers.A);
+      }
+      if (nudgeTimers.B !== null) {
+        window.clearTimeout(nudgeTimers.B);
+      }
+      fxRackRef.current?.transientShaper.dispose();
+      fxRackRef.current?.noiseGate.dispose();
+    };
+  }, []);
+
+  // DJ Tap Tempo calibration & Last-5 BPM session log
+  const handleDjTapTempo = useCallback(() => {
+    const now = performance.now();
+    const prevSamples = tapSamplesRef.current;
+    const lastSample = prevSamples[prevSamples.length - 1];
+    const isFreshSequence = !lastSample || now - lastSample.tapTimeMs > TAP_TEMPO_IDLE_RESET_MS;
+
+    if (isFreshSequence) {
+      tapSequenceIdRef.current = `tap-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    }
+
+    const currentSample: TapSample = {
+      tapTimeMs: now,
+      bassRms: beatStateRef.current.lastEnergy,
+      rollingRms: beatStateRef.current.rollingEnergy,
+    };
+
+    const nextSamples = isFreshSequence
+      ? [currentSample]
+      : [...prevSamples, currentSample].slice(-12);
+    tapSamplesRef.current = nextSamples;
+    setTapTempoCount(nextSamples.length);
+
+    // Tactile pulse feedback on Tap button & visualizer beat burst
+    setTapPulseFlash(true);
+    beatStateRef.current.burstIntensity = Math.max(beatStateRef.current.burstIntensity, 0.7);
+    if (tapPulseTimerRef.current !== null) {
+      window.clearTimeout(tapPulseTimerRef.current);
+    }
+    tapPulseTimerRef.current = window.setTimeout(() => {
+      setTapPulseFlash(false);
+    }, 150);
+
+    if (tapResetTimerRef.current !== null) {
+      window.clearTimeout(tapResetTimerRef.current);
+    }
+    tapResetTimerRef.current = window.setTimeout(() => {
+      tapSamplesRef.current = [];
+      setTapTempoCount(0);
+    }, TAP_TEMPO_IDLE_RESET_MS);
+
+    const calibration = computeTapTempoCalibration(nextSamples, 1);
+    if (!calibration) return;
+
+    const detectedBpm = calibration.preciseBpm;
+    setTapTempoBpm(detectedBpm);
+
+    const seqId = tapSequenceIdRef.current || `tap-${Date.now()}`;
+    const timestampLabel = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    setTapBpmHistory((prev) => {
+      if (prev[0]?.id === seqId) {
+        const previousReading = prev[1];
+        const deltaFromPrev = previousReading
+          ? Number((detectedBpm - previousReading.bpm).toFixed(1))
+          : null;
+        return [
+          {
+            id: seqId,
+            bpm: detectedBpm,
+            tapCount: calibration.tapCount,
+            timestampLabel,
+            deltaFromPrev,
+          },
+          ...prev.slice(1),
+        ];
+      }
+
+      const previousReading = prev[0];
+      const deltaFromPrev = previousReading
+        ? Number((detectedBpm - previousReading.bpm).toFixed(1))
+        : null;
+      return [
+        {
+          id: seqId,
+          bpm: detectedBpm,
+          tapCount: calibration.tapCount,
+          timestampLabel,
+          deltaFromPrev,
+        },
+        ...prev,
+      ].slice(0, MAX_DJ_TAP_BPM_LOG);
+    });
+  }, []);
+
+  const handleClearTapBpmHistory = useCallback(() => {
+    tapSamplesRef.current = [];
+    setTapTempoCount(0);
+    setTapTempoBpm(null);
+    setTapBpmHistory([]);
+    setStatusMessage('Cleared DJ Tap Tempo session log.');
+  }, []);
+
+  const handleApplyTappedBpmToDeck = useCallback(
+    (deck: 'A' | 'B', targetBpm: number) => {
+      const track = deck === 'A' ? deckATrack : deckBTrack;
+      if (!track) {
+        setStatusMessage(`Load a track into Deck ${deck} before applying tapped BPM.`);
+        return;
+      }
+      const baseBpm = Math.max(40, getEffectiveBpm(track));
+      const pct = Number(
+        Math.max(-16, Math.min(16, (targetBpm / baseBpm - 1) * 100)).toFixed(1)
+      );
+      if (deck === 'A') {
+        setDeckAPitchPct(pct);
+      } else {
+        setDeckBPitchPct(pct);
+      }
+      setStatusMessage(
+        `Applied tapped ${targetBpm.toFixed(1)} BPM to Deck ${deck} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% pitch).`
+      );
+    },
+    [deckATrack, deckBTrack]
+  );
+
+  const tapBpmStats = useMemo(() => {
+    if (tapBpmHistory.length === 0) return null;
+    const values = tapBpmHistory.map((item) => item.bpm);
+    const sum = values.reduce((acc, v) => acc + v, 0);
+    const avgBpm = Number((sum / values.length).toFixed(1));
+    const minBpm = Math.min(...values);
+    const maxBpm = Math.max(...values);
+    const spreadBpm = Number((maxBpm - minBpm).toFixed(1));
+    const consistency: 'LOCKED' | 'STEADY' | 'DRIFTING' =
+      spreadBpm <= 0.8 ? 'LOCKED' : spreadBpm <= 2.0 ? 'STEADY' : 'DRIFTING';
+    return {
+      avgBpm,
+      minBpm,
+      maxBpm,
+      spreadBpm,
+      consistency,
+    };
+  }, [tapBpmHistory]);
+
+  // Populate Pads 1-4 with studio starter one-shots on first DJ Studio open
+  useEffect(() => {
+    if (!isOpen || samplerStarterLoadedRef.current) return;
+    samplerStarterLoadedRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const buffers = await Promise.all(
+          SAMPLER_PAD_META.slice(0, 4).map((m) => synthesizeStarterOneShot(m.starterKind))
+        );
+        if (cancelled) return;
+        setSamplerPads((prev) =>
+          prev.map((pad, idx) => {
+            if (idx >= 4 || pad.audioBuffer) return pad;
+            const buf = buffers[idx];
+            return {
+              ...pad,
+              audioBuffer: buf,
+              peaks: extractSamplerPeaks(buf, 28),
+              durationSec: buf.duration,
+              sourceKind: 'synth',
+            };
+          })
+        );
+      } catch {
+        // OfflineAudioContext unavailable — pads stay cleanly empty & recordable
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  const handleLoadFullSamplerStarterKit = useCallback(async () => {
+    try {
+      const buffers = await Promise.all(
+        SAMPLER_PAD_META.map((m) => synthesizeStarterOneShot(m.starterKind))
+      );
+      const niceNames = [
+        '808 Kick',
+        'Crisp Clap',
+        'Drop Horn',
+        'Noise Riser',
+        'Closed Hat',
+        'Sub Drop',
+        'Chord Stab',
+        'Perc Rim',
+      ];
+      setSamplerPads((prev) =>
+        prev.map((pad, idx) => ({
+          ...pad,
+          name: niceNames[idx] ?? pad.name,
+          audioBuffer: buffers[idx],
+          peaks: extractSamplerPeaks(buffers[idx], 28),
+          durationSec: buffers[idx].duration,
+          sourceKind: 'synth',
+          recordedBpm: Number(detectedMasterBpm.toFixed(1)),
+        }))
+      );
+      setStatusMessage('Loaded 8 studio DJ one-shot samples across all Sampler pads.');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Unable to synthesize starter sampler pack.'
+      );
+    }
+  }, [detectedMasterBpm]);
+
+  const stopActiveSamplerRecorder = useCallback(() => {
+    if (samplerRecordIntervalRef.current !== null) {
+      window.clearInterval(samplerRecordIntervalRef.current);
+      samplerRecordIntervalRef.current = null;
+    }
+    if (samplerRecordAutoStopRef.current !== null) {
+      window.clearTimeout(samplerRecordAutoStopRef.current);
+      samplerRecordAutoStopRef.current = null;
+    }
+    if (samplerMicMeterRafRef.current !== null) {
+      cancelAnimationFrame(samplerMicMeterRafRef.current);
+      samplerMicMeterRafRef.current = null;
+    }
+    if (samplerMicMeterCleanupRef.current) {
+      samplerMicMeterCleanupRef.current();
+      samplerMicMeterCleanupRef.current = null;
+    }
+    if (samplerRecorderRef.current && samplerRecorderRef.current.state !== 'inactive') {
+      try {
+        samplerRecorderRef.current.stop();
+      } catch {
+        // ignore already stopped recorder
+      }
+    } else {
+      setSamplerRecordingPadId(null);
+      setSamplerRecordElapsedSec(0);
+      setSamplerMicLevel(0);
+    }
+    if (samplerMicStreamRef.current) {
+      samplerMicStreamRef.current.getTracks().forEach((t) => t.stop());
+      samplerMicStreamRef.current = null;
+    }
+  }, []);
+
+  // Cleanup active sampler voices & mic recorder on modal close/unmount
+  useEffect(() => {
+    return () => {
+      stopActiveSamplerRecorder();
+      stopAllSamplerVoices();
+    };
+  }, [stopActiveSamplerRecorder, stopAllSamplerVoices]);
+
+  // Live update gain on active sampler voices when Sampler Master Volume or pad gain changes
+  useEffect(() => {
+    const padsById = new Map(samplerPads.map((p) => [p.id, p]));
+    samplerActiveVoicesRef.current.forEach((voice) => {
+      const pad = padsById.get(voice.padId);
+      const nextGain = (pad?.gain ?? 0.95) * samplerMasterVolume;
+      try {
+        voice.gainNode.gain.setTargetAtTime(
+          nextGain,
+          voice.gainNode.context.currentTime,
+          0.02
+        );
+      } catch {
+        // ignore disconnected voice
+      }
+    });
+  }, [samplerMasterVolume, samplerPads]);
+
+  const handleTriggerSamplerPad = useCallback(
+    async (padId: string) => {
+      const pad = samplerPadsRef.current.find((p) => p.id === padId);
+      if (!pad) return;
+      if (!pad.audioBuffer) {
+        setStatusMessage(
+          `Pad "${pad.name}" is empty — click Rec or Load Audio to capture a one-shot sample.`
+        );
+        return;
+      }
+
+      const bus = await ensureMasterBus();
+      if (!bus) return;
+      const { ctx, master } = bus;
+
+      let anchorDeck: {
+        isPlaying: boolean;
+        trackTimeSec: number;
+        firstBeatSec: number;
+        trackBpm: number;
+        playbackRate: number;
+      } | null = null;
+
+      if (deckAPlayingRef.current && deckATrackRef.current) {
+        const trackA = deckATrackRef.current;
+        anchorDeck = {
+          isPlaying: true,
+          trackTimeSec: deckATimeRef.current,
+          firstBeatSec: trackA.downbeatTimes[0] ?? trackA.beatTimes[0] ?? 0,
+          trackBpm: getEffectiveBpm(trackA),
+          playbackRate: Math.max(0.7, Math.min(1.35, 1 + deckAPitchPctRef.current / 100)),
+        };
+      } else if (deckBPlayingRef.current && deckBTrackRef.current) {
+        const trackB = deckBTrackRef.current;
+        anchorDeck = {
+          isPlaying: true,
+          trackTimeSec: deckBTimeRef.current,
+          firstBeatSec: trackB.downbeatTimes[0] ?? trackB.beatTimes[0] ?? 0,
+          trackBpm: getEffectiveBpm(trackB),
+          playbackRate: Math.max(0.7, Math.min(1.35, 1 + deckBPitchPctRef.current / 100)),
+        };
+      } else if (isAutoSetPlayingRef.current && renderedScheduleRef.current) {
+        anchorDeck = {
+          isPlaying: true,
+          trackTimeSec: autoSetTimeRef.current,
+          firstBeatSec: renderedScheduleRef.current.beatTimesTimeline[0] ?? 0,
+          trackBpm: detectedMasterBpm,
+          playbackRate: 1,
+        };
+      }
+
+      const q = computeNextQuantizedTriggerDelay({
+        quantize: samplerQuantize,
+        projectBpm: detectedMasterBpm,
+        ctxCurrentTime: ctx.currentTime,
+        anchorDeck,
+      });
+
+      if (samplerChokeMode) {
+        stopAllSamplerVoices();
+      }
+
+      const source = ctx.createBufferSource();
+      source.buffer = pad.audioBuffer;
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = pad.gain * samplerMasterVolumeRef.current;
+
+      source.connect(gainNode);
+      gainNode.connect(master);
+
+      const voiceEntry = { padId, source, gainNode };
+      samplerActiveVoicesRef.current.push(voiceEntry);
+
+      source.onended = () => {
+        samplerActiveVoicesRef.current = samplerActiveVoicesRef.current.filter(
+          (v) => v !== voiceEntry
+        );
+        try {
+          source.disconnect();
+          gainNode.disconnect();
+        } catch {
+          // ignore cleanup
+        }
+        const stillHasPadVoice = samplerActiveVoicesRef.current.some((v) => v.padId === padId);
+        if (!stillHasPadVoice) {
+          setSamplerPadPlayingState((prev) =>
+            prev[padId] ? { ...prev, [padId]: false } : prev
+          );
+        }
+      };
+
+      const startAtCtx = ctx.currentTime + q.delaySec;
+      source.start(startAtCtx);
+
+      if (q.waitMs >= 16) {
+        setSamplerPadQueuedState((prev) => ({ ...prev, [padId]: true }));
+        const fireTid = window.setTimeout(() => {
+          setSamplerPadQueuedState((prev) => ({ ...prev, [padId]: false }));
+          setSamplerPadPlayingState((prev) => ({ ...prev, [padId]: true }));
+          beatStateRef.current.burstIntensity = Math.max(
+            beatStateRef.current.burstIntensity,
+            0.6
+          );
+        }, q.waitMs);
+        samplerTimersRef.current.push(fireTid);
+      } else {
+        setSamplerPadPlayingState((prev) => ({ ...prev, [padId]: true }));
+        beatStateRef.current.burstIntensity = Math.max(
+          beatStateRef.current.burstIntensity,
+          0.6
+        );
+      }
+    },
+    [detectedMasterBpm, ensureMasterBus, samplerChokeMode, samplerQuantize, stopAllSamplerVoices]
+  );
+
+  const handleRecordSamplerPad = useCallback(
+    async (padId: string) => {
+      if (samplerRecordingPadId === padId) {
+        stopActiveSamplerRecorder();
+        return;
+      }
+      if (samplerRecordingPadId !== null) {
+        stopActiveSamplerRecorder();
+      }
+
+      const pad = samplerPadsRef.current.find((p) => p.id === padId);
+      if (!pad) return;
+
+      const bus = await ensureMasterBus();
+      if (!bus) {
+        setErrorMsg('Audio engine unavailable for sampling.');
+        return;
+      }
+      const { ctx } = bus;
+
+      // Deck A / Deck B Beat-Synced 1-Beat Chop Capture (Instant, no Mic required)
+      if (samplerRecordSource === 'deckA' || samplerRecordSource === 'deckB') {
+        const track = samplerRecordSource === 'deckA' ? deckATrack : deckBTrack;
+        if (!track) {
+          setErrorMsg(
+            `Load a track into Deck ${samplerRecordSource === 'deckA' ? 'A' : 'B'} to sample a one-shot chop.`
+          );
+          return;
+        }
+        const rawTime = samplerRecordSource === 'deckA' ? deckATimeRef.current : deckBTimeRef.current;
+        const beatSec = 60 / Math.max(40, getEffectiveBpm(track));
+        const snappedStart =
+          track.beatTimes.length > 0
+            ? Math.min(track.duration - 0.12, findNearestBeat(track.beatTimes, rawTime))
+            : Math.max(0, Math.min(track.duration - 0.12, rawTime));
+        const sliceDur = Math.min(1.5, Math.max(0.28, beatSec));
+        const slicedBuf = sliceDeckOneShotBuffer(ctx, track.audioBuffer, snappedStart, sliceDur);
+        const peaks = extractSamplerPeaks(slicedBuf, 28);
+        const deckLabel = samplerRecordSource === 'deckA' ? 'Deck A Chop' : 'Deck B Chop';
+
+        setSamplerPads((prev) =>
+          prev.map((p) =>
+            p.id === padId
+              ? {
+                  ...p,
+                  name: p.sourceKind === 'empty' || p.name.startsWith('Rec Pad') ? deckLabel : p.name,
+                  audioBuffer: slicedBuf,
+                  peaks,
+                  durationSec: slicedBuf.duration,
+                  sourceKind: 'deck',
+                  recordedBpm: Number(detectedMasterBpm.toFixed(1)),
+                }
+              : p
+          )
+        );
+        setStatusMessage(
+          `Sampled ${slicedBuf.duration.toFixed(2)}s 1-Beat chop from ${deckLabel} (${track.title}) into Pad ${pad.slotIndex + 1}.`
+        );
+        return;
+      }
+
+      // Live Recording via Microphone or Master Output Stream
+      let stream: MediaStream | null = null;
+      let isMic = samplerRecordSource === 'mic';
+
+      if (isMic) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setErrorMsg('Microphone recording is not supported in this browser.');
+          return;
+        }
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (err) {
+          setErrorMsg(
+            err instanceof Error
+              ? `Microphone permission error: ${err.message}`
+              : 'Microphone access was denied.'
+          );
+          return;
+        }
+      } else {
+        if (!masterStreamDestRef.current) {
+          setErrorMsg('Master output stream recording is not supported in this browser.');
+          return;
+        }
+        stream = masterStreamDestRef.current.stream;
+      }
+
+      if (typeof MediaRecorder === 'undefined') {
+        if (isMic) stream.getTracks().forEach((t) => t.stop());
+        setErrorMsg('MediaRecorder is unavailable in this browser.');
+        return;
+      }
+
+      if (isMic) {
+        samplerMicStreamRef.current = stream;
+      }
+
+      // Real-time level meter during capture
+      try {
+        const meterSource = ctx.createMediaStreamSource(stream);
+        const meterAnalyser = ctx.createAnalyser();
+        meterAnalyser.fftSize = 256;
+        meterSource.connect(meterAnalyser);
+        const meterBuf = new Uint8Array(meterAnalyser.fftSize);
+        const pollLevel = () => {
+          meterAnalyser.getByteTimeDomainData(meterBuf);
+          let peak = 0;
+          for (let i = 0; i < meterBuf.length; i++) {
+            const amp = Math.abs(meterBuf[i] - 128) / 128;
+            if (amp > peak) peak = amp;
+          }
+          setSamplerMicLevel(Math.min(1, peak * 2.4));
+          samplerMicMeterRafRef.current = requestAnimationFrame(pollLevel);
+        };
+        samplerMicMeterRafRef.current = requestAnimationFrame(pollLevel);
+        samplerMicMeterCleanupRef.current = () => {
+          try {
+            meterSource.disconnect();
+            meterAnalyser.disconnect();
+          } catch {
+            // ignore disconnect
+          }
+        };
+      } catch {
+        // fallback cleanly if analyser source isn't attachable
+      }
+
+      const chunks: Blob[] = [];
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (err) {
+        if (isMic) stream.getTracks().forEach((t) => t.stop());
+        setErrorMsg(err instanceof Error ? err.message : 'Could not initialize audio recorder.');
+        return;
+      }
+
+      samplerRecorderRef.current = recorder;
+      setSamplerRecordingPadId(padId);
+      setSamplerRecordElapsedSec(0);
+
+      const startedPerfMs = performance.now();
+      samplerRecordIntervalRef.current = window.setInterval(() => {
+        setSamplerRecordElapsedSec((performance.now() - startedPerfMs) / 1000);
+      }, 60);
+
+      // Auto-stop one-shot recordings cleanly at 8 seconds max
+      samplerRecordAutoStopRef.current = window.setTimeout(() => {
+        stopActiveSamplerRecorder();
+      }, 8000);
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          chunks.push(ev.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        if (samplerRecordIntervalRef.current !== null) {
+          window.clearInterval(samplerRecordIntervalRef.current);
+          samplerRecordIntervalRef.current = null;
+        }
+        if (samplerRecordAutoStopRef.current !== null) {
+          window.clearTimeout(samplerRecordAutoStopRef.current);
+          samplerRecordAutoStopRef.current = null;
+        }
+        if (samplerMicMeterRafRef.current !== null) {
+          cancelAnimationFrame(samplerMicMeterRafRef.current);
+          samplerMicMeterRafRef.current = null;
+        }
+        if (samplerMicMeterCleanupRef.current) {
+          samplerMicMeterCleanupRef.current();
+          samplerMicMeterCleanupRef.current = null;
+        }
+        if (isMic && samplerMicStreamRef.current) {
+          samplerMicStreamRef.current.getTracks().forEach((t) => t.stop());
+          samplerMicStreamRef.current = null;
+        }
+        samplerRecorderRef.current = null;
+        setSamplerRecordingPadId(null);
+        setSamplerRecordElapsedSec(0);
+        setSamplerMicLevel(0);
+
+        const mime = recorder.mimeType || 'audio/webm';
+        const blob = new Blob(chunks, { type: mime });
+        if (blob.size === 0) {
+          setErrorMsg('No audio data captured during sampler recording.');
+          return;
+        }
+
+        void (async () => {
+          try {
+            const arr = await blob.arrayBuffer();
+            const decoded = await ctx.decodeAudioData(arr);
+            const trimmed = trimSilentEdgesFromBuffer(ctx, decoded, 0.012);
+            const peaks = extractSamplerPeaks(trimmed, 28);
+            const defaultTitle = isMic
+              ? `Mic Shot ${pad.slotIndex + 1}`
+              : `Mix Shot ${pad.slotIndex + 1}`;
+            setSamplerPads((prev) =>
+              prev.map((p) =>
+                p.id === padId
+                  ? {
+                      ...p,
+                      name:
+                        p.sourceKind === 'empty' || p.name.startsWith('Rec Pad')
+                          ? defaultTitle
+                          : p.name,
+                      audioBuffer: trimmed,
+                      peaks,
+                      durationSec: trimmed.duration,
+                      sourceKind: isMic ? 'mic' : 'master',
+                      recordedBpm: Number(detectedMasterBpm.toFixed(1)),
+                    }
+                  : p
+              )
+            );
+            setStatusMessage(
+              `Recorded ${trimmed.duration.toFixed(2)}s trimmed one-shot to Pad ${pad.slotIndex + 1} (${isMic ? 'Microphone' : 'Master Output'}).`
+            );
+          } catch (decodeErr) {
+            setErrorMsg(
+              decodeErr instanceof Error
+                ? `Failed to decode recorded sample: ${decodeErr.message}`
+                : 'Failed to decode recorded sample.'
+            );
+          }
+        })();
+      };
+
+      recorder.start(100);
+      setStatusMessage(
+        `Recording Pad ${pad.slotIndex + 1} from ${isMic ? 'Microphone' : 'Master Output'}… click Stop when done.`
+      );
+    },
+    [
+      deckATrack,
+      deckBTrack,
+      detectedMasterBpm,
+      ensureMasterBus,
+      samplerRecordSource,
+      samplerRecordingPadId,
+      stopActiveSamplerRecorder,
+    ]
+  );
+
+  const handleLoadAudioFileToSamplerPad = useCallback(
+    async (padId: string, file: File) => {
+      const bus = await ensureMasterBus();
+      if (!bus) return;
+      try {
+        const arr = await file.arrayBuffer();
+        const decoded = await bus.ctx.decodeAudioData(arr);
+        const trimmed = trimSilentEdgesFromBuffer(bus.ctx, decoded, 0.008);
+        const peaks = extractSamplerPeaks(trimmed, 28);
+        const cleanName = file.name.replace(/\.[^/.]+$/, '').slice(0, 18) || 'Sample';
+        setSamplerPads((prev) =>
+          prev.map((p) =>
+            p.id === padId
+              ? {
+                  ...p,
+                  name: cleanName,
+                  audioBuffer: trimmed,
+                  peaks,
+                  durationSec: trimmed.duration,
+                  sourceKind: 'file',
+                  recordedBpm: Number(detectedMasterBpm.toFixed(1)),
+                }
+              : p
+          )
+        );
+        setStatusMessage(`Loaded "${cleanName}" (${trimmed.duration.toFixed(2)}s) into Sampler.`);
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? `Failed to load sample: ${err.message}` : 'Unsupported audio sample file.'
+        );
+      }
+    },
+    [detectedMasterBpm, ensureMasterBus]
+  );
+
+  const handleClearSamplerPad = useCallback(
+    (padId: string) => {
+      samplerActiveVoicesRef.current
+        .filter((v) => v.padId === padId)
+        .forEach((v) => {
+          try {
+            v.source.stop();
+            v.source.disconnect();
+          } catch {
+            // ignore
+          }
+        });
+      samplerActiveVoicesRef.current = samplerActiveVoicesRef.current.filter(
+        (v) => v.padId !== padId
+      );
+      setSamplerPadQueuedState((prev) => ({ ...prev, [padId]: false }));
+      setSamplerPadPlayingState((prev) => ({ ...prev, [padId]: false }));
+      setSamplerPads((prev) =>
+        prev.map((p, idx) =>
+          p.id === padId
+            ? {
+                ...p,
+                name: `Rec Pad ${idx + 1}`,
+                audioBuffer: null,
+                peaks: [],
+                durationSec: 0,
+                sourceKind: 'empty',
+                recordedBpm: null,
+              }
+            : p
+        )
+      );
+    },
+    []
+  );
+
+  // Keyboard finger-drumming shortcuts (1-8) for Sampler Pads when DJ Studio is open
+  useEffect(() => {
+    if (!isOpen || !samplerKeyTriggersEnabled) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const num = Number(e.key);
+      if (Number.isInteger(num) && num >= 1 && num <= 8) {
+        const pad = samplerPadsRef.current[num - 1];
+        if (pad) {
+          e.preventDefault();
+          void handleTriggerSamplerPad(pad.id);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleTriggerSamplerPad, isOpen, samplerKeyTriggersEnabled]);
 
   // Sync live Loop Deck parameters (volume, filter sweep, beat-synced loop length) in real time
   useEffect(() => {
@@ -2277,18 +5135,18 @@ export function DjStudioModal({
 
       const lowEq = ctx.createBiquadFilter();
       lowEq.type = 'lowshelf';
-      lowEq.frequency.value = 230;
+      lowEq.frequency.value = eq.lowCrossoverHz ?? 230;
       lowEq.gain.value = eq.lowGainDb;
 
       const midEq = ctx.createBiquadFilter();
       midEq.type = 'peaking';
-      midEq.frequency.value = 1100;
+      midEq.frequency.value = eq.midCenterHz ?? 1100;
       midEq.Q.value = 1.0;
       midEq.gain.value = eq.midGainDb;
 
       const highEq = ctx.createBiquadFilter();
       highEq.type = 'highshelf';
-      highEq.frequency.value = 4000;
+      highEq.frequency.value = eq.highCrossoverHz ?? 4000;
       highEq.gain.value = eq.highGainDb;
 
       const sweepFilter = ctx.createBiquadFilter();
@@ -2308,6 +5166,23 @@ export function DjStudioModal({
 
       const trimGain = ctx.createGain();
       trimGain.gain.value = eq.trimGain;
+
+      // Pre-fader monitor bus (post-EQ, filter, trim, & deck echo — tapped BEFORE crossfadeGain)
+      const preFaderMonitorGain = ctx.createGain();
+      preFaderMonitorGain.gain.value = 1;
+
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = Math.max(0.05, Math.min(0.95, settingsRef.current.smoothing));
+
+      const beatLowPass = ctx.createBiquadFilter();
+      beatLowPass.type = 'lowpass';
+      beatLowPass.frequency.value = 140;
+      beatLowPass.Q.value = 1.2;
+
+      const beatAnalyser = ctx.createAnalyser();
+      beatAnalyser.fftSize = 1024;
+      beatAnalyser.smoothingTimeConstant = 0.2;
 
       const crossfadeGain = ctx.createGain();
       crossfadeGain.gain.value = deck === 'A' ? gainA : gainB;
@@ -2329,18 +5204,24 @@ export function DjStudioModal({
       sweepFilter.connect(trimGain);
 
       trimGain.connect(delayDry);
-      delayDry.connect(crossfadeGain);
+      delayDry.connect(preFaderMonitorGain);
 
       trimGain.connect(delayNode);
       delayNode.connect(delayFeedback);
       delayFeedback.connect(delayNode);
       delayNode.connect(delayWet);
-      delayWet.connect(crossfadeGain);
+      delayWet.connect(preFaderMonitorGain);
 
+      preFaderMonitorGain.connect(analyser);
+      preFaderMonitorGain.connect(beatLowPass);
+      beatLowPass.connect(beatAnalyser);
+
+      preFaderMonitorGain.connect(crossfadeGain);
       crossfadeGain.connect(master);
 
       return {
         source: null,
+        sourceGain: null,
         scratchSession: null,
         isScratching: false,
         lowEq,
@@ -2352,6 +5233,10 @@ export function DjStudioModal({
         delayFeedback,
         delayWet,
         trimGain,
+        preFaderMonitorGain,
+        analyser,
+        beatLowPass,
+        beatAnalyser,
         crossfadeGain,
         startedAtAudioTime: ctx.currentTime,
         startedAtPerfMs: performance.now(),
@@ -2386,6 +5271,9 @@ export function DjStudioModal({
       source.buffer = track.audioBuffer;
       source.playbackRate.value = rate;
 
+      const sourceGain = ctx.createGain();
+      sourceGain.gain.value = 1;
+
       if (loopBeats > 0) {
         source.loop = true;
         source.loopStart = safeStart;
@@ -2394,7 +5282,9 @@ export function DjStudioModal({
 
       const chain = createDeckFilterChain(ctx, master, deck, track, safeStart, rate, eq, loopBeats);
       chain.source = source;
-      source.connect(chain.lowEq);
+      chain.sourceGain = sourceGain;
+      source.connect(sourceGain);
+      sourceGain.connect(chain.lowEq);
 
       if (deck === 'A') {
         deckAChainRef.current = chain;
@@ -2408,7 +5298,7 @@ export function DjStudioModal({
 
       source.onended = () => {
         const currentRef = deck === 'A' ? deckAChainRef : deckBChainRef;
-        if (currentRef.current === chain && !chain.isScratching) {
+        if (currentRef.current === chain && chain.source === source && !chain.isScratching) {
           currentRef.current = null;
           if (deck === 'A') setDeckAPlaying(false);
           else setDeckBPlaying(false);
@@ -2477,6 +5367,14 @@ export function DjStudioModal({
           // ignore
         }
         existingChain.source = null;
+      }
+      if (existingChain?.sourceGain) {
+        try {
+          existingChain.sourceGain.disconnect();
+        } catch {
+          // ignore
+        }
+        existingChain.sourceGain = null;
       }
 
       const bus = await ensureMasterBus();
@@ -2657,6 +5555,164 @@ export function DjStudioModal({
     [startLiveDeckFromTime, stopDeckChain]
   );
 
+  // Micro-adjust track alignment (+/- 5ms, +/- 10ms) with click-free 8ms WebAudio crossfade when live
+  const handleNudgeTrackAlignment = useCallback(
+    (deck: 'A' | 'B', deltaMs: number, options?: { resetCounter?: boolean }) => {
+      const track = deck === 'A' ? deckATrackRef.current : deckBTrackRef.current;
+      if (!track) return;
+
+      const deltaSec = deltaMs / 1000;
+      const chainRef = deck === 'A' ? deckAChainRef : deckBChainRef;
+      const chain = chainRef.current;
+
+      const recordTelemetry = () => {
+        const flashPayload = { deltaMs: Number(deltaMs.toFixed(1)), nonce: Date.now() };
+        if (deck === 'A') {
+          setDeckANudgeMs((prev) =>
+            options?.resetCounter ? 0 : Number((prev + deltaMs).toFixed(1))
+          );
+          setDeckANudgeFlash(flashPayload);
+          if (nudgeFlashTimerRef.current.A !== null) {
+            window.clearTimeout(nudgeFlashTimerRef.current.A);
+          }
+          nudgeFlashTimerRef.current.A = window.setTimeout(() => {
+            setDeckANudgeFlash(null);
+          }, 1400);
+        } else {
+          setDeckBNudgeMs((prev) =>
+            options?.resetCounter ? 0 : Number((prev + deltaMs).toFixed(1))
+          );
+          setDeckBNudgeFlash(flashPayload);
+          if (nudgeFlashTimerRef.current.B !== null) {
+            window.clearTimeout(nudgeFlashTimerRef.current.B);
+          }
+          nudgeFlashTimerRef.current.B = window.setTimeout(() => {
+            setDeckBNudgeFlash(null);
+          }, 1400);
+        }
+      };
+
+      if (chain?.scratchSession && chain.isScratching) {
+        chain.scratchSession.nudgePositionAndVelocity(deltaSec, chain.playbackRate);
+        recordTelemetry();
+        return;
+      }
+
+      const isPlaying = deck === 'A' ? deckAPlayingRef.current : deckBPlayingRef.current;
+      if (chain && chain.source && isPlaying) {
+        const ctx = chain.lowEq.context;
+        const nowPerf = performance.now();
+        const elapsed = ((nowPerf - chain.startedAtPerfMs) / 1000) * chain.playbackRate;
+        const beatSec = 60 / Math.max(40, getEffectiveBpm(track));
+        let currentLiveTime = chain.offsetSec + elapsed;
+        let nextLoopAnchor = chain.offsetSec;
+        let posInLoop = 0;
+
+        if (chain.loopBeats > 0) {
+          const loopDur = beatSec * chain.loopBeats;
+          if (loopDur > 0.1) {
+            posInLoop = ((elapsed % loopDur) + loopDur) % loopDur;
+            currentLiveTime = chain.offsetSec + posInLoop;
+            nextLoopAnchor = Math.max(
+              0,
+              Math.min(track.duration - 0.1, chain.offsetSec + deltaSec)
+            );
+          }
+        }
+
+        const nudgedTime = Math.max(
+          0,
+          Math.min(track.duration - 0.05, currentLiveTime + deltaSec)
+        );
+
+        const oldSource = chain.source;
+        const oldGain = chain.sourceGain;
+        const audioNow = ctx.currentTime;
+
+        if (oldGain) {
+          oldGain.gain.cancelScheduledValues(audioNow);
+          oldGain.gain.setValueAtTime(oldGain.gain.value, audioNow);
+          oldGain.gain.linearRampToValueAtTime(0.0001, audioNow + 0.008);
+        }
+        try {
+          oldSource.onended = null;
+          oldSource.stop(audioNow + 0.012);
+        } catch {
+          // ignore
+        }
+        window.setTimeout(() => {
+          try {
+            oldSource.disconnect();
+            oldGain?.disconnect();
+          } catch {
+            // ignore
+          }
+        }, 24);
+
+        const newSource = ctx.createBufferSource();
+        newSource.buffer = track.audioBuffer;
+        newSource.playbackRate.value = chain.playbackRate;
+        if (chain.loopBeats > 0) {
+          newSource.loop = true;
+          newSource.loopStart = nextLoopAnchor;
+          newSource.loopEnd = Math.min(
+            track.duration,
+            nextLoopAnchor + beatSec * chain.loopBeats
+          );
+        }
+
+        const newGain = ctx.createGain();
+        newGain.gain.setValueAtTime(0.0001, audioNow);
+        newGain.gain.linearRampToValueAtTime(1, audioNow + 0.008);
+
+        newSource.connect(newGain);
+        newGain.connect(chain.lowEq);
+
+        chain.source = newSource;
+        chain.sourceGain = newGain;
+        chain.offsetSec = chain.loopBeats > 0 ? nextLoopAnchor : nudgedTime;
+        chain.startedAtAudioTime = audioNow;
+        chain.startedAtPerfMs =
+          chain.loopBeats > 0
+            ? nowPerf - (posInLoop / Math.max(0.1, chain.playbackRate)) * 1000
+            : nowPerf;
+
+        newSource.onended = () => {
+          if (chainRef.current === chain && chain.source === newSource && !chain.isScratching) {
+            chainRef.current = null;
+            if (deck === 'A') setDeckAPlaying(false);
+            else setDeckBPlaying(false);
+          }
+        };
+
+        newSource.start(audioNow, nudgedTime);
+
+        if (deck === 'A') {
+          deckATimeRef.current = nudgedTime;
+          setDeckATime(nudgedTime);
+        } else {
+          deckBTimeRef.current = nudgedTime;
+          setDeckBTime(nudgedTime);
+        }
+
+        recordTelemetry();
+        return;
+      }
+
+      const curTime = deck === 'A' ? deckATimeRef.current : deckBTimeRef.current;
+      const nextTime = Math.max(0, Math.min(track.duration - 0.05, curTime + deltaSec));
+      if (deck === 'A') {
+        deckATimeRef.current = nextTime;
+        setDeckATime(nextTime);
+      } else {
+        deckBTimeRef.current = nextTime;
+        setDeckBTime(nextTime);
+      }
+      recordTelemetry();
+    },
+    []
+  );
+
   // Clean up on modal close & reset scene transition detector
   useEffect(() => {
     if (!isOpen) {
@@ -2668,7 +5724,11 @@ export function DjStudioModal({
     setMobilePane('dj');
     prevVisualizerModeRef.current = settingsRef.current.visualizerMode;
     beatStateRef.current = createInitialBeatState();
+    deckABeatStateRef.current = createInitialBeatState();
+    deckBBeatStateRef.current = createInitialBeatState();
     particlesRef.current = [];
+    deckAParticlesRef.current = [];
+    deckBParticlesRef.current = [];
   }, [isOpen, stopAllDjPlayback]);
 
   // Trigger scene transition preview when visualizerMode changes inside DJ Studio
@@ -2747,6 +5807,46 @@ export function DjStudioModal({
       src.start(0, safeOffset);
     },
     [ensureMasterBus, renderedMixBuffer, stopAllDjPlayback]
+  );
+
+  // Start playing 5-second AI Auto-Mix Transition Preview from local preview offset
+  const startTransitionPreviewFromTime = useCallback(
+    async (offsetSec: number, overridePreview?: DjTransitionPreviewRender | null) => {
+      const target = overridePreview ?? aiTransitionPreviewRef.current;
+      if (!target?.audioBuffer) return;
+      stopAllDjPlayback();
+
+      const bus = await ensureMasterBus();
+      if (!bus) return;
+      const { ctx, master } = bus;
+
+      const buf = target.audioBuffer;
+      const safeOffset = Math.max(0, Math.min(Math.max(0.05, buf.duration - 0.05), offsetSec));
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(master);
+
+      previewSourceRef.current = src;
+      previewStartOffsetRef.current = safeOffset;
+      previewStartPerfRef.current = performance.now();
+      setPreviewTimeSec(safeOffset);
+      setIsPreviewPlaying(true);
+
+      src.onended = () => {
+        if (previewSourceRef.current === src) {
+          previewSourceRef.current = null;
+          if (previewLoopRef.current) {
+            void startTransitionPreviewFromTime(0, target);
+          } else {
+            setIsPreviewPlaying(false);
+            setPreviewTimeSec(0);
+          }
+        }
+      };
+
+      src.start(0, safeOffset);
+    },
+    [ensureMasterBus, stopAllDjPlayback]
   );
 
   // Import audio/video files into crate & optionally assign to Deck A / B
@@ -3100,6 +6200,49 @@ export function DjStudioModal({
     [deckATrack, deckBTrack]
   );
 
+  const handleAdjustDeckKey = useCallback(
+    (deck: 'A' | 'B', action: 'prev' | 'next' | 'toggle-mode' | 'auto') => {
+      const target = deck === 'A' ? deckATrack : deckBTrack;
+      if (!target) return;
+      if (action === 'auto') {
+        const detected = detectMusicalKeyFromBuffer(target.audioBuffer);
+        setCrate((prev) =>
+          prev.map((t) =>
+            t.id === target.id
+              ? {
+                  ...t,
+                  musicalKey: detected.musicalKey,
+                  camelotKey: detected.camelotKey,
+                  keyConfidence: detected.confidence,
+                }
+              : t
+          )
+        );
+        setStatusMessage(
+          `Detected Deck ${deck} harmonic key: ${detected.camelotKey} (${detected.musicalKey}).`
+        );
+        return;
+      }
+      const nextEntry = cycleCamelotKey(target.camelotKey, action);
+      setCrate((prev) =>
+        prev.map((t) =>
+          t.id === target.id
+            ? {
+                ...t,
+                musicalKey: nextEntry.musicalKey,
+                camelotKey: nextEntry.camelotKey,
+                keyConfidence: 1,
+              }
+            : t
+        )
+      );
+      setStatusMessage(
+        `Set Deck ${deck} Camelot key to ${nextEntry.camelotKey} (${nextEntry.musicalKey}).`
+      );
+    },
+    [deckATrack, deckBTrack]
+  );
+
   // Micro-align Deck B playhead or transition cue in milliseconds
   const handlePhaseSlipDeckBMs = useCallback(
     (deltaMs: number) => {
@@ -3284,6 +6427,90 @@ export function DjStudioModal({
     chain.delayWet.gain.setTargetAtTime(currentWet > 0.1 ? 0 : 0.65, now, 0.03);
   }, []);
 
+  const snapTimeToTrackBeatGrid = useCallback(
+    (track: DjTrackAsset | null, rawTimeSec: number): number => {
+      if (!track) return Math.max(0, rawTimeSec);
+      const clamped = Math.max(0, Math.min(track.duration - 0.05, rawTimeSec));
+      const pool = getEffectiveBeatGridPoints(track).map((p) => p.timeSec);
+      const beats = pool.length > 0 ? pool : track.beatTimes;
+      if (!beats || beats.length === 0) return Number(clamped.toFixed(3));
+      return Math.max(0, Math.min(track.duration - 0.05, findNearestBeat(beats, clamped)));
+    },
+    []
+  );
+
+  const handleSnapDeckPlayheadToBeatGrid = useCallback(
+    (deck: 'A' | 'B') => {
+      const track = deck === 'A' ? deckATrackRef.current : deckBTrackRef.current;
+      if (!track) return;
+      const cur = deck === 'A' ? deckATimeRef.current : deckBTimeRef.current;
+      const snapped = snapTimeToTrackBeatGrid(track, cur);
+      if (deck === 'A') {
+        deckATimeRef.current = snapped;
+        setDeckATime(snapped);
+        if (deckAPlayingRef.current) {
+          void startLiveDeckFromTime('A', snapped);
+        }
+      } else {
+        deckBTimeRef.current = snapped;
+        setDeckBTime(snapped);
+        if (deckBPlayingRef.current) {
+          void startLiveDeckFromTime('B', snapped);
+        }
+      }
+      setStatusMessage(`Snapped Deck ${deck} playhead to Beat Grid (${formatDjClock(snapped)}).`);
+    },
+    [snapTimeToTrackBeatGrid, startLiveDeckFromTime]
+  );
+
+  const handleToggleSyncToBeatGrid = useCallback(() => {
+    setSyncToBeatGrid((prev) => {
+      const next = !prev;
+      setCueSnapToBeat(next);
+      if (next) {
+        setDeckATransientSeek(false);
+        setDeckBTransientSeek(false);
+        if (deckATrackRef.current) {
+          const snappedA = snapTimeToTrackBeatGrid(deckATrackRef.current, deckATimeRef.current);
+          deckATimeRef.current = snappedA;
+          setDeckATime(snappedA);
+          if (deckAPlayingRef.current) {
+            void startLiveDeckFromTime('A', snappedA);
+          }
+        }
+        if (deckBTrackRef.current) {
+          const snappedB = snapTimeToTrackBeatGrid(deckBTrackRef.current, deckBTimeRef.current);
+          deckBTimeRef.current = snappedB;
+          setDeckBTime(snappedB);
+          if (deckBPlayingRef.current) {
+            void startLiveDeckFromTime('B', snappedB);
+          }
+        }
+        if (
+          renderedScheduleRef.current?.beatTimesTimeline.length &&
+          (isAutoSetPlayingRef.current || autoSetTimeRef.current > 0.02)
+        ) {
+          const snappedSet = findNearestBeat(
+            renderedScheduleRef.current.beatTimesTimeline,
+            autoSetTimeRef.current
+          );
+          setAutoSetTime(snappedSet);
+          if (isAutoSetPlayingRef.current) {
+            void startAutoSetFromTime(snappedSet);
+          }
+        }
+        setStatusMessage(
+          'Sync to Beat Grid enabled — seeking & cueing snap to nearest beat marker.'
+        );
+      } else {
+        setStatusMessage(
+          'Sync to Beat Grid disabled — free millisecond seeking & cueing active.'
+        );
+      }
+      return next;
+    });
+  }, [snapTimeToTrackBeatGrid, startAutoSetFromTime, startLiveDeckFromTime]);
+
   // Cue Point Manager handlers
   const handlePlaceCuePoint = useCallback(
     (
@@ -3300,8 +6527,9 @@ export function DjStudioModal({
           ? overrideTimeSec
           : playhead;
       const clamped = Math.max(0, Math.min(target.duration - 0.05, rawSec));
-      const finalTime = cueSnapToBeat
-        ? findNearestBeat(target.beatTimes, clamped)
+      const snapCue = syncToBeatGrid || cueSnapToBeat;
+      const finalTime = snapCue
+        ? snapTimeToTrackBeatGrid(target, clamped)
         : Number(clamped.toFixed(2));
       const label = (overrideLabel ?? cueDraftLabel).trim() || `Cue ${(target.cuePoints?.length ?? 0) + 1}`;
       const color = overrideColor ?? cueDraftColor;
@@ -3323,17 +6551,26 @@ export function DjStudioModal({
         })
       );
       setStatusMessage(
-        `Placed "${label}" cue on Deck ${deck} at ${formatDjClock(nextCue.timeSec)}${cueSnapToBeat ? ' (beat-snapped)' : ''}.`
+        `Placed "${label}" cue on Deck ${deck} at ${formatDjClock(nextCue.timeSec)}${snapCue ? ' (beat-snapped)' : ''}.`
       );
     },
-    [cueDraftColor, cueDraftLabel, cueSnapToBeat, deckATrack, deckBTrack]
+    [
+      cueDraftColor,
+      cueDraftLabel,
+      cueSnapToBeat,
+      deckATrack,
+      deckBTrack,
+      snapTimeToTrackBeatGrid,
+      syncToBeatGrid,
+    ]
   );
 
   const handleJumpToCuePoint = useCallback(
     (deck: 'A' | 'B', cue: DjCuePoint) => {
       const target = deck === 'A' ? deckATrack : deckBTrack;
       if (!target) return;
-      const safeTime = Math.max(0, Math.min(target.duration - 0.05, cue.timeSec));
+      const rawTime = Math.max(0, Math.min(target.duration - 0.05, cue.timeSec));
+      const safeTime = syncToBeatGrid ? snapTimeToTrackBeatGrid(target, rawTime) : rawTime;
       if (deck === 'A') {
         setDeckATime(safeTime);
         if (cueAutoPlayOnJump || deckAPlayingRef.current) {
@@ -3346,10 +6583,17 @@ export function DjStudioModal({
         }
       }
       setStatusMessage(
-        `Jumped Deck ${deck} to "${cue.label}" (${formatDjClock(safeTime)}).`
+        `Jumped Deck ${deck} to "${cue.label}" (${formatDjClock(safeTime)}${syncToBeatGrid ? ' · beat-snapped' : ''}).`
       );
     },
-    [cueAutoPlayOnJump, deckATrack, deckBTrack, startLiveDeckFromTime]
+    [
+      cueAutoPlayOnJump,
+      deckATrack,
+      deckBTrack,
+      snapTimeToTrackBeatGrid,
+      startLiveDeckFromTime,
+      syncToBeatGrid,
+    ]
   );
 
   const handleDeleteCuePoint = useCallback(
@@ -3375,8 +6619,9 @@ export function DjStudioModal({
       const target = deck === 'A' ? deckATrack : deckBTrack;
       if (!target) return;
       const raw = deck === 'A' ? deckATimeRef.current : deckBTimeRef.current;
-      const nextTime = cueSnapToBeat
-        ? findNearestBeat(target.beatTimes, raw)
+      const snapCue = syncToBeatGrid || cueSnapToBeat;
+      const nextTime = snapCue
+        ? snapTimeToTrackBeatGrid(target, raw)
         : Number(raw.toFixed(2));
       setCrate((prev) =>
         prev.map((t) =>
@@ -3394,7 +6639,7 @@ export function DjStudioModal({
       );
       setStatusMessage(`Moved cue marker on Deck ${deck} to ${formatDjClock(nextTime)}.`);
     },
-    [cueSnapToBeat, deckATrack, deckBTrack]
+    [cueSnapToBeat, deckATrack, deckBTrack, snapTimeToTrackBeatGrid, syncToBeatGrid]
   );
 
   const handleRenameCuePoint = useCallback(
@@ -3488,25 +6733,36 @@ export function DjStudioModal({
 
   // Build & Preview the full Auto-DJ Mixed Set (Beat-Mix or Lyric-Mix)
   const buildAndRenderSet = useCallback(
-    async (mode: 'dual' | 'crate', autoPlayAfterRender = true) => {
+    async (
+      mode: 'dual' | 'crate',
+      autoPlayAfterRender = true,
+      overrideConfig?: {
+        dualPlan?: DjTransitionPlan;
+        transitionStyle?: DjTransitionStyle;
+        startAtSec?: number;
+      }
+    ) => {
       setErrorMsg(null);
       setIsRenderingSet(true);
       stopAllDjPlayback();
 
       try {
         let schedule: DjScheduleRenderPlan;
+        const effectivePlan = overrideConfig?.dualPlan ?? dualPlan;
+        const effectiveStyle = overrideConfig?.transitionStyle ?? transitionStyle;
+
         if (mode === 'crate' && crate.length >= 2) {
           schedule = buildCrateSetSchedule(crate, {
             triggerMode: triggerMode === 'manual' ? 'beats' : triggerMode,
-            transitionStyle,
+            transitionStyle: effectiveStyle,
             videoMixStyle,
             videoBlendMode,
             videoLayerOpacity,
             crossfadeBeats,
             beatMatchTempo,
           });
-        } else if (deckATrack && deckBTrack && dualPlan) {
-          schedule = buildScheduleFromDualPlan(deckATrack, deckBTrack, dualPlan, {
+        } else if (deckATrack && deckBTrack && effectivePlan) {
+          schedule = buildScheduleFromDualPlan(deckATrack, deckBTrack, effectivePlan, {
             videoBlendMode,
             videoLayerOpacity,
           });
@@ -3514,7 +6770,7 @@ export function DjStudioModal({
           const single = deckATrack ?? crate[0];
           schedule = buildCrateSetSchedule([single], {
             triggerMode: 'beats',
-            transitionStyle,
+            transitionStyle: effectiveStyle,
             videoMixStyle,
             videoBlendMode,
             videoLayerOpacity,
@@ -3527,16 +6783,23 @@ export function DjStudioModal({
 
         const rendered = await renderOfflineDjSchedule(schedule, {
           normalize: normalizeMixAudio,
+          limiterEnabled,
+          limiterCeilingDb,
+          autoGainFromPeak: limiterAutoGainEnabled,
         });
 
         autoSetVideoResolverRef.current?.dispose();
         autoSetVideoResolverRef.current = createDjVideoFrameResolver(schedule);
         offlineSetAnalyzerRef.current = new OfflineAudioAnalyzer(rendered.audioBuffer, 2048);
 
+        const initialOffset = Math.max(
+          0,
+          Math.min(rendered.audioBuffer.duration - 0.5, overrideConfig?.startAtSec ?? 0)
+        );
         setRenderedSchedule(schedule);
         setRenderedMixBuffer(rendered.audioBuffer);
         setRenderedPeaks(rendered.waveformPeaks);
-        setAutoSetTime(0);
+        setAutoSetTime(initialOffset);
         setDjTrimStart(0);
         setDjTrimEnd(Number(rendered.audioBuffer.duration.toFixed(2)));
 
@@ -3552,12 +6815,15 @@ export function DjStudioModal({
           onUpdateSettings({ trackTitle: title });
         }
 
+        const limiterInfo = limiterEnabled
+          ? ` · Brick-Wall ${limiterCeilingDb.toFixed(1)} dBFS (Auto-Gain ${rendered.appliedAutoGainDb >= 0 ? '+' : ''}${rendered.appliedAutoGainDb.toFixed(1)} dB)`
+          : '';
         setStatusMessage(
-          `Mixed ${schedule.segments.length} tracks (${schedule.totalDurationSec.toFixed(1)}s · ${schedule.mergedLyrics.length} synced lyrics · ${transitionStyle}).`
+          `Mixed ${schedule.segments.length} tracks (${schedule.totalDurationSec.toFixed(1)}s · ${schedule.mergedLyrics.length} synced lyrics · ${effectiveStyle}${limiterInfo}).`
         );
 
         if (autoPlayAfterRender) {
-          await startAutoSetFromTime(0, rendered.audioBuffer);
+          await startAutoSetFromTime(initialOffset, rendered.audioBuffer);
         }
 
         return { schedule, rendered };
@@ -3575,6 +6841,9 @@ export function DjStudioModal({
       deckATrack,
       deckBTrack,
       dualPlan,
+      limiterAutoGainEnabled,
+      limiterCeilingDb,
+      limiterEnabled,
       normalizeMixAudio,
       onLyricsChange,
       onUpdateSettings,
@@ -3585,6 +6854,204 @@ export function DjStudioModal({
       videoBlendMode,
       videoLayerOpacity,
       videoMixStyle,
+    ]
+  );
+
+  // Generate non-destructive 5-second transition preview render inside the waveform area
+  const handleGenerateTransitionPreview = useCallback(
+    async (
+      proposal: {
+        id: string;
+        label: string;
+        deckAOutSec: number;
+        deckBInSec: number;
+        deckBDropSec?: number;
+        crossfadeBeats: 4 | 8 | 16 | 32;
+        transitionStyle: DjTransitionStyle;
+        videoMixStyle: DjVideoMixStyle;
+        triggerMode?: DjMixTriggerMode;
+        beatMatchTempo?: boolean;
+        alignPhaseToBeat?: boolean;
+      },
+      autoPlay = true
+    ) => {
+      if (!deckATrack || !deckBTrack) {
+        setPreviewError('Load tracks into both Deck A and Deck B first.');
+        return;
+      }
+      const seq = ++previewRenderSeqRef.current;
+      setIsPreviewRendering(true);
+      setPreviewError(null);
+      if (proposal.id !== 'manual-plan') {
+        setActiveAiSuggestionId(proposal.id);
+      }
+
+      try {
+        const renderedPreview = await renderTransitionPreview5s(
+          deckATrack,
+          deckBTrack,
+          {
+            ...proposal,
+            triggerMode: proposal.triggerMode ?? 'beats',
+            beatMatchTempo: proposal.beatMatchTempo ?? true,
+            alignPhaseToBeat: proposal.alignPhaseToBeat ?? true,
+          },
+          {
+            limiterEnabled,
+            limiterCeilingDb,
+            autoGainFromPeak: normalizeMixAudio,
+            windowSeconds: 5.0,
+          }
+        );
+        if (seq !== previewRenderSeqRef.current) return;
+
+        setAiTransitionPreview(renderedPreview);
+        setPreviewTimeSec(0);
+        if (autoPlay) {
+          await startTransitionPreviewFromTime(0, renderedPreview);
+        } else {
+          setStatusMessage(
+            `5s transition preview "${renderedPreview.label}" ready in the Smart Crossfade waveform area.`
+          );
+        }
+      } catch (err) {
+        if (seq !== previewRenderSeqRef.current) return;
+        setPreviewError(
+          err instanceof Error ? err.message : 'Unable to generate 5-second transition preview.'
+        );
+      } finally {
+        if (seq === previewRenderSeqRef.current) {
+          setIsPreviewRendering(false);
+        }
+      }
+    },
+    [
+      deckATrack,
+      deckBTrack,
+      limiterCeilingDb,
+      limiterEnabled,
+      normalizeMixAudio,
+      startTransitionPreviewFromTime,
+    ]
+  );
+
+  // AI Auto-Mix Assistant: analyze Deck A & Deck B energy contours via server-side Gemini API
+  const handleAnalyzeAiAutoMix = useCallback(async () => {
+    if (!deckATrack || !deckBTrack) {
+      setAiAutoMixError('Load tracks into both Deck A and Deck B first.');
+      return;
+    }
+    setAiAutoMixLoading(true);
+    setAiAutoMixError(null);
+    try {
+      const result = await requestAiAutoMixSuggestions(
+        deckATrack,
+        deckBTrack,
+        aiAutoMixPreference
+      );
+      setAiAutoMixResult(result);
+      const topSuggestion = result.suggestions[0] ?? null;
+      setActiveAiSuggestionId(topSuggestion?.id ?? null);
+      setStatusMessage(
+        `AI Auto-Mix analyzed ${deckATrack.title} → ${deckBTrack.title}: ${result.suggestions.length} Energy Match points ready.`
+      );
+      if (topSuggestion) {
+        void handleGenerateTransitionPreview(topSuggestion, false);
+      }
+    } catch (err) {
+      setAiAutoMixError(
+        err instanceof Error ? err.message : 'AI Auto-Mix structure analysis failed.'
+      );
+    } finally {
+      setAiAutoMixLoading(false);
+    }
+  }, [aiAutoMixPreference, deckATrack, deckBTrack, handleGenerateTransitionPreview]);
+
+  // One-click execution of an AI Energy Match transition suggestion
+  const handleExecuteAiAutoMixSuggestion = useCallback(
+    async (suggestion: AiAutoMixSuggestion, autoPlay = true) => {
+      if (!deckATrack || !deckBTrack) return;
+      stopTransitionPreviewPlayback();
+      setAiTransitionPreview(null);
+      setPreviewTimeSec(0);
+      setTriggerMode('beats');
+      setBeatMatchTempo(true);
+      setAlignPhaseToBeat(true);
+      setCrossfadeBeats(suggestion.crossfadeBeats);
+      setTransitionStyle(suggestion.transitionStyle);
+      setVideoMixStyle(suggestion.videoMixStyle);
+      setDeckAOutLyricId(null);
+      setDeckBInLyricId(null);
+      setDeckAOutTime(suggestion.deckAOutSec);
+      setDeckBInTime(suggestion.deckBInSec);
+      setActiveAiSuggestionId(suggestion.id);
+      setActiveBpmPreset(null);
+
+      const nextPlan = buildDualDeckMixPlan(deckATrack, deckBTrack, {
+        triggerMode: 'beats',
+        transitionStyle: suggestion.transitionStyle,
+        videoMixStyle: suggestion.videoMixStyle,
+        crossfadeBeats: suggestion.crossfadeBeats,
+        beatMatchTempo: true,
+        alignPhaseToBeat: true,
+        customOutTimeA: suggestion.deckAOutSec,
+        customInTimeB: suggestion.deckBInSec,
+      });
+
+      if (autoPlay) {
+        const previewStart = Math.max(0, nextPlan.transitionStartSec - 2.5);
+        await buildAndRenderSet('dual', true, {
+          dualPlan: nextPlan,
+          transitionStyle: suggestion.transitionStyle,
+          startAtSec: previewStart,
+        });
+      } else {
+        setStatusMessage(
+          `Applied AI Energy Match "${suggestion.label}": Out ${suggestion.deckAOutSec.toFixed(1)}s → In ${suggestion.deckBInSec.toFixed(1)}s (${suggestion.crossfadeBeats}B ${suggestion.transitionStyle}).`
+        );
+      }
+    },
+    [buildAndRenderSet, deckATrack, deckBTrack, stopTransitionPreviewPlayback]
+  );
+
+  // Commit an auditioned 5s preview into full-set cue points and render the full mix
+  const handleCommitTransitionPreview = useCallback(
+    async (preview: DjTransitionPreviewRender) => {
+      if (!deckATrack || !deckBTrack) return;
+      const matchedSuggestion = aiAutoMixResult?.suggestions.find(
+        (s) => s.id === preview.suggestionId
+      );
+      if (matchedSuggestion) {
+        await handleExecuteAiAutoMixSuggestion(matchedSuggestion, true);
+        return;
+      }
+      stopTransitionPreviewPlayback();
+      setAiTransitionPreview(null);
+      setPreviewTimeSec(0);
+      setTriggerMode(preview.plan.triggerMode);
+      setBeatMatchTempo(beatMatchTempo);
+      setAlignPhaseToBeat(alignPhaseToBeat);
+      setCrossfadeBeats(preview.crossfadeBeats);
+      setTransitionStyle(preview.transitionStyle);
+      setDeckAOutLyricId(null);
+      setDeckBInLyricId(null);
+      setDeckAOutTime(preview.deckAOutSec);
+      setDeckBInTime(preview.deckBInSec);
+      await buildAndRenderSet('dual', true, {
+        dualPlan: preview.plan,
+        transitionStyle: preview.transitionStyle,
+        startAtSec: Math.max(0, preview.previewStartSec),
+      });
+    },
+    [
+      aiAutoMixResult?.suggestions,
+      alignPhaseToBeat,
+      beatMatchTempo,
+      buildAndRenderSet,
+      deckATrack,
+      deckBTrack,
+      handleExecuteAiAutoMixSuggestion,
+      stopTransitionPreviewPlayback,
     ]
   );
 
@@ -3679,14 +7146,24 @@ export function DjStudioModal({
     const freqBuf = new Uint8Array(1024);
     const waveBuf = new Uint8Array(1024);
     const lpWaveBuf = new Uint8Array(1024);
+    const deckFreqBuf = new Uint8Array(1024);
+    const deckWaveBuf = new Uint8Array(1024);
+    const deckLpWaveBuf = new Uint8Array(1024);
+    const preFloatBuf = new Float32Array(1024);
+    const postFloatBuf = new Float32Array(1024);
+    let visualPrePeak = 0;
+    let visualOutPeak = 0;
     waveBuf.fill(128);
     lpWaveBuf.fill(128);
+    deckWaveBuf.fill(128);
+    deckLpWaveBuf.fill(128);
 
     const tick = (now: number) => {
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTs) / 1000));
       lastTs = now;
 
       // Update live deck playheads (skip while active scratch session drives playhead directly)
+      let liveTimeA = deckATimeRef.current;
       const chainA = deckAChainRef.current;
       if (chainA && chainA.source && !chainA.isScratching && deckAPlayingRef.current && deckATrackRef.current) {
         const elapsed = ((now - chainA.startedAtPerfMs) / 1000) * chainA.playbackRate;
@@ -3699,9 +7176,11 @@ export function DjStudioModal({
         } else {
           t = Math.min(deckATrackRef.current.duration, t);
         }
+        liveTimeA = t;
         setDeckATime(t);
       }
 
+      let liveTimeB = deckBTimeRef.current;
       const chainB = deckBChainRef.current;
       if (chainB && chainB.source && !chainB.isScratching && deckBPlayingRef.current && deckBTrackRef.current) {
         const elapsed = ((now - chainB.startedAtPerfMs) / 1000) * chainB.playbackRate;
@@ -3714,15 +7193,24 @@ export function DjStudioModal({
         } else {
           t = Math.min(deckBTrackRef.current.duration, t);
         }
+        liveTimeB = t;
         setDeckBTime(t);
       }
 
-      // Update Auto-Set timeline playhead
+      // Update Auto-Set or 5s Preview timeline playhead
       let stageTime = autoSetTimeRef.current;
       if (isAutoSetPlayingRef.current) {
         const elapsed = (now - autoSetStartPerfRef.current) / 1000;
         stageTime = autoSetStartOffsetRef.current + elapsed;
         setAutoSetTime(stageTime);
+      } else if (isPreviewPlayingRef.current && aiTransitionPreviewRef.current) {
+        const elapsed = (now - previewStartPerfRef.current) / 1000;
+        const localPos = Math.min(
+          aiTransitionPreviewRef.current.durationSec,
+          previewStartOffsetRef.current + elapsed
+        );
+        setPreviewTimeSec(localPos);
+        stageTime = aiTransitionPreviewRef.current.previewStartSec + localPos;
       } else if (
         deckAPlayingRef.current ||
         deckBPlayingRef.current ||
@@ -3732,8 +7220,72 @@ export function DjStudioModal({
         stageTime =
           (crossfaderRef.current > 0.25 && (deckBPlayingRef.current || deckBScratchingRef.current)) ||
           (deckBScratchingRef.current && !deckAScratchingRef.current && !deckAPlayingRef.current)
-            ? deckBTimeRef.current
-            : deckATimeRef.current;
+            ? liveTimeB
+            : liveTimeA;
+      }
+
+      // Advance Master BPM Beat-Grid Glow Clock (locked to live deck/set beat grid when playing, else phase-continuous freewheel)
+      let syncedMasterClock = false;
+      if (
+        deckAPlayingRef.current &&
+        deckATrackRef.current &&
+        !(crossfaderRef.current > 0.35 && deckBPlayingRef.current && deckBTrackRef.current)
+      ) {
+        const trk = deckATrackRef.current;
+        const anchor = trk.downbeatTimes[0] ?? trk.beatTimes[0] ?? 0;
+        const rawPeriod = 60 / Math.max(40, getEffectiveBpm(trk));
+        const beatFloat = (liveTimeA - anchor) / rawPeriod;
+        masterBeatClockRef.current.phase = ((beatFloat % 1) + 1) % 1;
+        masterBeatClockRef.current.beatIndex = ((Math.floor(beatFloat + 0.0005) % 4) + 4) % 4;
+        syncedMasterClock = true;
+      } else if (deckBPlayingRef.current && deckBTrackRef.current) {
+        const trk = deckBTrackRef.current;
+        const anchor = trk.downbeatTimes[0] ?? trk.beatTimes[0] ?? 0;
+        const rawPeriod = 60 / Math.max(40, getEffectiveBpm(trk));
+        const beatFloat = (liveTimeB - anchor) / rawPeriod;
+        masterBeatClockRef.current.phase = ((beatFloat % 1) + 1) % 1;
+        masterBeatClockRef.current.beatIndex = ((Math.floor(beatFloat + 0.0005) % 4) + 4) % 4;
+        syncedMasterClock = true;
+      } else if (isAutoSetPlayingRef.current && renderedScheduleRef.current) {
+        const beatList = renderedScheduleRef.current.beatTimesTimeline;
+        if (beatList && beatList.length >= 2) {
+          let lo = 0;
+          let hi = beatList.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (beatList[mid] <= stageTime) lo = mid;
+            else hi = mid - 1;
+          }
+          const b0 = beatList[lo];
+          const b1 = beatList[lo + 1] ?? b0 + 60 / Math.max(40, detectedMasterBpmRef.current);
+          const span = Math.max(0.15, b1 - b0);
+          masterBeatClockRef.current.phase = Math.max(0, Math.min(0.999, (stageTime - b0) / span));
+          masterBeatClockRef.current.beatIndex = ((lo % 4) + 4) % 4;
+          syncedMasterClock = true;
+        }
+      } else if (isPreviewPlayingRef.current && deckATrackRef.current) {
+        const trk = deckATrackRef.current;
+        const anchor = trk.downbeatTimes[0] ?? trk.beatTimes[0] ?? 0;
+        const rawPeriod = 60 / Math.max(40, getEffectiveBpm(trk));
+        const beatFloat = (stageTime - anchor) / rawPeriod;
+        masterBeatClockRef.current.phase = ((beatFloat % 1) + 1) % 1;
+        masterBeatClockRef.current.beatIndex = ((Math.floor(beatFloat + 0.0005) % 4) + 4) % 4;
+        syncedMasterClock = true;
+      }
+
+      if (!syncedMasterClock) {
+        const bpmNow = Math.max(40, Math.min(240, detectedMasterBpmRef.current || 120));
+        const beatDelta = dt * (bpmNow / 60);
+        const nextRaw = masterBeatClockRef.current.phase + beatDelta;
+        if (nextRaw >= 1) {
+          masterBeatClockRef.current.beatIndex =
+            (masterBeatClockRef.current.beatIndex + Math.floor(nextRaw)) % 4;
+        }
+        masterBeatClockRef.current.phase = nextRaw % 1;
+      }
+
+      if (beatGridGlowSubscribersRef.current.size > 0) {
+        beatGridGlowSubscribersRef.current.forEach((drawFn) => drawFn());
       }
 
       // Update Loop Deck playhead bar inside the 4-beat window
@@ -3751,6 +7303,7 @@ export function DjStudioModal({
       let lowPassRms = 0;
       const isAnyPlaying =
         isAutoSetPlayingRef.current ||
+        isPreviewPlayingRef.current ||
         deckAPlayingRef.current ||
         deckBPlayingRef.current ||
         deckAScratchingRef.current ||
@@ -3759,6 +7312,7 @@ export function DjStudioModal({
       if (analyserRef.current && isAnyPlaying) {
         analyserRef.current.getByteFrequencyData(freqBuf);
         analyserRef.current.getByteTimeDomainData(waveBuf);
+        analyserRef.current.getFloatTimeDomainData(postFloatBuf);
         if (beatAnalyserRef.current) {
           beatAnalyserRef.current.getByteTimeDomainData(lpWaveBuf);
           lowPassRms = computeLowPassRms(lpWaveBuf);
@@ -3774,6 +7328,164 @@ export function DjStudioModal({
         const syn = buildSyntheticAudioFrame(1024);
         freqBuf.set(syn.frequencyData);
         waveBuf.set(syn.timeDomainData);
+      }
+
+      // Master Output Brick-Wall Limiter Peak Sensing & Auto-Gain Tracking
+      const limNodes = masterLimiterNodesRef.current;
+      let instPrePeak = 0;
+      let instPostPeak = 0;
+      if (limNodes && isAnyPlaying) {
+        limNodes.preLimiterAnalyser.getFloatTimeDomainData(preFloatBuf);
+        for (let i = 0; i < preFloatBuf.length; i++) {
+          const ap = Math.abs(preFloatBuf[i]);
+          if (ap > instPrePeak) instPrePeak = ap;
+        }
+        for (let i = 0; i < postFloatBuf.length; i++) {
+          const ao = Math.abs(postFloatBuf[i]);
+          if (ao > instPostPeak) instPostPeak = ao;
+        }
+        if (instPrePeak > loudestStackPeakRef.current) {
+          loudestStackPeakRef.current = instPrePeak;
+        }
+        if (limiterEnabledRef.current && limiterAutoGainEnabledRef.current) {
+          const ceilLin = Math.pow(10, limiterCeilingDbRef.current / 20);
+          const refPeak = Math.max(0.15, loudestStackPeakRef.current);
+          let nextTrim = 1;
+          if (refPeak > ceilLin) {
+            nextTrim = Math.max(0.25, ceilLin / refPeak);
+          } else if (refPeak < ceilLin * 0.85) {
+            nextTrim = Math.min(1.5, ceilLin / refPeak);
+          }
+          if (Math.abs(nextTrim - lastAutoTrimGainRef.current) > 0.012) {
+            lastAutoTrimGainRef.current = nextTrim;
+            limNodes.autoTrimGain.gain.setTargetAtTime(
+              nextTrim,
+              limNodes.autoTrimGain.context.currentTime,
+              0.015
+            );
+          }
+        }
+      }
+
+      visualPrePeak = Math.max(instPrePeak, visualPrePeak * 0.88);
+      visualOutPeak = Math.max(instPostPeak, visualOutPeak * 0.86);
+
+      if (now - lastLimiterMeterUpdateMsRef.current >= 65) {
+        lastLimiterMeterUpdateMsRef.current = now;
+        const heldPeak = Math.max(loudestStackPeakRef.current, visualPrePeak);
+        const stackPeakDb = heldPeak > 0.0001 ? 20 * Math.log10(heldPeak) : -60;
+        const outDb = visualOutPeak > 0.0001 ? 20 * Math.log10(visualOutPeak) : -60;
+        const autoGainDb = 20 * Math.log10(Math.max(0.05, lastAutoTrimGainRef.current));
+        const compGrDb = limNodes ? Math.min(0, limNodes.compressor.reduction || 0) : 0;
+        const preAfterTrim = instPrePeak * lastAutoTrimGainRef.current;
+        const clipGrDb =
+          limiterEnabledRef.current && preAfterTrim > instPostPeak + 0.005 && instPostPeak > 0.001
+            ? Math.min(0, 20 * Math.log10(instPostPeak / preAfterTrim))
+            : 0;
+        const totalGrDb = Math.min(0, compGrDb + clipGrDb);
+
+        const prePct = Math.max(2, Math.min(100, ((stackPeakDb + 36) / 42) * 100));
+        const outPct = Math.max(2, Math.min(100, ((outDb + 36) / 36.5) * 100));
+        const grPct = Math.max(0, Math.min(100, (Math.abs(totalGrDb) / 12) * 100));
+
+        if (limiterPreBarRef.current) {
+          limiterPreBarRef.current.style.width = `${prePct.toFixed(1)}%`;
+        }
+        if (limiterOutBarRef.current) {
+          limiterOutBarRef.current.style.width = `${outPct.toFixed(1)}%`;
+        }
+        if (limiterGrBarRef.current) {
+          limiterGrBarRef.current.style.width = `${grPct.toFixed(1)}%`;
+        }
+        if (mixerLimiterLedBarRef.current) {
+          mixerLimiterLedBarRef.current.style.width = `${outPct.toFixed(1)}%`;
+        }
+        if (limiterStackPeakTextRef.current) {
+          limiterStackPeakTextRef.current.textContent =
+            heldPeak > 0.0001
+              ? `${stackPeakDb >= 0 ? '+' : ''}${stackPeakDb.toFixed(1)} dBFS`
+              : '-∞ dBFS';
+        }
+        if (limiterAutoGainTextRef.current) {
+          limiterAutoGainTextRef.current.textContent =
+            limiterEnabledRef.current && limiterAutoGainEnabledRef.current
+              ? `${autoGainDb >= 0 ? '+' : ''}${autoGainDb.toFixed(1)} dB`
+              : '0.0 dB';
+        }
+        if (limiterGrTextRef.current) {
+          limiterGrTextRef.current.textContent = `${totalGrDb.toFixed(1)} dB`;
+        }
+        if (limiterOutTextRef.current) {
+          limiterOutTextRef.current.textContent =
+            visualOutPeak > 0.0001
+              ? `${outDb >= 0 ? '+' : ''}${outDb.toFixed(1)} dBFS`
+              : '-∞ dBFS';
+        }
+        const badgeText = !limiterEnabledRef.current
+          ? visualOutPeak > 0.99
+            ? 'CLIPPING!'
+            : 'BYPASSED'
+          : totalGrDb < -0.25
+            ? 'LIMITING'
+            : 'BRICK-WALL SAFE';
+        if (limiterStatusBadgeRef.current) {
+          limiterStatusBadgeRef.current.textContent = badgeText;
+        }
+        if (mixerLimiterStatusRef.current) {
+          mixerLimiterStatusRef.current.textContent = !limiterEnabledRef.current
+            ? 'OFF'
+            : totalGrDb < -0.25
+              ? `GR ${totalGrDb.toFixed(1)}dB`
+              : `${limiterCeilingDbRef.current.toFixed(1)}dB`;
+        }
+        const transientSnap = fxRackRef.current?.transientShaper.getMeterSnapshot();
+        if (transientSnap) {
+          const attDb = transientSnap.active ? transientSnap.attackDb : 0;
+          const susDb = transientSnap.active ? transientSnap.sustainDb : 0;
+          if (transientAttackTextRef.current) {
+            transientAttackTextRef.current.textContent =
+              Math.abs(attDb) < 0.05
+                ? '0.0 dB'
+                : `${attDb > 0 ? '+' : ''}${attDb.toFixed(1)} dB`;
+          }
+          if (transientSustainTextRef.current) {
+            transientSustainTextRef.current.textContent =
+              Math.abs(susDb) < 0.05
+                ? '0.0 dB'
+                : `${susDb > 0 ? '+' : ''}${susDb.toFixed(1)} dB`;
+          }
+          if (transientAttackBarRef.current) {
+            const norm = Math.max(-1, Math.min(1, attDb / 8));
+            transientAttackBarRef.current.style.left = norm >= 0 ? '50%' : `${(50 + norm * 50).toFixed(1)}%`;
+            transientAttackBarRef.current.style.width = `${(Math.abs(norm) * 50).toFixed(1)}%`;
+          }
+          if (transientSustainBarRef.current) {
+            const norm = Math.max(-1, Math.min(1, susDb / 8));
+            transientSustainBarRef.current.style.left = norm >= 0 ? '50%' : `${(50 + norm * 50).toFixed(1)}%`;
+            transientSustainBarRef.current.style.width = `${(Math.abs(norm) * 50).toFixed(1)}%`;
+          }
+        }
+        const gateSnap = fxRackRef.current?.noiseGate.getMeterSnapshot();
+        if (gateSnap) {
+          if (noiseGateBadgeRef.current) {
+            if (!gateSnap.active) {
+              noiseGateBadgeRef.current.textContent = 'BYPASS';
+              noiseGateBadgeRef.current.className = 'text-[9px] font-mono font-semibold text-slate-500';
+            } else if (gateSnap.isOpen) {
+              noiseGateBadgeRef.current.textContent = 'OPEN';
+              noiseGateBadgeRef.current.className = 'text-[9px] font-mono font-semibold text-emerald-300';
+            } else {
+              noiseGateBadgeRef.current.textContent = 'GATED · SILENT';
+              noiseGateBadgeRef.current.className = 'text-[9px] font-mono font-semibold text-rose-300';
+            }
+          }
+          if (noiseGateGrBarRef.current) {
+            const pct = gateSnap.active
+              ? Math.max(0, Math.min(100, (Math.abs(gateSnap.reductionDb) / 60) * 100))
+              : 0;
+            noiseGateGrBarRef.current.style.width = `${pct.toFixed(1)}%`;
+          }
+        }
       }
 
       const activeSettings = settingsRef.current;
@@ -3912,6 +7624,193 @@ export function DjStudioModal({
         }
       }
 
+      // Independent Per-Deck Pre-Fader Visualizer Outputs (Deck A & Deck B)
+      if (showDeckVisualizersRef.current) {
+        const aspectScale = Math.min(440 / Math.max(1, width), 300 / Math.max(1, height));
+        const monW = Math.max(180, Math.round(width * aspectScale));
+        const monH = Math.max(140, Math.round(height * aspectScale));
+        const monMinDim = Math.min(monW, monH);
+        const sched = renderedScheduleRef.current;
+
+        const renderDeckMonitor = (deck: 'A' | 'B') => {
+          const isA = deck === 'A';
+          const track = isA ? deckATrackRef.current : deckBTrackRef.current;
+          const chain = isA ? deckAChainRef.current : deckBChainRef.current;
+          const isLive = isA
+            ? deckAPlayingRef.current || deckAScratchingRef.current
+            : deckBPlayingRef.current || deckBScratchingRef.current;
+          const deckCanvas = isA ? deckACanvasRef.current : deckBCanvasRef.current;
+          const beatState = isA ? deckABeatStateRef.current : deckBBeatStateRef.current;
+          const particles = isA ? deckAParticlesRef.current : deckBParticlesRef.current;
+          const albumRot = isA ? deckAAlbumRotRef.current : deckBAlbumRotRef.current;
+          const sceneTrans = isA ? deckASceneTransRef.current : deckBSceneTransRef.current;
+          const offlineAnalyzer = isA
+            ? deckAOfflineAnalyzerRef.current
+            : deckBOfflineAnalyzerRef.current;
+          const offlineBeatTracker = isA
+            ? deckAOfflineBeatTrackerRef.current
+            : deckBOfflineBeatTrackerRef.current;
+          const lowBar = isA ? deckALowBarRef.current : deckBLowBarRef.current;
+          const midBar = isA ? deckAMidBarRef.current : deckBMidBarRef.current;
+          const highBar = isA ? deckAHighBarRef.current : deckBHighBarRef.current;
+          const modeEl = isA ? deckAMonitorModeRef.current : deckBMonitorModeRef.current;
+          const beatBurstEl = isA ? deckABeatBurstTextRef.current : deckBBeatBurstTextRef.current;
+          const beatBorderEl = isA ? deckABeatBorderRef.current : deckBBeatBorderRef.current;
+
+          let deckLowPassRms = 0;
+          let monitorTime = isA ? deckATimeRef.current : deckBTimeRef.current;
+          let monitorStatus: 'LIVE PRE-FADER' | 'AUTO-MIX PRE' | 'STANDBY' = 'STANDBY';
+          let playbackRate = isA
+            ? 1 + deckAPitchPctRef.current / 100
+            : 1 + deckBPitchPctRef.current / 100;
+
+          if (isLive && chain?.analyser) {
+            chain.analyser.getByteFrequencyData(deckFreqBuf);
+            chain.analyser.getByteTimeDomainData(deckWaveBuf);
+            chain.beatAnalyser.getByteTimeDomainData(deckLpWaveBuf);
+            deckLowPassRms = computeLowPassRms(deckLpWaveBuf);
+            monitorStatus = 'LIVE PRE-FADER';
+          } else if (
+            isAutoSetPlayingRef.current &&
+            sched &&
+            track &&
+            offlineAnalyzer
+          ) {
+            const matchingSeg = sched.segments.find((seg) => {
+              if (seg.track.id !== track.id) return false;
+              const segEnd =
+                seg.timelineStartSec +
+                seg.sourcePlayDurationSec / Math.max(0.25, seg.playbackRate || 1);
+              return stageTime >= seg.timelineStartSec && stageTime <= segEnd;
+            });
+            if (matchingSeg) {
+              const rate = Math.max(0.25, matchingSeg.playbackRate || 1);
+              const sourceT =
+                matchingSeg.sourceOffsetSec + (stageTime - matchingSeg.timelineStartSec) * rate;
+              offlineAnalyzer.analyzeAt(
+                sourceT,
+                activeSettings.smoothing,
+                deckFreqBuf,
+                deckWaveBuf
+              );
+              deckLowPassRms = offlineBeatTracker
+                ? offlineBeatTracker.getLowPassRmsAt(sourceT, 1024)
+                : 0;
+              monitorTime = sourceT;
+              playbackRate = rate;
+              monitorStatus = 'AUTO-MIX PRE';
+            } else {
+              deckFreqBuf.fill(0);
+              deckWaveBuf.fill(128);
+            }
+          } else {
+            deckFreqBuf.fill(0);
+            deckWaveBuf.fill(128);
+          }
+
+          // Compute pre-fader Low / Mid / High band averages directly for reactive meters
+          let lowSum = 0;
+          for (let i = 0; i <= 10; i++) lowSum += deckFreqBuf[i];
+          const lowNorm = lowSum / (11 * 255);
+
+          let midSum = 0;
+          for (let i = 11; i <= 80; i++) midSum += deckFreqBuf[i];
+          const midNorm = midSum / (70 * 255);
+
+          let highSum = 0;
+          for (let i = 81; i <= 320; i++) highSum += deckFreqBuf[i];
+          const highNorm = highSum / (240 * 255);
+
+          const useDeckTint = deckVisualizerTintModeRef.current === 'deck-accent';
+          const deckSettings: StudioSettings = useDeckTint
+            ? {
+                ...activeSettings,
+                themePreset: 'custom',
+                autoCycleColor: false,
+                beatColorMappingEnabled: false,
+                primaryColor: isA ? '#22d3ee' : '#f59e0b',
+                secondaryColor: isA ? '#38bdf8' : '#fb7185',
+                lyricsOnly: false,
+              }
+            : {
+                ...activeSettings,
+                lyricsOnly: false,
+              };
+
+          const deckCycled = resolveAutoCycledColors(deckSettings, monitorTime);
+          const deckStep = stepBeatDetector(
+            beatState,
+            deckLowPassRms,
+            dt,
+            deckSettings.beatSensitivity,
+            monMinDim,
+            deckCycled.primaryColor,
+            deckCycled.secondaryColor
+          );
+
+          if (lowBar) {
+            lowBar.style.transform = `scaleX(${Math.max(0.03, Math.min(1, lowNorm)).toFixed(3)})`;
+          }
+          if (midBar) {
+            midBar.style.transform = `scaleX(${Math.max(0.03, Math.min(1, midNorm)).toFixed(3)})`;
+          }
+          if (highBar) {
+            highBar.style.transform = `scaleX(${Math.max(0.03, Math.min(1, highNorm)).toFixed(3)})`;
+          }
+          if (beatBorderEl) {
+            beatBorderEl.style.opacity = Math.min(
+              1,
+              deckStep.burstIntensity * 0.85 + deckLowPassRms * 0.45
+            ).toFixed(3);
+          }
+          if (modeEl && modeEl.textContent !== monitorStatus) {
+            modeEl.textContent = monitorStatus;
+          }
+          if (beatBurstEl) {
+            const pct = Math.round(
+              Math.min(100, deckStep.burstIntensity * 75 + deckLowPassRms * 85)
+            );
+            beatBurstEl.textContent = `${pct}%`;
+          }
+
+          if (deckCanvas) {
+            if (deckCanvas.width !== monW || deckCanvas.height !== monH) {
+              deckCanvas.width = monW;
+              deckCanvas.height = monH;
+            }
+            const monCtx = deckCanvas.getContext('2d');
+            if (monCtx) {
+              renderVisualizerFrame({
+                ctx: monCtx,
+                width: monW,
+                height: monH,
+                currentTime: monitorTime,
+                dt,
+                frequencyData: deckFreqBuf,
+                timeDomainData: deckWaveBuf,
+                settings: deckSettings,
+                lyrics: [],
+                bgImage: bgImageRef.current,
+                albumImage: albumImageRef.current,
+                mocapClip: null,
+                particles,
+                isExport: false,
+                albumRotationRef: albumRot,
+                beatBurst: deckStep.burstIntensity,
+                beatTriggered: deckStep.triggered,
+                bpm: track ? getEffectiveBpm(track) * playbackRate : 124,
+                beatShockwaves: deckSettings.beatDetection ? beatState.shockwaves : undefined,
+                sceneTransitionState: sceneTrans,
+                trackDuration: track?.duration,
+              });
+            }
+          }
+        };
+
+        renderDeckMonitor('A');
+        renderDeckMonitor('B');
+      }
+
       rafId = requestAnimationFrame(tick);
     };
 
@@ -3935,8 +7834,9 @@ export function DjStudioModal({
     deckBScratching;
   const stageDisplayTime = isAutoSetPlaying
     ? autoSetTime
-    : deckAPlaying || deckBPlaying
-      ? crossfader > 0.25 && deckBPlaying
+    : deckAPlaying || deckBPlaying || deckAScratching || deckBScratching
+      ? (crossfader > 0.25 && (deckBPlaying || deckBScratching)) ||
+        (!(deckAPlaying || deckAScratching) && (deckBPlaying || deckBScratching))
         ? deckBTime
         : deckATime
       : autoSetTime;
@@ -4032,6 +7932,20 @@ export function DjStudioModal({
             e.target.value = '';
           }}
         />
+        <input
+          ref={samplerPadInputRef}
+          type="file"
+          accept="audio/*"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            const padId = samplerTargetUploadPadIdRef.current;
+            if (f && padId) {
+              void handleLoadAudioFileToSamplerPad(padId, f);
+            }
+            e.target.value = '';
+          }}
+        />
 
         {/* Top DJ Console + Full Studio Toolbar */}
         <div className="h-14 shrink-0 px-3 sm:px-4 border-b border-white/[0.08] bg-[#121620] flex items-center justify-between gap-2 overflow-x-auto">
@@ -4047,9 +7961,29 @@ export function DjStudioModal({
                 >
                   DJ Beat &amp; Lyric Mix Studio
                 </h2>
-                <p className="text-[10px] text-slate-400 font-mono tabular-nums whitespace-nowrap">
-                  Master {masterBpmDisplay} BPM · {crate.length} Track{crate.length === 1 ? '' : 's'}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-[10px] text-slate-400 font-mono tabular-nums whitespace-nowrap">
+                    Master {masterBpmDisplay} BPM · {crate.length} Track{crate.length === 1 ? '' : 's'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleDjTapTempo}
+                    title="Tap Tempo (click rhythmically to log session BPM)"
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold uppercase tracking-wider border transition-all cursor-pointer whitespace-nowrap ${
+                      tapPulseFlash
+                        ? 'bg-emerald-400 text-[#090b10] border-emerald-300 scale-95'
+                        : tapTempoBpm !== null
+                          ? 'bg-emerald-400/15 text-emerald-300 border-emerald-400/35 hover:bg-emerald-400/25'
+                          : 'bg-white/[0.06] text-slate-300 border-white/[0.12] hover:bg-white/[0.12]'
+                    }`}
+                  >
+                    {tapTempoCount > 0 && tapTempoBpm === null
+                      ? `Tap (${tapTempoCount})`
+                      : tapTempoBpm !== null
+                        ? `Tap ${tapTempoBpm.toFixed(1)}`
+                        : 'Tap BPM'}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -4344,12 +8278,24 @@ export function DjStudioModal({
               lyrics={stageLyrics}
               onLyricsChange={onLyricsChange}
               onSeek={(t) => {
-                setAutoSetTime(t);
                 if (isAutoSetPlaying && renderedMixBuffer) {
-                  void startAutoSetFromTime(t, renderedMixBuffer);
+                  const timelineBeats = renderedScheduleRef.current?.beatTimesTimeline;
+                  const snappedTimeline =
+                    syncToBeatGrid && timelineBeats && timelineBeats.length > 0
+                      ? findNearestBeat(timelineBeats, t)
+                      : t;
+                  setAutoSetTime(snappedTimeline);
+                  void startAutoSetFromTime(snappedTimeline, renderedMixBuffer);
                 } else if (deckATrack) {
-                  setDeckATime(Math.min(deckATrack.duration, t));
-                  if (deckAPlaying) void startLiveDeckFromTime('A', Math.min(deckATrack.duration, t));
+                  const clamped = Math.min(deckATrack.duration, t);
+                  const snappedDeck = syncToBeatGrid
+                    ? snapTimeToTrackBeatGrid(deckATrack, clamped)
+                    : clamped;
+                  setAutoSetTime(snappedDeck);
+                  setDeckATime(snappedDeck);
+                  if (deckAPlaying) void startLiveDeckFromTime('A', snappedDeck);
+                } else {
+                  setAutoSetTime(t);
                 }
               }}
               audioInputRef={sidebarAudioInputRef}
@@ -4486,6 +8432,21 @@ export function DjStudioModal({
                       </div>
 
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          type="button"
+                          aria-pressed={syncToBeatGrid}
+                          onClick={handleToggleSyncToBeatGrid}
+                          title="Snap playhead and cue points to the nearest beat marker when seeking or cueing"
+                          className={`px-2 py-1 rounded-md text-[11px] font-medium border flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                            syncToBeatGrid
+                              ? 'bg-cyan-500/15 border-cyan-400/45 text-cyan-200'
+                              : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <Magnet className="w-3 h-3" />
+                          <span>Sync to Beat Grid</span>
+                        </button>
+
                         <button
                           type="button"
                           onClick={() => setBeatMatchTempo((v) => !v)}
@@ -4711,7 +8672,12 @@ export function DjStudioModal({
                         step={0.05}
                         value={Math.min(autoSetTime, renderedMixBuffer.duration)}
                         onChange={(e) => {
-                          const next = parseFloat(e.target.value);
+                          const rawNext = parseFloat(e.target.value);
+                          const timelineBeats = renderedSchedule?.beatTimesTimeline;
+                          const next =
+                            syncToBeatGrid && timelineBeats && timelineBeats.length > 0
+                              ? findNearestBeat(timelineBeats, rawNext)
+                              : rawNext;
                           setAutoSetTime(next);
                           if (isAutoSetPlaying) void startAutoSetFromTime(next);
                         }}
@@ -4740,6 +8706,568 @@ export function DjStudioModal({
             </div>
           )}
 
+          {/* PER-DECK PRE-FADER VISUALIZER OUTPUT MONITORS (Deck A & Deck B) */}
+          <section
+            aria-label="Per-deck pre-fader visualizer output monitors"
+            className="bg-[#121620] border border-white/[0.09] rounded-xl p-3 space-y-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-[#090b10] border border-white/[0.1] flex items-center justify-center shrink-0">
+                  <Monitor className="w-4 h-4 text-cyan-300" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-slate-100">
+                    Deck Visualizer Outputs · Pre-Fader Monitoring
+                  </h3>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    Inspect individual Deck A &amp; Deck B post-EQ reactivity before crossfading into the Master Mix
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <div
+                  className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]"
+                  role="group"
+                  aria-label="Deck visualizer color palette mode"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setDeckVisualizerTintMode('deck-accent')}
+                    className={`px-2 py-0.5 rounded text-[10px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                      deckVisualizerTintMode === 'deck-accent'
+                        ? 'bg-cyan-500/20 text-cyan-200'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Deck A/B Tint
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeckVisualizerTintMode('studio')}
+                    className={`px-2 py-0.5 rounded text-[10px] font-medium whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                      deckVisualizerTintMode === 'studio'
+                        ? 'bg-cyan-500/20 text-cyan-200'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Match Master
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowDeckVisualizers((v) => !v)}
+                  className="px-2.5 py-1 rounded-lg text-[10.5px] font-medium bg-[#090b10] hover:bg-white/[0.06] text-slate-200 border border-white/[0.1] flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  {showDeckVisualizers ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Hide Monitors</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5 text-cyan-300" />
+                      <span>Show Monitors</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {showDeckVisualizers && (() => {
+              const xfadeGains = getCrossfadeGains(crossfader);
+              const formatEqSummary = (eq: DjDeckEqSettings) => {
+                const parts: string[] = [];
+                if (Math.abs(eq.lowGainDb) >= 0.5) {
+                  parts.push(`Low ${eq.lowGainDb > 0 ? '+' : ''}${eq.lowGainDb.toFixed(0)}dB`);
+                }
+                if (Math.abs(eq.midGainDb) >= 0.5) {
+                  parts.push(`Mid ${eq.midGainDb > 0 ? '+' : ''}${eq.midGainDb.toFixed(0)}dB`);
+                }
+                if (Math.abs(eq.highGainDb) >= 0.5) {
+                  parts.push(`High ${eq.highGainDb > 0 ? '+' : ''}${eq.highGainDb.toFixed(0)}dB`);
+                }
+                if (Math.abs(eq.filterSweep) >= 0.04) {
+                  parts.push(eq.filterSweep < 0 ? 'HPF' : 'LPF');
+                }
+                return parts.length > 0 ? parts.join(' · ') : 'Flat EQ';
+              };
+
+              const deckMonitors = [
+                {
+                  deck: 'A' as const,
+                  track: deckATrack,
+                  isPlaying: deckAPlaying || deckAScratching,
+                  pitchPct: deckAPitchPct,
+                  eq: eqA,
+                  xfadeGainPct: Math.round(xfadeGains.gainA * 100),
+                  canvasRef: deckACanvasRef,
+                  lowBarRef: deckALowBarRef,
+                  midBarRef: deckAMidBarRef,
+                  highBarRef: deckAHighBarRef,
+                  modeRef: deckAMonitorModeRef,
+                  beatBurstRef: deckABeatBurstTextRef,
+                  beatBorderRef: deckABeatBorderRef,
+                  accentText: 'text-cyan-300',
+                  accentLabelBg: 'bg-cyan-400 text-[#090b10]',
+                  borderClass: 'border-cyan-400/25',
+                  beatRingClass: 'ring-1 ring-cyan-400/60',
+                  barColor: 'bg-cyan-400',
+                  midColor: 'bg-sky-400',
+                  highColor: 'bg-emerald-400',
+                },
+                {
+                  deck: 'B' as const,
+                  track: deckBTrack,
+                  isPlaying: deckBPlaying || deckBScratching,
+                  pitchPct: deckBPitchPct,
+                  eq: eqB,
+                  xfadeGainPct: Math.round(xfadeGains.gainB * 100),
+                  canvasRef: deckBCanvasRef,
+                  lowBarRef: deckBLowBarRef,
+                  midBarRef: deckBMidBarRef,
+                  highBarRef: deckBHighBarRef,
+                  modeRef: deckBMonitorModeRef,
+                  beatBurstRef: deckBBeatBurstTextRef,
+                  beatBorderRef: deckBBeatBorderRef,
+                  accentText: 'text-amber-300',
+                  accentLabelBg: 'bg-amber-400 text-[#090b10]',
+                  borderClass: 'border-amber-400/25',
+                  beatRingClass: 'ring-1 ring-amber-400/60',
+                  barColor: 'bg-amber-400',
+                  midColor: 'bg-orange-400',
+                  highColor: 'bg-rose-400',
+                },
+              ];
+
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {deckMonitors.map((mon) => {
+                    const effectiveBpm = mon.track
+                      ? (getEffectiveBpm(mon.track) * (1 + mon.pitchPct / 100)).toFixed(1)
+                      : null;
+                    const eqLabel = formatEqSummary(mon.eq);
+
+                    return (
+                      <div
+                        key={mon.deck}
+                        className={`relative bg-[#090b10] border ${mon.borderClass} rounded-xl overflow-hidden flex flex-col`}
+                      >
+                        {/* Beat-Reactive Pre-Fader Border Glow Layer (GPU opacity only) */}
+                        <div
+                          ref={mon.beatBorderRef}
+                          style={{ opacity: 0 }}
+                          aria-hidden="true"
+                          className={`pointer-events-none absolute inset-0 rounded-xl ${mon.beatRingClass}`}
+                        />
+
+                        {/* Monitor Header */}
+                        <div className="relative z-10 px-3 py-2 border-b border-white/[0.07] flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold tracking-wider shrink-0 ${mon.accentLabelBg}`}
+                            >
+                              DECK {mon.deck}
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-[11.5px] font-semibold text-slate-100 truncate">
+                                {mon.track ? mon.track.title : `No Deck ${mon.deck} Track Loaded`}
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[10px] font-mono tabular-nums text-slate-400 truncate">
+                                <span>{effectiveBpm ? `${effectiveBpm} BPM` : '-- BPM'}</span>
+                                <span aria-hidden="true">·</span>
+                                <span>{mon.track?.camelotKey ?? '--'}</span>
+                                <span aria-hidden="true">·</span>
+                                <span className={mon.xfadeGainPct === 0 ? 'text-slate-500' : mon.accentText}>
+                                  Master Send {mon.xfadeGainPct}%
+                                </span>
+                                <span aria-hidden="true">·</span>
+                                <span ref={mon.modeRef} className="text-slate-300">
+                                  {mon.isPlaying
+                                    ? 'LIVE PRE-FADER'
+                                    : isAutoSetPlaying
+                                      ? 'AUTO-MIX PRE'
+                                      : 'STANDBY'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {mon.track ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleDeckPlay(mon.deck)}
+                                className="px-2 py-1 rounded-md text-[10.5px] font-medium bg-white/[0.07] hover:bg-white/[0.14] text-slate-100 border border-white/[0.1] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                {mon.isPlaying ? (
+                                  <Pause className="w-3 h-3" />
+                                ) : (
+                                  <Play className="w-3 h-3 fill-current" />
+                                )}
+                                <span>{mon.isPlaying ? 'Pause' : 'Monitor'}</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  mon.deck === 'A'
+                                    ? deckAInputRef.current?.click()
+                                    : deckBInputRef.current?.click()
+                                }
+                                className="px-2 py-1 rounded-md text-[10.5px] font-medium bg-white/[0.07] hover:bg-white/[0.14] text-slate-100 border border-white/[0.1] flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                <Upload className="w-3 h-3" />
+                                <span>Load {mon.deck}</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Pre-Fader Visualizer Canvas */}
+                        <div className="relative h-[180px] sm:h-[200px] w-full bg-[#05070b] flex items-center justify-center overflow-hidden">
+                          <canvas
+                            ref={mon.canvasRef}
+                            aria-label={`Deck ${mon.deck} pre-fader visualizer output`}
+                            className="max-w-full max-h-full w-auto h-full object-contain block"
+                          />
+                          {!mon.isPlaying && !isAutoSetPlaying && (
+                            <div className="pointer-events-none absolute inset-0 bg-[#05070b]/45 flex flex-col items-center justify-center text-center px-4">
+                              <span className="text-[11px] font-medium text-slate-300">
+                                {mon.track
+                                  ? `Press Monitor on Deck ${mon.deck} to isolate pre-fader reactivity`
+                                  : `Load a track onto Deck ${mon.deck} to preview isolated output`}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Pre-Fader Tri-Band Reactivity & EQ Status Footer */}
+                        <div className="relative z-10 px-3 py-2 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono tabular-nums">
+                          <div className="flex-1 min-w-[190px] grid grid-cols-3 gap-2">
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-[9px] text-slate-400">
+                                <span>Low</span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                                <div
+                                  ref={mon.lowBarRef}
+                                  style={{ transform: 'scaleX(0.03)' }}
+                                  className={`h-full w-full origin-left ${mon.barColor}`}
+                                />
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-[9px] text-slate-400">
+                                <span>Mid</span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                                <div
+                                  ref={mon.midBarRef}
+                                  style={{ transform: 'scaleX(0.03)' }}
+                                  className={`h-full w-full origin-left ${mon.midColor}`}
+                                />
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-[9px] text-slate-400">
+                                <span>High</span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
+                                <div
+                                  ref={mon.highBarRef}
+                                  style={{ transform: 'scaleX(0.03)' }}
+                                  className={`h-full w-full origin-left ${mon.highColor}`}
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 text-slate-400 shrink-0">
+                            <span>{eqLabel}</span>
+                            <span aria-hidden="true">·</span>
+                            <span className={mon.accentText}>
+                              Beat <span ref={mon.beatBurstRef}>0%</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </section>
+
+          {/* AI AUTO-MIX ASSISTANT: Track Structure & Energy Match Transition Engine */}
+          <div className="bg-[#121620] border border-fuchsia-400/25 rounded-xl p-3 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500/25 to-cyan-500/20 border border-fuchsia-400/35 flex items-center justify-center shrink-0">
+                  <Sparkles className="w-4 h-4 text-fuchsia-300" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-slate-100 flex flex-wrap items-center gap-2">
+                    <span>AI Auto-Mix Assistant · Energy Match Transition Engine</span>
+                    {aiAutoMixResult && (
+                      <span className="text-[10px] font-mono tabular-nums text-emerald-300 font-semibold">
+                        {aiAutoMixResult.harmonicSummary}
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    Analyzes outgoing energy fade &amp; incoming drop structure via AI to suggest and execute optimal Energy Match cues
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]">
+                  {(
+                    [
+                      { id: 'balanced', label: 'Balanced' },
+                      { id: 'drop-slam', label: 'Drop Slam' },
+                      { id: 'smooth-blend', label: 'Club Blend' },
+                    ] as const
+                  ).map((pref) => (
+                    <button
+                      key={pref.id}
+                      type="button"
+                      onClick={() => setAiAutoMixPreference(pref.id)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium cursor-pointer transition-colors ${
+                        aiAutoMixPreference === pref.id
+                          ? 'bg-fuchsia-500/25 text-fuchsia-200'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {pref.label}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={!deckATrack || !deckBTrack || aiAutoMixLoading}
+                  onClick={() => void handleAnalyzeAiAutoMix()}
+                  className="px-3 py-1 rounded-lg text-[11px] font-semibold bg-gradient-to-r from-fuchsia-500/85 to-cyan-500/85 hover:brightness-110 text-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                >
+                  {aiAutoMixLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Wand2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {aiAutoMixLoading
+                      ? 'Analyzing Structure…'
+                      : aiAutoMixResult
+                        ? 'Re-Analyze Energy Match'
+                        : 'Analyze Energy Match'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {aiAutoMixError && (
+              <div className="px-2.5 py-1.5 rounded-lg bg-rose-500/12 border border-rose-400/35 text-[11px] text-rose-200 flex items-center justify-between gap-2">
+                <span>{aiAutoMixError}</span>
+                <button
+                  type="button"
+                  onClick={() => setAiAutoMixError(null)}
+                  className="text-rose-300 hover:text-white cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {aiAutoMixResult && (
+              <div className="space-y-2.5">
+                {/* Dual-Track Structural Energy Timeline */}
+                {(aiAutoMixResult.deckAStructure.length > 0 ||
+                  aiAutoMixResult.deckBStructure.length > 0) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    {[
+                      {
+                        deck: 'Deck A (Outgoing)',
+                        track: deckATrack,
+                        segments: aiAutoMixResult.deckAStructure,
+                        markerSec:
+                          aiAutoMixResult.suggestions.find((s) => s.id === activeAiSuggestionId)
+                            ?.deckAOutSec ?? aiAutoMixResult.suggestions[0]?.deckAOutSec,
+                        markerLabel: 'OUT',
+                        barColor: 'bg-cyan-500/30 border-cyan-400/40 text-cyan-100',
+                        markerColor: 'bg-cyan-400 text-[#090b10]',
+                      },
+                      {
+                        deck: 'Deck B (Incoming)',
+                        track: deckBTrack,
+                        segments: aiAutoMixResult.deckBStructure,
+                        markerSec:
+                          aiAutoMixResult.suggestions.find((s) => s.id === activeAiSuggestionId)
+                            ?.deckBDropSec ?? aiAutoMixResult.suggestions[0]?.deckBDropSec,
+                        markerLabel: 'DROP',
+                        barColor: 'bg-amber-500/30 border-amber-400/40 text-amber-100',
+                        markerColor: 'bg-amber-400 text-[#090b10]',
+                      },
+                    ].map((lane) => {
+                      const total = Math.max(1, lane.track?.duration ?? 1);
+                      return (
+                        <div
+                          key={lane.deck}
+                          className="bg-[#090b10] border border-white/[0.08] rounded-lg p-2 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className="font-semibold text-slate-200 truncate">
+                              {lane.deck}: {lane.track?.title ?? '--'}
+                            </span>
+                            {typeof lane.markerSec === 'number' && (
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold tabular-nums ${lane.markerColor}`}
+                              >
+                                {lane.markerLabel} @ {formatDjClock(lane.markerSec)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="relative h-7 rounded bg-white/[0.03] border border-white/[0.06] flex overflow-hidden">
+                            {lane.segments.map((seg, idx) => {
+                              const widthPct = Math.max(
+                                8,
+                                ((Math.max(0.1, seg.endSec - seg.startSec)) / total) * 100
+                              );
+                              return (
+                                <div
+                                  key={`${seg.label}-${idx}`}
+                                  style={{ width: `${widthPct}%` }}
+                                  title={`${seg.label}: ${formatDjClock(seg.startSec)}–${formatDjClock(seg.endSec)} (Energy ${Math.round(seg.energy)}%)`}
+                                  className={`relative h-full border-r border-white/10 last:border-r-0 flex flex-col justify-end px-1 py-0.5 overflow-hidden`}
+                                >
+                                  <div
+                                    style={{
+                                      height: `${Math.max(18, Math.min(100, seg.energy))}%`,
+                                    }}
+                                    className={`absolute inset-x-0 bottom-0 ${lane.barColor} opacity-45`}
+                                  />
+                                  <span className="relative z-10 text-[8.5px] font-mono text-slate-100 truncate leading-none">
+                                    {seg.label}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Ranked AI Energy Match Transition Cards */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-2">
+                  {aiAutoMixResult.suggestions.map((sug, idx) => {
+                    const isSelected = sug.id === activeAiSuggestionId;
+                    return (
+                      <div
+                        key={sug.id}
+                        className={`rounded-lg border p-2.5 flex flex-col justify-between gap-2 transition-colors ${
+                          isSelected
+                            ? 'bg-fuchsia-500/12 border-fuchsia-400/50'
+                            : 'bg-[#090b10] border-white/[0.08] hover:border-white/[0.16]'
+                        }`}
+                      >
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-semibold text-slate-100 truncate">
+                              {idx === 0 ? '★ ' : ''}
+                              {sug.label}
+                            </span>
+                            <span className="text-[10px] font-mono font-bold tabular-nums text-emerald-300 shrink-0">
+                              {sug.energyMatchScore}% Match
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-mono tabular-nums text-slate-300">
+                            <span className="text-cyan-300">
+                              Out {formatDjClock(sug.deckAOutSec)}
+                            </span>
+                            <span className="text-slate-600">→</span>
+                            <span className="text-amber-300">
+                              In {formatDjClock(sug.deckBInSec)}
+                            </span>
+                            <span className="text-rose-300">
+                              (Drop {formatDjClock(sug.deckBDropSec)})
+                            </span>
+                          </div>
+
+                          <div className="text-[9.5px] font-mono text-slate-400">
+                            {sug.crossfadeBeats} Beats · {sug.transitionStyle} · {sug.deckASectionLabel} → {sug.deckBSectionLabel}
+                          </div>
+
+                          <p className="text-[10px] text-slate-300 leading-relaxed">
+                            {sug.rationale}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 pt-1 border-t border-white/[0.06]">
+                          <button
+                            type="button"
+                            disabled={isPreviewRendering}
+                            onClick={() => {
+                              const samePreview = aiTransitionPreview?.suggestionId === sug.id;
+                              if (samePreview && isPreviewPlaying) {
+                                stopTransitionPreviewPlayback();
+                              } else if (samePreview && aiTransitionPreview) {
+                                void startTransitionPreviewFromTime(0, aiTransitionPreview);
+                              } else {
+                                void handleGenerateTransitionPreview(sug, true);
+                              }
+                            }}
+                            title="Render & audition a 5-second transition preview in the waveform area before committing"
+                            className={`px-2 py-1.5 rounded-md text-[10px] font-semibold border flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40 transition-colors ${
+                              aiTransitionPreview?.suggestionId === sug.id
+                                ? 'bg-fuchsia-500/25 border-fuchsia-400/50 text-fuchsia-100'
+                                : 'bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 border-white/[0.08]'
+                            }`}
+                          >
+                            {isPreviewRendering && isSelected ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : aiTransitionPreview?.suggestionId === sug.id && isPreviewPlaying ? (
+                              <Pause className="w-3 h-3 fill-current" />
+                            ) : (
+                              <Play className="w-3 h-3 fill-current" />
+                            )}
+                            <span>5s Preview</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isRenderingSet}
+                            onClick={() => void handleExecuteAiAutoMixSuggestion(sug, true)}
+                            className="flex-1 px-2.5 py-1.5 rounded-md text-[10.5px] font-semibold bg-gradient-to-r from-cyan-400 to-fuchsia-400 hover:brightness-110 text-[#090b10] flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                          >
+                            {isRenderingSet && isSelected ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Zap className="w-3 h-3 fill-current" />
+                            )}
+                            <span>Execute Auto-Mix</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleExecuteAiAutoMixSuggestion(sug, false)}
+                            title="Apply transition cues to Smart Crossfade waveform without rendering audio yet"
+                            className="px-2 py-1.5 rounded-md text-[10px] font-medium bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 border border-white/[0.08] whitespace-nowrap cursor-pointer"
+                          >
+                            Apply Cues
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* SMART CROSSFADE: Audio Waveform Overlap Visualizer & BPM Auto-Calculate Transition Timing */}
           <div className="bg-[#121620] border border-white/[0.09] rounded-xl p-3 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4753,13 +9281,59 @@ export function DjStudioModal({
                   </h3>
                   <p className="text-[10px] font-mono tabular-nums text-slate-400 truncate">
                     {deckATrack && deckBTrack && dualPlan
-                      ? `Deck A ${getEffectiveBpm(deckATrack)} BPM (${(60 / getEffectiveBpm(deckATrack)).toFixed(3)}s/beat) · Deck B ${getEffectiveBpm(deckBTrack)} BPM (${(dualPlan.deckBPlaybackRate * 100).toFixed(1)}% sync) · Overlap ${dualPlan.overlapDurationSec.toFixed(2)}s (${crossfadeBeats} beats)`
+                      ? `Deck A ${getEffectiveBpm(deckATrack)} BPM (${deckATrack.camelotKey ?? '--'} ${deckATrack.musicalKey ?? ''}) · Deck B ${getEffectiveBpm(deckBTrack)} BPM (${deckBTrack.camelotKey ?? '--'} ${deckBTrack.musicalKey ?? ''}) · ${harmonicComparison.label}`
                       : 'Load two tracks to visualize beat-locked waveform overlap and auto-calculate BPM transition timing'}
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                {/* Frequency-Domain Spectrogram Overlay Mode */}
+                <div
+                  className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]"
+                  title="Frequency-domain spectrogram overlay: colors Bass Kicks (Crimson/Orange), Melodic (Cyan/Emerald), and Snares/Hats (Gold/Violet)"
+                >
+                  <span className="px-1.5 text-[9px] font-semibold text-slate-400 tracking-wide">
+                    Spec
+                  </span>
+                  {(
+                    [
+                      { id: 'overlay', label: 'Overlay' },
+                      { id: 'full', label: 'Full' },
+                      { id: 'off', label: 'Off' },
+                    ] as const
+                  ).map((mode) => (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() => setSpectrogramMode(mode.id)}
+                      className={`px-1.5 py-0.5 rounded text-[9.5px] font-medium cursor-pointer transition-colors ${
+                        spectrogramMode === mode.id
+                          ? 'bg-cyan-500/25 text-cyan-200'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sync Playhead & Cues to Beat Grid Toggle */}
+                <button
+                  type="button"
+                  aria-pressed={syncToBeatGrid}
+                  onClick={handleToggleSyncToBeatGrid}
+                  title="Snap playhead and cue points to nearest beat marker when seeking or cueing"
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    syncToBeatGrid
+                      ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200'
+                      : 'bg-[#090b10] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Magnet className="w-3 h-3" />
+                  <span>Sync to Beat Grid</span>
+                </button>
+
                 {/* Visual Beat Grid Overlay Toggle & Subdivision */}
                 <button
                   type="button"
@@ -4849,6 +9423,51 @@ export function DjStudioModal({
 
                 <button
                   type="button"
+                  disabled={!deckATrack || !deckBTrack || !dualPlan || isPreviewRendering}
+                  onClick={() => {
+                    if (isPreviewPlaying) {
+                      stopTransitionPreviewPlayback();
+                      return;
+                    }
+                    const selectedSug =
+                      aiAutoMixResult?.suggestions.find((s) => s.id === activeAiSuggestionId) ??
+                      aiAutoMixResult?.suggestions[0];
+                    if (selectedSug) {
+                      void handleGenerateTransitionPreview(selectedSug, true);
+                      return;
+                    }
+                    if (!dualPlan) return;
+                    void handleGenerateTransitionPreview(
+                      {
+                        id: 'manual-plan',
+                        label: `${crossfadeBeats}B ${transitionStyle}`,
+                        deckAOutSec: dualPlan.transitionStartSec,
+                        deckBInSec: dualPlan.deckBInTime,
+                        crossfadeBeats,
+                        transitionStyle,
+                        videoMixStyle,
+                        triggerMode,
+                        beatMatchTempo,
+                        alignPhaseToBeat,
+                      },
+                      true
+                    );
+                  }}
+                  title="Generate & play a 5-second preview render of the proposed transition inside the waveform area"
+                  className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-fuchsia-200 border border-fuchsia-400/40 flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                >
+                  {isPreviewRendering ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : isPreviewPlaying ? (
+                    <Pause className="w-3 h-3 fill-current" />
+                  ) : (
+                    <Sparkles className="w-3 h-3" />
+                  )}
+                  <span>{isPreviewPlaying ? 'Pause 5s' : '5s Preview'}</span>
+                </button>
+
+                <button
+                  type="button"
                   disabled={!deckATrack || !deckBTrack || !dualPlan || isRenderingSet}
                   onClick={async () => {
                     if (!dualPlan) return;
@@ -4870,23 +9489,362 @@ export function DjStudioModal({
             <SmartCrossfadeOverlapCanvas
               deckA={deckATrack}
               deckB={deckBTrack}
-              plan={dualPlan}
+              plan={aiTransitionPreview?.plan ?? dualPlan}
               zoomMode={crossfadeZoomMode}
               playheadSec={autoSetTime}
               showBeatGrid={showBeatGridOverlay}
               beatGridSubdivision={beatGridSubdivision}
+              masterBeatClockRef={masterBeatClockRef}
+              registerBeatPulseDraw={registerBeatPulseDraw}
+              previewHighlight={
+                aiTransitionPreview
+                  ? {
+                      startSec: aiTransitionPreview.previewStartSec,
+                      endSec: aiTransitionPreview.previewEndSec,
+                      label: aiTransitionPreview.label,
+                    }
+                  : null
+              }
+              previewPlayheadSec={
+                aiTransitionPreview ? aiTransitionPreview.previewStartSec + previewTimeSec : null
+              }
               onSeekTimeline={async (t) => {
-                setAutoSetTime(t);
+                if (
+                  aiTransitionPreview &&
+                  t >= aiTransitionPreview.previewStartSec - 0.15 &&
+                  t <= aiTransitionPreview.previewEndSec + 0.15
+                ) {
+                  const localSeek = Math.max(
+                    0,
+                    Math.min(
+                      aiTransitionPreview.durationSec - 0.05,
+                      t - aiTransitionPreview.previewStartSec
+                    )
+                  );
+                  await startTransitionPreviewFromTime(localSeek, aiTransitionPreview);
+                  return;
+                }
+                const timelineBeats = renderedSchedule?.beatTimesTimeline;
+                const seekSec =
+                  syncToBeatGrid && timelineBeats && timelineBeats.length > 0
+                    ? findNearestBeat(timelineBeats, t)
+                    : syncToBeatGrid && deckATrack
+                      ? snapTimeToTrackBeatGrid(deckATrack, t)
+                      : t;
+                setAutoSetTime(seekSec);
                 if (renderedMixBuffer) {
-                  await startAutoSetFromTime(t, renderedMixBuffer);
+                  await startAutoSetFromTime(seekSec, renderedMixBuffer);
                 } else if (deckATrack && deckBTrack) {
                   const res = await buildAndRenderSet('dual', false);
                   if (res?.rendered.audioBuffer) {
-                    await startAutoSetFromTime(t, res.rendered.audioBuffer);
+                    const postBeats = res.schedule?.beatTimesTimeline;
+                    const finalSec =
+                      syncToBeatGrid && postBeats && postBeats.length > 0
+                        ? findNearestBeat(postBeats, t)
+                        : seekSec;
+                    setAutoSetTime(finalSec);
+                    await startAutoSetFromTime(finalSec, res.rendered.audioBuffer);
                   }
                 }
               }}
             />
+
+            {/* Auto-Mix 5-Second Transition Preview Strip inside the Waveform Area */}
+            {(isPreviewRendering || aiTransitionPreview || previewError) && (
+              <div className="bg-[#090b10] border border-fuchsia-400/30 rounded-lg p-2.5 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0 text-[10.5px]">
+                    <span className="font-semibold text-fuchsia-300 whitespace-nowrap">
+                      {isPreviewRendering
+                        ? 'Rendering 5s Transition Preview…'
+                        : `${(aiTransitionPreview?.durationSec ?? 5).toFixed(1)}s Transition Preview`}
+                    </span>
+                    {aiTransitionPreview && (
+                      <span className="font-mono tabular-nums text-slate-300 truncate">
+                        {aiTransitionPreview.label} · Out A{' '}
+                        {formatDjClock(aiTransitionPreview.deckAOutSec)} → In B{' '}
+                        {formatDjClock(aiTransitionPreview.deckBInSec)} ·{' '}
+                        {aiTransitionPreview.crossfadeBeats}B {aiTransitionPreview.transitionStyle}
+                      </span>
+                    )}
+                    {previewError && (
+                      <span className="text-rose-300">{previewError}</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                    {aiAutoMixResult && aiAutoMixResult.suggestions.length > 1 && (
+                      <div className="flex items-center p-0.5 rounded bg-white/[0.04] border border-white/[0.08]">
+                        {aiAutoMixResult.suggestions.map((sug, sIdx) => {
+                          const isCurrent = aiTransitionPreview?.suggestionId === sug.id;
+                          return (
+                            <button
+                              key={sug.id}
+                              type="button"
+                              disabled={isPreviewRendering}
+                              onClick={() => void handleGenerateTransitionPreview(sug, true)}
+                              title={`Audition 5s preview for #${sIdx + 1}: ${sug.label}`}
+                              className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono font-semibold cursor-pointer disabled:opacity-40 transition-colors ${
+                                isCurrent
+                                  ? 'bg-fuchsia-500/30 text-fuchsia-100'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              #{sIdx + 1}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {aiTransitionPreview && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isPreviewPlaying) {
+                              stopTransitionPreviewPlayback();
+                            } else {
+                              const startPos =
+                                previewTimeSec >= aiTransitionPreview.durationSec - 0.1
+                                  ? 0
+                                  : previewTimeSec;
+                              void startTransitionPreviewFromTime(startPos, aiTransitionPreview);
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded text-[10px] font-semibold bg-fuchsia-500/25 hover:bg-fuchsia-500/35 text-fuchsia-100 border border-fuchsia-400/45 flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                        >
+                          {isPreviewPlaying ? (
+                            <Pause className="w-3 h-3 fill-current" />
+                          ) : (
+                            <Play className="w-3 h-3 fill-current" />
+                          )}
+                          <span>{isPreviewPlaying ? 'Pause' : 'Play 5s'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          aria-pressed={previewLoop}
+                          onClick={() => setPreviewLoop((v) => !v)}
+                          title="Loop the 5-second transition preview continuously"
+                          className={`px-2 py-1 rounded text-[10px] font-medium border flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
+                            previewLoop
+                              ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200'
+                              : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <Repeat className="w-3 h-3" />
+                          <span>Loop</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isRenderingSet}
+                          onClick={() => void handleCommitTransitionPreview(aiTransitionPreview)}
+                          className="px-2.5 py-1 rounded text-[10px] font-semibold bg-gradient-to-r from-cyan-400 to-fuchsia-400 hover:brightness-110 text-[#090b10] flex items-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-40"
+                        >
+                          {isRenderingSet ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Zap className="w-3 h-3 fill-current" />
+                          )}
+                          <span>Commit Full Mix</span>
+                        </button>
+                      </>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        previewRenderSeqRef.current += 1;
+                        stopTransitionPreviewPlayback();
+                        setAiTransitionPreview(null);
+                        setPreviewTimeSec(0);
+                        setPreviewError(null);
+                        setIsPreviewRendering(false);
+                      }}
+                      title="Dismiss 5s transition preview"
+                      className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/[0.08] cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {aiTransitionPreview && (
+                  <div className="space-y-1">
+                    <div
+                      role="slider"
+                      tabIndex={0}
+                      aria-label="5-second transition preview waveform scrubber"
+                      aria-valuemin={0}
+                      aria-valuemax={Number(aiTransitionPreview.durationSec.toFixed(2))}
+                      aria-valuenow={Number(previewTimeSec.toFixed(2))}
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const frac = Math.max(
+                          0,
+                          Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width))
+                        );
+                        const targetSec = frac * aiTransitionPreview.durationSec;
+                        void startTransitionPreviewFromTime(targetSec, aiTransitionPreview);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowRight') {
+                          e.preventDefault();
+                          void startTransitionPreviewFromTime(
+                            Math.min(aiTransitionPreview.durationSec - 0.1, previewTimeSec + 0.5),
+                            aiTransitionPreview
+                          );
+                        } else if (e.key === 'ArrowLeft') {
+                          e.preventDefault();
+                          void startTransitionPreviewFromTime(
+                            Math.max(0, previewTimeSec - 0.5),
+                            aiTransitionPreview
+                          );
+                        } else if (e.key === ' ') {
+                          e.preventDefault();
+                          if (isPreviewPlaying) {
+                            stopTransitionPreviewPlayback();
+                          } else {
+                            void startTransitionPreviewFromTime(previewTimeSec, aiTransitionPreview);
+                          }
+                        }
+                      }}
+                      title="Click anywhere along the 5-second preview waveform to scrub & audition"
+                      className="relative h-12 rounded bg-[#07090e] border border-white/[0.08] overflow-hidden cursor-pointer select-none flex items-center px-0.5 gap-[1px]"
+                    >
+                      {aiTransitionPreview.triBandPeaks.overall.map((amp, barIdx) => {
+                        const low = aiTransitionPreview.triBandPeaks.low[barIdx] ?? 0;
+                        const mid = aiTransitionPreview.triBandPeaks.mid[barIdx] ?? 0;
+                        const high = aiTransitionPreview.triBandPeaks.high[barIdx] ?? 0;
+                        const heightPct = Math.max(10, Math.min(96, amp * 96));
+                        const barFrac = barIdx / Math.max(1, aiTransitionPreview.triBandPeaks.overall.length - 1);
+                        const barAbsSec =
+                          aiTransitionPreview.previewStartSec +
+                          barFrac * aiTransitionPreview.durationSec;
+                        const inCrossover =
+                          barAbsSec >= aiTransitionPreview.plan.transitionStartSec &&
+                          barAbsSec <= aiTransitionPreview.plan.transitionEndSec;
+                        const isPassed =
+                          barFrac <= previewTimeSec / Math.max(0.1, aiTransitionPreview.durationSec);
+                        const colorClass =
+                          low >= mid && low >= high
+                            ? inCrossover
+                              ? 'bg-fuchsia-400'
+                              : 'bg-cyan-400'
+                            : high > mid
+                              ? 'bg-amber-300'
+                              : 'bg-cyan-300';
+
+                        return (
+                          <div
+                            key={barIdx}
+                            style={{ height: `${heightPct.toFixed(0)}%` }}
+                            className={`flex-1 rounded-[1px] transition-opacity ${colorClass} ${
+                              isPassed ? 'opacity-95' : 'opacity-45'
+                            }`}
+                          />
+                        );
+                      })}
+
+                      {/* Crossover Start & Lock markers inside the 5s window */}
+                      {(() => {
+                        const span = Math.max(0.1, aiTransitionPreview.durationSec);
+                        const startPct =
+                          ((aiTransitionPreview.plan.transitionStartSec -
+                            aiTransitionPreview.previewStartSec) /
+                            span) *
+                          100;
+                        const endPct =
+                          ((aiTransitionPreview.plan.transitionEndSec -
+                            aiTransitionPreview.previewStartSec) /
+                            span) *
+                          100;
+                        return (
+                          <>
+                            {startPct >= 0 && startPct <= 100 && (
+                              <div
+                                style={{ left: `${startPct.toFixed(2)}%` }}
+                                className="absolute inset-y-0 w-[1.5px] bg-cyan-300/80 pointer-events-none"
+                              />
+                            )}
+                            {endPct >= 0 && endPct <= 100 && (
+                              <div
+                                style={{ left: `${endPct.toFixed(2)}%` }}
+                                className="absolute inset-y-0 w-[1.5px] bg-amber-300/80 pointer-events-none"
+                              />
+                            )}
+                          </>
+                        );
+                      })()}
+
+                      {/* Live 5s Preview Playhead */}
+                      <div
+                        style={{
+                          left: `${Math.max(
+                            0,
+                            Math.min(
+                              100,
+                              (previewTimeSec / Math.max(0.1, aiTransitionPreview.durationSec)) * 100
+                            )
+                          ).toFixed(2)}%`,
+                        }}
+                        className="absolute inset-y-0 w-0.5 bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)] pointer-events-none"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between text-[9.5px] font-mono tabular-nums text-slate-400">
+                      <span>
+                        Window {formatDjClock(aiTransitionPreview.previewStartSec)} –{' '}
+                        {formatDjClock(aiTransitionPreview.previewEndSec)} · Click waveform to scrub
+                      </span>
+                      <span className="text-fuchsia-200 font-semibold">
+                        {previewTimeSec.toFixed(1)}s / {aiTransitionPreview.durationSec.toFixed(1)}s
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Camelot Wheel Harmonic Mixing Compatibility Strip */}
+            {(deckATrack || deckBTrack) && (
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] text-[10px]">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  <span className="font-semibold uppercase tracking-wider text-[9.5px] text-slate-400">
+                    Harmonic Mix
+                  </span>
+                  <span className="font-mono tabular-nums text-cyan-300 font-semibold">
+                    A: {deckATrack?.camelotKey ?? '--'} {deckATrack?.musicalKey ?? ''}
+                  </span>
+                  <span className="text-slate-600">↔</span>
+                  <span className="font-mono tabular-nums text-amber-300 font-semibold">
+                    B: {deckBTrack?.camelotKey ?? '--'} {deckBTrack?.musicalKey ?? ''}
+                  </span>
+                  {deckATrack && deckBTrack && (
+                    <span
+                      style={{ color: harmonicComparison.accentHex }}
+                      className="font-mono font-bold whitespace-nowrap flex items-center gap-1"
+                    >
+                      <span
+                        style={{ backgroundColor: harmonicComparison.accentHex }}
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                      />
+                      <span>{harmonicComparison.label}</span>
+                    </span>
+                  )}
+                  <span className="text-slate-400 truncate hidden md:inline">
+                    · {harmonicComparison.detail}
+                  </span>
+                </div>
+                {deckACompatibleKeys.length > 0 && (
+                  <div className="font-mono tabular-nums text-[9.5px] text-slate-400 whitespace-nowrap shrink-0">
+                    Mix w/ A: <span className="text-slate-200">{deckACompatibleKeys.join(' · ')}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Visual Beat-Grid Phase Alignment Scope & Offset Meter */}
             <div className="pt-2 border-t border-white/[0.08] space-y-2">
@@ -5008,6 +9966,8 @@ export function DjStudioModal({
                     showBeatGrid={showBeatGridOverlay}
                     beatGridSubdivision={beatGridSubdivision}
                     phaseComparison={phaseComparison}
+                    masterBeatClockRef={masterBeatClockRef}
+                    registerBeatPulseDraw={registerBeatPulseDraw}
                     onDragSlipDeckBMs={handlePhaseSlipDeckBMs}
                   />
 
@@ -5136,6 +10096,336 @@ export function DjStudioModal({
             </div>
           </div>
 
+          {/* Tap Tempo & Visual Last-5 BPM Session History Log */}
+          <div className="bg-[#121620] border border-emerald-400/20 rounded-xl p-3 space-y-2.5">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
+              {/* Left: Tactile Tap Pad + Live BPM Readout + Quick Deck Sync */}
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleDjTapTempo}
+                  className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer select-none ${
+                    tapPulseFlash
+                      ? 'bg-emerald-400 text-[#090b10] border-emerald-200 shadow-[0_0_16px_rgba(52,211,153,0.45)] scale-[0.98]'
+                      : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-400/40'
+                  }`}
+                  title="Tap at least 2 beats to measure live BPM and add to the visual Last-5 History Log"
+                >
+                  <Activity className={`w-3.5 h-3.5 ${tapPulseFlash ? 'animate-ping' : ''}`} />
+                  <span className="whitespace-nowrap">
+                    {tapTempoCount === 1
+                      ? 'Tap Beat 2…'
+                      : tapTempoCount >= 2
+                        ? `Tap Tempo (${tapTempoCount}t)`
+                        : 'Tap Tempo'}
+                  </span>
+                </button>
+
+                <div className="px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] flex items-center gap-2">
+                  <div>
+                    <div className="text-[9px] uppercase tracking-wider text-slate-400">
+                      Tapped BPM
+                    </div>
+                    <div className="text-sm font-mono font-bold tabular-nums text-emerald-300 leading-tight">
+                      {tapTempoBpm !== null ? `${tapTempoBpm.toFixed(1)}` : '--.-'}
+                      <span className="text-[10px] font-normal text-slate-400 ml-1">BPM</span>
+                    </div>
+                  </div>
+                  {tapTempoBpm !== null && (
+                    <div className="flex items-center gap-1 pl-2 border-l border-white/[0.08]">
+                      <button
+                        type="button"
+                        disabled={!deckATrack}
+                        onClick={() => handleApplyTappedBpmToDeck('A', tapTempoBpm)}
+                        title="Pitch-match Deck A to tapped BPM"
+                        className="px-1.5 py-1 rounded bg-cyan-400/15 hover:bg-cyan-400/25 border border-cyan-400/35 text-[10px] font-mono text-cyan-200 disabled:opacity-35 cursor-pointer"
+                      >
+                        → A
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!deckBTrack}
+                        onClick={() => handleApplyTappedBpmToDeck('B', tapTempoBpm)}
+                        title="Pitch-match Deck B to tapped BPM"
+                        className="px-1.5 py-1 rounded bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-[10px] font-mono text-amber-200 disabled:opacity-35 cursor-pointer"
+                      >
+                        → B
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Center: Visual SVG Tempo-Consistency Sparkline & Transition Drift Comparison */}
+              <div className="flex-1 min-w-0 bg-[#090b10] border border-white/[0.08] rounded-lg px-2.5 py-1.5 flex flex-col sm:flex-row sm:items-center gap-2.5">
+                <div className="flex-1 min-w-[180px]">
+                  <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 mb-1">
+                    <span className="uppercase tracking-wider font-semibold text-slate-300">
+                      Visual BPM Consistency ({tapBpmHistory.length}/5)
+                    </span>
+                    <span className="text-slate-500">
+                      {tapBpmStats
+                        ? `Range ${tapBpmStats.minBpm.toFixed(1)}–${tapBpmStats.maxBpm.toFixed(1)} BPM`
+                        : 'Tap 2+ bursts to plot transition drift'}
+                    </span>
+                  </div>
+                  {(() => {
+                    const chronological = [...tapBpmHistory].reverse();
+                    const chartW = 240;
+                    const chartH = 42;
+                    const refCenter = tapBpmStats?.avgBpm ?? detectedMasterBpm;
+                    const halfSpan = Math.max(
+                      2.0,
+                      tapBpmStats
+                        ? Math.max(
+                            Math.abs(tapBpmStats.maxBpm - refCenter),
+                            Math.abs(tapBpmStats.minBpm - refCenter)
+                          ) + 0.6
+                        : 2.5
+                    );
+                    const yForBpm = (bpm: number) => {
+                      const norm = (bpm - refCenter) / halfSpan; // -1..+1
+                      const clamped = Math.max(-1, Math.min(1, norm));
+                      return chartH / 2 - clamped * (chartH / 2 - 6);
+                    };
+                    const bandTop = yForBpm(refCenter + 0.8);
+                    const bandHeight = Math.max(4, yForBpm(refCenter - 0.8) - bandTop);
+                    const points = chronological.map((entry, i) => {
+                      const x =
+                        chronological.length === 1
+                          ? chartW / 2
+                          : 16 + (i / Math.max(1, chronological.length - 1)) * (chartW - 32);
+                      const y = yForBpm(entry.bpm);
+                      const driftFromMean = entry.bpm - refCenter;
+                      const strokeColor =
+                        Math.abs(driftFromMean) <= 0.5
+                          ? '#34d399'
+                          : Math.abs(driftFromMean) <= 1.5
+                            ? '#22d3ee'
+                            : '#f59e0b';
+                      return { entry, x, y, strokeColor, isLatest: i === chronological.length - 1 };
+                    });
+                    const polyPoints = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+
+                    return (
+                      <svg
+                        viewBox={`0 0 ${chartW} ${chartH}`}
+                        className="w-full h-10 overflow-visible block"
+                        role="img"
+                        aria-label="Visual BPM history trendline"
+                      >
+                        {/* ±0.8 BPM Locked Stability Zone Band */}
+                        <rect
+                          x={6}
+                          y={bandTop}
+                          width={chartW - 12}
+                          height={bandHeight}
+                          rx={3}
+                          fill="rgba(52, 211, 153, 0.09)"
+                        />
+                        {/* Mean Reference Dashed Line */}
+                        <line
+                          x1={6}
+                          y1={chartH / 2}
+                          x2={chartW - 6}
+                          y2={chartH / 2}
+                          stroke="rgba(148, 163, 184, 0.35)"
+                          strokeWidth={1}
+                          strokeDasharray="3 3"
+                        />
+                        {/* Connecting Trendline */}
+                        {points.length >= 2 && (
+                          <polyline
+                            fill="none"
+                            stroke="rgba(52, 211, 153, 0.7)"
+                            strokeWidth={1.75}
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                            points={polyPoints}
+                          />
+                        )}
+                        {/* Vertical Deviation Stems & Interactive BPM Nodes */}
+                        {points.map((pt) => {
+                          const isSelected = tapTempoBpm === pt.entry.bpm;
+                          return (
+                            <g
+                              key={pt.entry.id}
+                              className="cursor-pointer"
+                              onClick={() => setTapTempoBpm(pt.entry.bpm)}
+                            >
+                              <title>{`${pt.entry.bpm.toFixed(1)} BPM (${pt.entry.tapCount} taps @ ${pt.entry.timestampLabel})`}</title>
+                              <line
+                                x1={pt.x}
+                                y1={chartH / 2}
+                                x2={pt.x}
+                                y2={pt.y}
+                                stroke={pt.strokeColor}
+                                strokeOpacity={0.55}
+                                strokeWidth={2}
+                              />
+                              <circle
+                                cx={pt.x}
+                                cy={pt.y}
+                                r={pt.isLatest || isSelected ? 4.5 : 3.3}
+                                fill={pt.strokeColor}
+                                stroke={isSelected ? '#ffffff' : '#090b10'}
+                                strokeWidth={1.5}
+                              />
+                            </g>
+                          );
+                        })}
+                      </svg>
+                    );
+                  })()}
+                </div>
+
+                {/* Live Transition Deck Delta Readout (Tapped vs Deck A / Deck B) */}
+                <div className="flex sm:flex-col justify-between gap-1 text-[9.5px] font-mono tabular-nums sm:border-l sm:border-white/[0.08] sm:pl-2.5 shrink-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-cyan-300">vs A:</span>
+                    <span className="text-slate-200">
+                      {tapTempoBpm !== null && deckALiveBpm !== null
+                        ? `${tapTempoBpm - deckALiveBpm >= 0 ? '+' : ''}${(tapTempoBpm - deckALiveBpm).toFixed(1)}`
+                        : '--'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-amber-300">vs B:</span>
+                    <span className="text-slate-200">
+                      {tapTempoBpm !== null && deckBLiveBpm !== null
+                        ? `${tapTempoBpm - deckBLiveBpm >= 0 ? '+' : ''}${(tapTempoBpm - deckBLiveBpm).toFixed(1)}`
+                        : '--'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: Session Tempo Consistency Summary & Clear */}
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="px-2.5 py-1.5 rounded-lg bg-[#090b10] border border-white/[0.08] flex items-center gap-2.5 text-[10px] font-mono tabular-nums">
+                  <div>
+                    <div className="text-[9px] uppercase text-slate-500">Avg</div>
+                    <div className="text-slate-200 font-semibold">
+                      {tapBpmStats ? `${tapBpmStats.avgBpm.toFixed(1)}` : '--.-'}
+                    </div>
+                  </div>
+                  <div className="pl-2 border-l border-white/[0.08]">
+                    <div className="text-[9px] uppercase text-slate-500">Spread Δ</div>
+                    <div className="text-slate-200 font-semibold">
+                      {tapBpmStats ? `${tapBpmStats.spreadBpm.toFixed(1)}` : '--'}
+                    </div>
+                  </div>
+                  {tapBpmStats && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider border ${
+                        tapBpmStats.consistency === 'LOCKED'
+                          ? 'bg-emerald-400/15 text-emerald-300 border-emerald-400/35'
+                          : tapBpmStats.consistency === 'STEADY'
+                            ? 'bg-cyan-400/15 text-cyan-300 border-cyan-400/35'
+                            : 'bg-amber-400/15 text-amber-300 border-amber-400/35'
+                      }`}
+                    >
+                      {tapBpmStats.consistency}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={tapBpmHistory.length === 0 && tapTempoBpm === null}
+                  onClick={handleClearTapBpmHistory}
+                  title="Clear Tap Tempo BPM log"
+                  className="p-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.1] border border-white/[0.08] text-slate-400 hover:text-slate-200 disabled:opacity-35 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Rolling Last 5 Detected BPM Visual Cards with Drift Meters */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+              {Array.from({ length: MAX_DJ_TAP_BPM_LOG }).map((_, idx) => {
+                const entry = tapBpmHistory[idx];
+                if (!entry) {
+                  return (
+                    <div
+                      key={`tap-empty-${idx}`}
+                      className="px-2 py-1.5 rounded-lg bg-[#090b10]/50 border border-dashed border-white/[0.07] flex items-center justify-between text-[10px] font-mono text-slate-600"
+                    >
+                      <span>#{idx + 1}</span>
+                      <span>--.- BPM</span>
+                    </div>
+                  );
+                }
+                const isSelected = tapTempoBpm === entry.bpm;
+                const refMean = tapBpmStats?.avgBpm ?? entry.bpm;
+                const meanOffset = Number((entry.bpm - refMean).toFixed(1));
+                const barDeflectPct = Math.max(-50, Math.min(50, (meanOffset / 3) * 50));
+                const deltaText =
+                  entry.deltaFromPrev === null
+                    ? 'BASE'
+                    : `${entry.deltaFromPrev > 0 ? '+' : ''}${entry.deltaFromPrev.toFixed(1)}`;
+                const deltaTone =
+                  entry.deltaFromPrev === null
+                    ? 'text-slate-400 bg-white/[0.05]'
+                    : Math.abs(entry.deltaFromPrev) <= 0.5
+                      ? 'text-emerald-300 bg-emerald-400/15'
+                      : Math.abs(entry.deltaFromPrev) <= 1.5
+                        ? 'text-cyan-300 bg-cyan-400/15'
+                        : 'text-amber-300 bg-amber-400/15';
+                const meterColor =
+                  Math.abs(meanOffset) <= 0.5
+                    ? 'bg-emerald-400'
+                    : Math.abs(meanOffset) <= 1.5
+                      ? 'bg-cyan-400'
+                      : 'bg-amber-400';
+
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => setTapTempoBpm(entry.bpm)}
+                    title={`Select ${entry.bpm.toFixed(1)} BPM (${entry.tapCount} taps at ${entry.timestampLabel})`}
+                    className={`px-2 py-1.5 rounded-lg border text-left transition-colors cursor-pointer space-y-1 ${
+                      idx === 0
+                        ? 'bg-emerald-500/10 border-emerald-400/40 hover:bg-emerald-500/20'
+                        : isSelected
+                          ? 'bg-cyan-500/10 border-cyan-400/40'
+                          : 'bg-[#090b10] border-white/[0.08] hover:border-white/[0.2]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] font-mono text-slate-400">
+                        #{idx + 1} {idx === 0 ? 'NOW' : entry.timestampLabel}
+                      </span>
+                      <span className={`px-1 rounded text-[9px] font-mono tabular-nums ${deltaTone}`}>
+                        {deltaText}
+                      </span>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-1">
+                      <span className="text-xs font-mono font-bold tabular-nums text-slate-100">
+                        {entry.bpm.toFixed(1)}
+                      </span>
+                      <span className="text-[9px] font-mono text-slate-400">
+                        {entry.tapCount}t
+                      </span>
+                    </div>
+                    {/* Centered Visual Deviation Bar vs Session Mean */}
+                    <div className="relative h-1 rounded-full bg-white/[0.07] overflow-hidden">
+                      <div className="absolute inset-y-0 left-1/2 w-[1px] bg-slate-500/60" />
+                      <div
+                        className={`absolute inset-y-0 rounded-full ${meterColor}`}
+                        style={{
+                          left: `${barDeflectPct >= 0 ? 50 : 50 + barDeflectPct}%`,
+                          width: `${Math.max(6, Math.abs(barDeflectPct))}%`,
+                        }}
+                      />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Dual Decks + Center DJ Mixer */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
             {/* DECK A */}
@@ -5249,7 +10539,7 @@ export function DjStudioModal({
 
                 <div className="flex-1 min-w-0 space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-base font-mono font-bold tabular-nums text-cyan-300">
                         {deckATrack
                           ? (getEffectiveBpm(deckATrack) * (1 + deckAPitchPct / 100)).toFixed(1)
@@ -5274,13 +10564,63 @@ export function DjStudioModal({
                           ))}
                         </div>
                       )}
+                      {deckATrack && (deckATrack.camelotKey || deckATrack.musicalKey) && (() => {
+                        const cam = getCamelotEntry(deckATrack.camelotKey);
+                        const confPct = deckATrack.keyConfidence
+                          ? Math.round(deckATrack.keyConfidence * 100)
+                          : null;
+                        return (
+                          <div
+                            className="flex items-center gap-1 pl-1.5 ml-0.5 border-l border-white/[0.1] font-mono tabular-nums"
+                            title={`Detected Harmonic Key: ${cam?.fullName ?? deckATrack.musicalKey ?? ''} (${deckATrack.camelotKey ?? ''})${confPct ? ` · ${confPct}% match` : ''}`}
+                          >
+                            <span
+                              style={{ backgroundColor: cam?.colorHex ?? '#22d3ee' }}
+                              className="w-2 h-2 rounded-full shrink-0"
+                            />
+                            <span
+                              style={{ color: cam?.colorHex ?? '#67e8f9' }}
+                              className="text-[11px] font-bold whitespace-nowrap"
+                            >
+                              {deckATrack.camelotKey ?? '--'}
+                            </span>
+                            <span className="text-[10px] text-slate-300 whitespace-nowrap">
+                              {deckATrack.musicalKey ?? ''}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('A', 'prev')}
+                              title="Step Camelot wheel -1"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              -
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('A', 'toggle-mode')}
+                              title="Switch relative Major/Minor (A ↔ B)"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              {cam?.letter === 'A' ? 'Maj' : 'Min'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('A', 'next')}
+                              title="Step Camelot wheel +1"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <button
                       type="button"
                       onClick={() => handleSyncDeckBpm('A')}
                       disabled={!deckATrack || !deckBTrack}
-                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-400/40 cursor-pointer disabled:opacity-35"
+                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-400/40 cursor-pointer disabled:opacity-35 shrink-0"
                     >
                       SYNC
                     </button>
@@ -5301,8 +10641,11 @@ export function DjStudioModal({
                       type="button"
                       onClick={() => {
                         if (!deckATrack) return;
-                        setDeckATime(deckATrack.dropTime);
-                        if (deckAPlaying) void startLiveDeckFromTime('A', deckATrack.dropTime);
+                        const dropSec = syncToBeatGrid
+                          ? snapTimeToTrackBeatGrid(deckATrack, deckATrack.dropTime)
+                          : deckATrack.dropTime;
+                        setDeckATime(dropSec);
+                        if (deckAPlaying) void startLiveDeckFromTime('A', dropSec);
                       }}
                       disabled={!deckATrack}
                       className="px-2 py-1 rounded-md text-[10px] font-medium bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-400/30 flex items-center gap-1 cursor-pointer disabled:opacity-40"
@@ -5364,9 +10707,12 @@ export function DjStudioModal({
                     <div className="flex items-center p-0.5 rounded bg-[#090b10] border border-white/[0.08]">
                       <button
                         type="button"
-                        onClick={() => setDeckAWaveformView('overview')}
+                        onClick={() => {
+                          setDeckAWaveformView('overview');
+                          setDeckAWaveformZoomPct(0);
+                        }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer ${
-                          deckAWaveformView === 'overview'
+                          deckAWaveformZoomPct === 0 && deckAWaveformView === 'overview'
                             ? 'bg-cyan-500/20 text-cyan-200'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
@@ -5375,14 +10721,17 @@ export function DjStudioModal({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setDeckAWaveformView('zoom')}
+                        onClick={() => {
+                          setDeckAWaveformView('zoom');
+                          setDeckAWaveformZoomPct(45);
+                        }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer ${
-                          deckAWaveformView === 'zoom'
+                          deckAWaveformZoomPct > 0 || deckAWaveformView === 'zoom'
                             ? 'bg-cyan-500/20 text-cyan-200'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        8B Grid
+                        Zoom
                       </button>
                     </div>
                     {deckAPhaseInfo && (
@@ -5394,6 +10743,11 @@ export function DjStudioModal({
                       <span className="font-mono tabular-nums text-[9px] text-amber-300">
                         ({(deckATrack.beatGridOffsetMs ?? 0) >= 0 ? '+' : ''}
                         {(deckATrack.beatGridOffsetMs ?? 0).toFixed(1)}ms)
+                      </span>
+                    )}
+                    {spectrogramMode !== 'off' && (
+                      <span className="font-mono text-[8.5px] text-slate-400 whitespace-nowrap hidden sm:inline">
+                        <span className="text-rose-400">Kick</span> · <span className="text-cyan-300">Melodic</span> · <span className="text-amber-300">Snare</span>
                       </span>
                     )}
                   </div>
@@ -5459,7 +10813,10 @@ export function DjStudioModal({
                       onClick={() => {
                         setDeckAGridEditorOpen((open) => {
                           const next = !open;
-                          if (next) setDeckAWaveformView('zoom');
+                          if (next) {
+                            setDeckAWaveformView('zoom');
+                            setDeckAWaveformZoomPct((z) => (z < 45 ? 55 : z));
+                          }
                           return next;
                         });
                       }}
@@ -5475,6 +10832,201 @@ export function DjStudioModal({
                   </div>
                 </div>
 
+                {/* Deck A Transient Zoom Slider & Tight Loop/Cue Strip */}
+                <div className="bg-[#090b10] border border-white/[0.07] rounded-lg px-2 py-1 flex flex-wrap items-center gap-2 text-[9.5px]">
+                  <div className="flex items-center gap-1 flex-1 min-w-[140px]">
+                    <button
+                      type="button"
+                      disabled={!deckATrack || deckAWaveformZoomPct <= 0}
+                      onClick={() => {
+                        const next = Math.max(0, deckAWaveformZoomPct - 15);
+                        setDeckAWaveformZoomPct(next);
+                        setDeckAWaveformView(next > 0 ? 'zoom' : 'overview');
+                      }}
+                      title="Zoom out waveform"
+                      className="p-0.5 rounded text-slate-400 hover:text-cyan-200 disabled:opacity-30 cursor-pointer"
+                    >
+                      <ZoomOut className="w-3 h-3" />
+                    </button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      disabled={!deckATrack}
+                      value={deckAWaveformZoomPct}
+                      aria-label="Deck A waveform transient zoom"
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        setDeckAWaveformZoomPct(next);
+                        setDeckAWaveformView(next > 0 ? 'zoom' : 'overview');
+                      }}
+                      className="w-full accent-cyan-400 cursor-pointer disabled:opacity-40"
+                    />
+                    <button
+                      type="button"
+                      disabled={!deckATrack || deckAWaveformZoomPct >= 100}
+                      onClick={() => {
+                        const next = Math.min(100, deckAWaveformZoomPct + 15);
+                        setDeckAWaveformZoomPct(next);
+                        setDeckAWaveformView('zoom');
+                      }}
+                      title="Zoom in onto transients"
+                      className="p-0.5 rounded text-slate-400 hover:text-cyan-200 disabled:opacity-30 cursor-pointer"
+                    >
+                      <ZoomIn className="w-3 h-3" />
+                    </button>
+                    <span className="font-mono tabular-nums text-cyan-300 w-16 text-right shrink-0">
+                      {!deckATrack || deckAWaveformZoomPct === 0
+                        ? 'Full'
+                        : (() => {
+                            const span = computeWaveformZoomSpanSec(deckATrack, deckAWaveformZoomPct);
+                            const beats = span / (60 / Math.max(40, getEffectiveBpm(deckATrack)));
+                            return span < 1.5
+                              ? `${Math.round(span * 1000)}ms`
+                              : `${beats.toFixed(1)}B`;
+                          })()}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    {(
+                      [
+                        { label: 'Full', pct: 0 },
+                        { label: '8B', pct: 45 },
+                        { label: '2B', pct: 74 },
+                        { label: '0.5B', pct: 100 },
+                      ] as const
+                    ).map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={!deckATrack}
+                        onClick={() => {
+                          setDeckAWaveformZoomPct(preset.pct);
+                          setDeckAWaveformView(preset.pct > 0 ? 'zoom' : 'overview');
+                        }}
+                        className={`px-1 py-0.5 rounded font-mono text-[8.5px] border cursor-pointer disabled:opacity-35 ${
+                          Math.abs(deckAWaveformZoomPct - preset.pct) <= 3
+                            ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200'
+                            : 'bg-white/[0.03] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      disabled={!deckATrack}
+                      onClick={() => {
+                        if (deckATransientSeek) {
+                          setDeckATransientSeek(false);
+                          if (!syncToBeatGrid) setSyncToBeatGrid(true);
+                          handleSnapDeckPlayheadToBeatGrid('A');
+                        } else {
+                          setDeckATransientSeek(true);
+                        }
+                      }}
+                      title="Toggle Beat-Grid quantized waveform seeking vs Free Millisecond seeking"
+                      className={`px-1.5 py-0.5 rounded font-mono text-[8.5px] border cursor-pointer disabled:opacity-35 ${
+                        deckATransientSeek || !syncToBeatGrid
+                          ? 'bg-amber-500/20 border-amber-400/45 text-amber-200'
+                          : 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
+                      }`}
+                    >
+                      {deckATransientSeek || !syncToBeatGrid ? 'Free ms' : 'Beat Snap'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!deckATrack}
+                      onClick={() => {
+                        setCueManagerDeck('A');
+                        handlePlaceCuePoint(
+                          'A',
+                          `Cue ${(deckATrack?.cuePoints?.length ?? 0) + 1}`,
+                          deckATime,
+                          '#22d3ee'
+                        );
+                      }}
+                      title="Set tight cue marker at exact zoomed playhead"
+                      className="px-1.5 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/35 text-cyan-200 font-semibold cursor-pointer disabled:opacity-35"
+                    >
+                      + Cue
+                    </button>
+                  </div>
+                </div>
+
+                {/* Deck A Track Alignment Nudge Bar (+/- 5ms, +/- 10ms) */}
+                <div className="bg-[#090b10] border border-white/[0.07] rounded-lg px-2 py-1 flex flex-wrap items-center justify-between gap-2 text-[9.5px]">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-semibold text-slate-300 whitespace-nowrap">
+                      Nudge Align
+                    </span>
+                    <span
+                      className={`font-mono tabular-nums whitespace-nowrap ${
+                        Math.abs(deckANudgeMs) >= 0.5
+                          ? 'text-cyan-300 font-semibold'
+                          : 'text-slate-500'
+                      }`}
+                    >
+                      {deckANudgeMs >= 0 ? '+' : ''}
+                      {deckANudgeMs.toFixed(0)}ms
+                    </span>
+                    {deckAPhaseInfo && (
+                      <span className="font-mono tabular-nums text-[9px] text-slate-400 whitespace-nowrap hidden sm:inline">
+                        · Beat {deckAPhaseInfo.phaseMs >= 0 ? '+' : ''}
+                        {deckAPhaseInfo.phaseMs.toFixed(1)}ms
+                      </span>
+                    )}
+                    {Math.abs(deckANudgeMs) >= 0.5 && (
+                      <button
+                        type="button"
+                        disabled={!deckATrack}
+                        onClick={() =>
+                          handleNudgeTrackAlignment('A', -deckANudgeMs, { resetCounter: true })
+                        }
+                        title="Revert cumulative track alignment nudge back to 0ms"
+                        className="px-1 py-0.5 rounded bg-white/[0.05] hover:bg-white/[0.12] text-[8.5px] font-mono text-slate-300 cursor-pointer"
+                      >
+                        0ms
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 font-mono tabular-nums shrink-0">
+                    <button
+                      type="button"
+                      disabled={!deckATrack}
+                      onClick={() => handleSnapDeckPlayheadToBeatGrid('A')}
+                      title="Snap Deck A playhead immediately to the nearest beat marker"
+                      className="px-1.5 py-0.5 rounded text-[9px] font-sans font-semibold border bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border-cyan-400/35 flex items-center gap-1 cursor-pointer disabled:opacity-35 mr-1"
+                    >
+                      <Magnet className="w-2.5 h-2.5" />
+                      <span>Snap Beat</span>
+                    </button>
+                    {([-10, -5, 5, 10] as const).map((ms) => {
+                      const isActiveFlash = deckANudgeFlash?.deltaMs === ms;
+                      return (
+                        <button
+                          key={ms}
+                          type="button"
+                          disabled={!deckATrack}
+                          onClick={() => handleNudgeTrackAlignment('A', ms)}
+                          aria-label={`Nudge Deck A track alignment by ${ms > 0 ? `+${ms}` : ms} milliseconds`}
+                          title={`Micro-adjust Deck A track alignment by ${ms > 0 ? `+${ms}` : ms}ms`}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition-colors cursor-pointer disabled:opacity-35 ${
+                            isActiveFlash
+                              ? 'bg-cyan-400 text-[#090b10] border-cyan-300'
+                              : 'bg-white/[0.05] hover:bg-cyan-500/20 text-slate-200 hover:text-cyan-200 border-white/[0.09]'
+                          }`}
+                        >
+                          {ms > 0 ? `+${ms}ms` : `${ms}ms`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <TriBandWaveformCanvas
                   track={deckATrack}
                   playheadSec={deckATime}
@@ -5484,11 +11036,34 @@ export function DjStudioModal({
                   showBeatGrid={showBeatGridOverlay}
                   beatGridSubdivision={beatGridSubdivision}
                   viewMode={deckAWaveformView}
+                  zoomPct={deckAWaveformZoomPct}
+                  freeTransientSeek={deckATransientSeek}
+                  syncToBeatGrid={syncToBeatGrid}
+                  nudgeAccumMs={deckANudgeMs}
+                  nudgeFlash={deckANudgeFlash}
+                  harmonicCompatibility={deckATrack && deckBTrack ? harmonicComparison : null}
+                  spectrogramMode={spectrogramMode}
+                  loopWindowStartSec={
+                    deckATrack && deckALoopBeats > 0
+                      ? deckAChainRef.current?.offsetSec ?? deckATime
+                      : null
+                  }
+                  loopWindowEndSec={
+                    deckATrack && deckALoopBeats > 0
+                      ? Math.min(
+                          deckATrack.duration,
+                          (deckAChainRef.current?.offsetSec ?? deckATime) +
+                            (60 / Math.max(40, getEffectiveBpm(deckATrack))) * deckALoopBeats
+                        )
+                      : null
+                  }
                   isGridEditMode={deckAGridEditorOpen}
                   isScratchMode={!deckAGridEditorOpen && deckAScratchEnabled}
                   isScratching={deckAScratching}
                   scratchRate={deckAScratchRate}
                   scratchSensitivitySec={scratchSensitivitySec}
+                  masterBeatClockRef={masterBeatClockRef}
+                  registerBeatPulseDraw={registerBeatPulseDraw}
                   onDragBeatGridMs={(deltaMs) => handleShiftDeckBeatGrid('A', deltaMs, true)}
                   onScratchStart={() => void startDeckScratch('A')}
                   onScratchMove={(deltaSec, velocityRate) =>
@@ -5744,10 +11319,15 @@ export function DjStudioModal({
                           key={line.id}
                           type="button"
                           onClick={() => {
+                            const targetSec =
+                              syncToBeatGrid && deckATrack
+                                ? snapTimeToTrackBeatGrid(deckATrack, line.time)
+                                : line.time;
                             setDeckAOutLyricId(line.id);
-                            setDeckAOutTime(line.time);
+                            setDeckAOutTime(targetSec);
                             setTriggerMode('lyrics');
-                            setDeckATime(line.time);
+                            setDeckATime(targetSec);
+                            if (deckAPlaying) void startLiveDeckFromTime('A', targetSec);
                           }}
                           className={`w-full text-left px-2 py-0.5 rounded text-[11px] flex items-center justify-between gap-2 cursor-pointer ${
                             isSelected
@@ -5805,6 +11385,29 @@ export function DjStudioModal({
                     aria-label="Master DJ volume"
                     className="w-full accent-cyan-400 cursor-pointer"
                   />
+                </div>
+                {/* Compact Master Brick-Wall Output Headroom LED */}
+                <div className="pt-1 space-y-1">
+                  <div className="flex items-center justify-between text-[9px] font-mono">
+                    <span className="text-slate-400">OUT CEIL</span>
+                    <span
+                      ref={mixerLimiterStatusRef}
+                      className={limiterEnabled ? 'text-emerald-300 font-semibold' : 'text-rose-300'}
+                    >
+                      {limiterEnabled ? `${limiterCeilingDb.toFixed(1)}dB` : 'OFF'}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-[#090b10] border border-white/[0.08] overflow-hidden">
+                    <div
+                      ref={mixerLimiterLedBarRef}
+                      className={`h-full transition-[width] duration-75 ${
+                        limiterEnabled
+                          ? 'bg-gradient-to-r from-emerald-400 via-cyan-400 to-amber-400'
+                          : 'bg-rose-500'
+                      }`}
+                      style={{ width: '4%' }}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -5977,7 +11580,7 @@ export function DjStudioModal({
 
                 <div className="flex-1 min-w-0 space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-base font-mono font-bold tabular-nums text-amber-300">
                         {deckBTrack
                           ? (getEffectiveBpm(deckBTrack) * (1 + deckBPitchPct / 100)).toFixed(1)
@@ -6002,13 +11605,63 @@ export function DjStudioModal({
                           ))}
                         </div>
                       )}
+                      {deckBTrack && (deckBTrack.camelotKey || deckBTrack.musicalKey) && (() => {
+                        const cam = getCamelotEntry(deckBTrack.camelotKey);
+                        const confPct = deckBTrack.keyConfidence
+                          ? Math.round(deckBTrack.keyConfidence * 100)
+                          : null;
+                        return (
+                          <div
+                            className="flex items-center gap-1 pl-1.5 ml-0.5 border-l border-white/[0.1] font-mono tabular-nums"
+                            title={`Detected Harmonic Key: ${cam?.fullName ?? deckBTrack.musicalKey ?? ''} (${deckBTrack.camelotKey ?? ''})${confPct ? ` · ${confPct}% match` : ''}`}
+                          >
+                            <span
+                              style={{ backgroundColor: cam?.colorHex ?? '#f59e0b' }}
+                              className="w-2 h-2 rounded-full shrink-0"
+                            />
+                            <span
+                              style={{ color: cam?.colorHex ?? '#fcd34d' }}
+                              className="text-[11px] font-bold whitespace-nowrap"
+                            >
+                              {deckBTrack.camelotKey ?? '--'}
+                            </span>
+                            <span className="text-[10px] text-slate-300 whitespace-nowrap">
+                              {deckBTrack.musicalKey ?? ''}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('B', 'prev')}
+                              title="Step Camelot wheel -1"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              -
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('B', 'toggle-mode')}
+                              title="Switch relative Major/Minor (A ↔ B)"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              {cam?.letter === 'A' ? 'Maj' : 'Min'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustDeckKey('B', 'next')}
+                              title="Step Camelot wheel +1"
+                              className="px-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <button
                       type="button"
                       onClick={() => handleSyncDeckBpm('B')}
                       disabled={!deckATrack || !deckBTrack}
-                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/40 cursor-pointer disabled:opacity-35"
+                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/40 cursor-pointer disabled:opacity-35 shrink-0"
                     >
                       SYNC
                     </button>
@@ -6029,8 +11682,11 @@ export function DjStudioModal({
                       type="button"
                       onClick={() => {
                         if (!deckBTrack) return;
-                        setDeckBTime(deckBTrack.dropTime);
-                        if (deckBPlaying) void startLiveDeckFromTime('B', deckBTrack.dropTime);
+                        const dropSec = syncToBeatGrid
+                          ? snapTimeToTrackBeatGrid(deckBTrack, deckBTrack.dropTime)
+                          : deckBTrack.dropTime;
+                        setDeckBTime(dropSec);
+                        if (deckBPlaying) void startLiveDeckFromTime('B', dropSec);
                       }}
                       disabled={!deckBTrack}
                       className="px-2 py-1 rounded-md text-[10px] font-medium bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-400/30 flex items-center gap-1 cursor-pointer disabled:opacity-40"
@@ -6092,9 +11748,12 @@ export function DjStudioModal({
                     <div className="flex items-center p-0.5 rounded bg-[#090b10] border border-white/[0.08]">
                       <button
                         type="button"
-                        onClick={() => setDeckBWaveformView('overview')}
+                        onClick={() => {
+                          setDeckBWaveformView('overview');
+                          setDeckBWaveformZoomPct(0);
+                        }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer ${
-                          deckBWaveformView === 'overview'
+                          deckBWaveformZoomPct === 0 && deckBWaveformView === 'overview'
                             ? 'bg-amber-500/20 text-amber-200'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
@@ -6103,14 +11762,17 @@ export function DjStudioModal({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setDeckBWaveformView('zoom')}
+                        onClick={() => {
+                          setDeckBWaveformView('zoom');
+                          setDeckBWaveformZoomPct(45);
+                        }}
                         className={`px-1.5 py-0.5 rounded text-[9px] font-medium cursor-pointer ${
-                          deckBWaveformView === 'zoom'
+                          deckBWaveformZoomPct > 0 || deckBWaveformView === 'zoom'
                             ? 'bg-amber-500/20 text-amber-200'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        8B Grid
+                        Zoom
                       </button>
                     </div>
                     {deckBPhaseInfo && (
@@ -6122,6 +11784,11 @@ export function DjStudioModal({
                       <span className="font-mono tabular-nums text-[9px] text-amber-300">
                         ({(deckBTrack.beatGridOffsetMs ?? 0) >= 0 ? '+' : ''}
                         {(deckBTrack.beatGridOffsetMs ?? 0).toFixed(1)}ms)
+                      </span>
+                    )}
+                    {spectrogramMode !== 'off' && (
+                      <span className="font-mono text-[8.5px] text-slate-400 whitespace-nowrap hidden sm:inline">
+                        <span className="text-rose-400">Kick</span> · <span className="text-cyan-300">Melodic</span> · <span className="text-amber-300">Snare</span>
                       </span>
                     )}
                   </div>
@@ -6187,7 +11854,10 @@ export function DjStudioModal({
                       onClick={() => {
                         setDeckBGridEditorOpen((open) => {
                           const next = !open;
-                          if (next) setDeckBWaveformView('zoom');
+                          if (next) {
+                            setDeckBWaveformView('zoom');
+                            setDeckBWaveformZoomPct((z) => (z < 45 ? 55 : z));
+                          }
                           return next;
                         });
                       }}
@@ -6203,6 +11873,201 @@ export function DjStudioModal({
                   </div>
                 </div>
 
+                {/* Deck B Transient Zoom Slider & Tight Loop/Cue Strip */}
+                <div className="bg-[#090b10] border border-white/[0.07] rounded-lg px-2 py-1 flex flex-wrap items-center gap-2 text-[9.5px]">
+                  <div className="flex items-center gap-1 flex-1 min-w-[140px]">
+                    <button
+                      type="button"
+                      disabled={!deckBTrack || deckBWaveformZoomPct <= 0}
+                      onClick={() => {
+                        const next = Math.max(0, deckBWaveformZoomPct - 15);
+                        setDeckBWaveformZoomPct(next);
+                        setDeckBWaveformView(next > 0 ? 'zoom' : 'overview');
+                      }}
+                      title="Zoom out waveform"
+                      className="p-0.5 rounded text-slate-400 hover:text-amber-200 disabled:opacity-30 cursor-pointer"
+                    >
+                      <ZoomOut className="w-3 h-3" />
+                    </button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      disabled={!deckBTrack}
+                      value={deckBWaveformZoomPct}
+                      aria-label="Deck B waveform transient zoom"
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        setDeckBWaveformZoomPct(next);
+                        setDeckBWaveformView(next > 0 ? 'zoom' : 'overview');
+                      }}
+                      className="w-full accent-amber-400 cursor-pointer disabled:opacity-40"
+                    />
+                    <button
+                      type="button"
+                      disabled={!deckBTrack || deckBWaveformZoomPct >= 100}
+                      onClick={() => {
+                        const next = Math.min(100, deckBWaveformZoomPct + 15);
+                        setDeckBWaveformZoomPct(next);
+                        setDeckBWaveformView('zoom');
+                      }}
+                      title="Zoom in onto transients"
+                      className="p-0.5 rounded text-slate-400 hover:text-amber-200 disabled:opacity-30 cursor-pointer"
+                    >
+                      <ZoomIn className="w-3 h-3" />
+                    </button>
+                    <span className="font-mono tabular-nums text-amber-300 w-16 text-right shrink-0">
+                      {!deckBTrack || deckBWaveformZoomPct === 0
+                        ? 'Full'
+                        : (() => {
+                            const span = computeWaveformZoomSpanSec(deckBTrack, deckBWaveformZoomPct);
+                            const beats = span / (60 / Math.max(40, getEffectiveBpm(deckBTrack)));
+                            return span < 1.5
+                              ? `${Math.round(span * 1000)}ms`
+                              : `${beats.toFixed(1)}B`;
+                          })()}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    {(
+                      [
+                        { label: 'Full', pct: 0 },
+                        { label: '8B', pct: 45 },
+                        { label: '2B', pct: 74 },
+                        { label: '0.5B', pct: 100 },
+                      ] as const
+                    ).map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={!deckBTrack}
+                        onClick={() => {
+                          setDeckBWaveformZoomPct(preset.pct);
+                          setDeckBWaveformView(preset.pct > 0 ? 'zoom' : 'overview');
+                        }}
+                        className={`px-1 py-0.5 rounded font-mono text-[8.5px] border cursor-pointer disabled:opacity-35 ${
+                          Math.abs(deckBWaveformZoomPct - preset.pct) <= 3
+                            ? 'bg-amber-500/20 border-amber-400/45 text-amber-200'
+                            : 'bg-white/[0.03] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      disabled={!deckBTrack}
+                      onClick={() => {
+                        if (deckBTransientSeek) {
+                          setDeckBTransientSeek(false);
+                          if (!syncToBeatGrid) setSyncToBeatGrid(true);
+                          handleSnapDeckPlayheadToBeatGrid('B');
+                        } else {
+                          setDeckBTransientSeek(true);
+                        }
+                      }}
+                      title="Toggle Beat-Grid quantized waveform seeking vs Free Millisecond seeking"
+                      className={`px-1.5 py-0.5 rounded font-mono text-[8.5px] border cursor-pointer disabled:opacity-35 ${
+                        deckBTransientSeek || !syncToBeatGrid
+                          ? 'bg-amber-500/20 border-amber-400/45 text-amber-200'
+                          : 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
+                      }`}
+                    >
+                      {deckBTransientSeek || !syncToBeatGrid ? 'Free ms' : 'Beat Snap'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!deckBTrack}
+                      onClick={() => {
+                        setCueManagerDeck('B');
+                        handlePlaceCuePoint(
+                          'B',
+                          `Cue ${(deckBTrack?.cuePoints?.length ?? 0) + 1}`,
+                          deckBTime,
+                          '#f59e0b'
+                        );
+                      }}
+                      title="Set tight cue marker at exact zoomed playhead"
+                      className="px-1.5 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 text-amber-200 font-semibold cursor-pointer disabled:opacity-35"
+                    >
+                      + Cue
+                    </button>
+                  </div>
+                </div>
+
+                {/* Deck B Track Alignment Nudge Bar (+/- 5ms, +/- 10ms) */}
+                <div className="bg-[#090b10] border border-white/[0.07] rounded-lg px-2 py-1 flex flex-wrap items-center justify-between gap-2 text-[9.5px]">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-semibold text-slate-300 whitespace-nowrap">
+                      Nudge Align
+                    </span>
+                    <span
+                      className={`font-mono tabular-nums whitespace-nowrap ${
+                        Math.abs(deckBNudgeMs) >= 0.5
+                          ? 'text-amber-300 font-semibold'
+                          : 'text-slate-500'
+                      }`}
+                    >
+                      {deckBNudgeMs >= 0 ? '+' : ''}
+                      {deckBNudgeMs.toFixed(0)}ms
+                    </span>
+                    {deckBPhaseInfo && (
+                      <span className="font-mono tabular-nums text-[9px] text-slate-400 whitespace-nowrap hidden sm:inline">
+                        · Beat {deckBPhaseInfo.phaseMs >= 0 ? '+' : ''}
+                        {deckBPhaseInfo.phaseMs.toFixed(1)}ms
+                      </span>
+                    )}
+                    {Math.abs(deckBNudgeMs) >= 0.5 && (
+                      <button
+                        type="button"
+                        disabled={!deckBTrack}
+                        onClick={() =>
+                          handleNudgeTrackAlignment('B', -deckBNudgeMs, { resetCounter: true })
+                        }
+                        title="Revert cumulative track alignment nudge back to 0ms"
+                        className="px-1 py-0.5 rounded bg-white/[0.05] hover:bg-white/[0.12] text-[8.5px] font-mono text-slate-300 cursor-pointer"
+                      >
+                        0ms
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 font-mono tabular-nums shrink-0">
+                    <button
+                      type="button"
+                      disabled={!deckBTrack}
+                      onClick={() => handleSnapDeckPlayheadToBeatGrid('B')}
+                      title="Snap Deck B playhead immediately to the nearest beat marker"
+                      className="px-1.5 py-0.5 rounded text-[9px] font-sans font-semibold border bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-400/35 flex items-center gap-1 cursor-pointer disabled:opacity-35 mr-1"
+                    >
+                      <Magnet className="w-2.5 h-2.5" />
+                      <span>Snap Beat</span>
+                    </button>
+                    {([-10, -5, 5, 10] as const).map((ms) => {
+                      const isActiveFlash = deckBNudgeFlash?.deltaMs === ms;
+                      return (
+                        <button
+                          key={ms}
+                          type="button"
+                          disabled={!deckBTrack}
+                          onClick={() => handleNudgeTrackAlignment('B', ms)}
+                          aria-label={`Nudge Deck B track alignment by ${ms > 0 ? `+${ms}` : ms} milliseconds`}
+                          title={`Micro-adjust Deck B track alignment by ${ms > 0 ? `+${ms}` : ms}ms`}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition-colors cursor-pointer disabled:opacity-35 ${
+                            isActiveFlash
+                              ? 'bg-amber-400 text-[#090b10] border-amber-300'
+                              : 'bg-white/[0.05] hover:bg-amber-500/20 text-slate-200 hover:text-amber-200 border-white/[0.09]'
+                          }`}
+                        >
+                          {ms > 0 ? `+${ms}ms` : `${ms}ms`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <TriBandWaveformCanvas
                   track={deckBTrack}
                   playheadSec={deckBTime}
@@ -6212,11 +12077,34 @@ export function DjStudioModal({
                   showBeatGrid={showBeatGridOverlay}
                   beatGridSubdivision={beatGridSubdivision}
                   viewMode={deckBWaveformView}
+                  zoomPct={deckBWaveformZoomPct}
+                  freeTransientSeek={deckBTransientSeek}
+                  syncToBeatGrid={syncToBeatGrid}
+                  nudgeAccumMs={deckBNudgeMs}
+                  nudgeFlash={deckBNudgeFlash}
+                  harmonicCompatibility={deckATrack && deckBTrack ? harmonicComparison : null}
+                  spectrogramMode={spectrogramMode}
+                  loopWindowStartSec={
+                    deckBTrack && deckBLoopBeats > 0
+                      ? deckBChainRef.current?.offsetSec ?? deckBTime
+                      : null
+                  }
+                  loopWindowEndSec={
+                    deckBTrack && deckBLoopBeats > 0
+                      ? Math.min(
+                          deckBTrack.duration,
+                          (deckBChainRef.current?.offsetSec ?? deckBTime) +
+                            (60 / Math.max(40, getEffectiveBpm(deckBTrack))) * deckBLoopBeats
+                        )
+                      : null
+                  }
                   isGridEditMode={deckBGridEditorOpen}
                   isScratchMode={!deckBGridEditorOpen && deckBScratchEnabled}
                   isScratching={deckBScratching}
                   scratchRate={deckBScratchRate}
                   scratchSensitivitySec={scratchSensitivitySec}
+                  masterBeatClockRef={masterBeatClockRef}
+                  registerBeatPulseDraw={registerBeatPulseDraw}
                   onDragBeatGridMs={(deltaMs) => handleShiftDeckBeatGrid('B', deltaMs, true)}
                   onScratchStart={() => void startDeckScratch('B')}
                   onScratchMove={(deltaSec, velocityRate) =>
@@ -6472,10 +12360,15 @@ export function DjStudioModal({
                           key={line.id}
                           type="button"
                           onClick={() => {
+                            const targetSec =
+                              syncToBeatGrid && deckBTrack
+                                ? snapTimeToTrackBeatGrid(deckBTrack, line.time)
+                                : line.time;
                             setDeckBInLyricId(line.id);
-                            setDeckBInTime(line.time);
+                            setDeckBInTime(targetSec);
                             setTriggerMode('lyrics');
-                            setDeckBTime(line.time);
+                            setDeckBTime(targetSec);
+                            if (deckBPlaying) void startLiveDeckFromTime('B', targetSec);
                           }}
                           className={`w-full text-left px-2 py-0.5 rounded text-[11px] flex items-center justify-between gap-2 cursor-pointer ${
                             isSelected
@@ -6497,6 +12390,1401 @@ export function DjStudioModal({
                     Load .lrc / plain text lyrics to align Deck B vocal entry onto Deck A&apos;s mix-out.
                   </p>
                 )}
+              </div>
+            </div>
+          </div>
+
+          {/* FILTER & FX RACK: BPM-Synced Auto-Filter Sweep, Ping-Pong Beat Delay & Beat Gater (MIDI-Mappable) */}
+          <div className="bg-[#121620] border border-fuchsia-400/25 rounded-xl p-3 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500/25 to-cyan-500/20 border border-fuchsia-400/35 flex items-center justify-center shrink-0">
+                  <Sparkles className="w-4 h-4 text-fuchsia-300" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-slate-100 flex flex-wrap items-center gap-2">
+                    <span>Filter &amp; FX Rack · BPM Auto-Sync</span>
+                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-400/35 text-[9.5px] font-mono font-bold text-cyan-200 tabular-nums">
+                      {detectedMasterBpm.toFixed(1)} BPM {fxBpmSyncEnabled ? 'LOCKED' : 'FREE'}
+                    </span>
+                    {(fxAutoFilterDepth > 0.02 ||
+                      fxFilterCutoff < 0.96 ||
+                      fxDelayMix > 0.02 ||
+                      fxBeatGateDepth > 0.02 ||
+                      Math.abs(fxTransientAttack) > 0.02 ||
+                      Math.abs(fxTransientSustain) > 0.02 ||
+                      fxTransientDither > 0.02 ||
+                      fxNoiseGateThreshold > -79) &&
+                      !fxBypassed && (
+                        <span className="px-1.5 py-0.5 rounded bg-fuchsia-500/20 border border-fuchsia-400/40 text-[9px] font-mono font-bold text-fuchsia-200">
+                          FX ACTIVE
+                        </span>
+                      )}
+                  </h3>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    Auto-syncs filter LFO sweeps, stereo ping-pong delay, transient shaper, and rhythmic gate · All knobs MIDI-mappable
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setFxBpmSyncEnabled((v) => !v)}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer flex items-center gap-1 ${
+                    fxBpmSyncEnabled
+                      ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200'
+                      : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {fxBpmSyncEnabled ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                  <span>BPM Sync</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFxBypassed((v) => !v)}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer ${
+                    fxBypassed
+                      ? 'bg-rose-500/20 border-rose-400/45 text-rose-200'
+                      : 'bg-emerald-500/15 border-emerald-400/35 text-emerald-200'
+                  }`}
+                >
+                  {fxBypassed ? 'FX Bypassed' : 'FX Engaged'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetFxRack}
+                  className="px-2 py-1 rounded-lg text-[10px] font-medium bg-white/[0.04] hover:bg-white/[0.09] text-slate-300 border border-white/[0.08] cursor-pointer flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onOpenMidiMapping}
+                  className="px-2.5 py-1 rounded-lg text-[10px] font-semibold bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-fuchsia-200 border border-fuchsia-400/40 cursor-pointer flex items-center gap-1"
+                >
+                  <Cable className="w-3 h-3" />
+                  <span>Map MIDI FX</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick DJ FX Presets Strip */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[9.5px] uppercase tracking-wider text-slate-500 font-semibold">
+                  FX Macros:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFxBypassed(false);
+                    setFxFilterMode('lowpass');
+                    setFxBpmSyncEnabled(true);
+                    setFxFilterLfoBeats(2);
+                    onUpdateSettings({
+                      djFilterCutoff: 0.72,
+                      djFilterResonance: 4.8,
+                      djAutoFilterDepth: 0.75,
+                    });
+                  }}
+                  className="px-2 py-0.5 rounded bg-[#090b10] hover:bg-fuchsia-500/15 border border-white/[0.08] hover:border-fuchsia-400/40 text-[10px] text-slate-200 cursor-pointer"
+                >
+                  2-Beat LPF Sweep
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFxBypassed(false);
+                    setFxBpmSyncEnabled(true);
+                    setFxDelayBeats(0.5);
+                    onUpdateSettings({
+                      djDelayMix: 0.45,
+                      djDelayFeedback: 0.55,
+                    });
+                  }}
+                  className="px-2 py-0.5 rounded bg-[#090b10] hover:bg-cyan-500/15 border border-white/[0.08] hover:border-cyan-400/40 text-[10px] text-slate-200 cursor-pointer"
+                >
+                  1/2 Beat Dub Echo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFxBypassed(false);
+                    setFxBpmSyncEnabled(true);
+                    setFxFilterLfoBeats(4);
+                    setFxGateBeats(0.5);
+                    onUpdateSettings({
+                      djFilterCutoff: 0.65,
+                      djFilterResonance: 5.5,
+                      djAutoFilterDepth: 0.6,
+                      djDelayMix: 0.3,
+                      djDelayFeedback: 0.45,
+                      djBeatGateDepth: 0.5,
+                    });
+                  }}
+                  className="px-2 py-0.5 rounded bg-[#090b10] hover:bg-amber-500/15 border border-white/[0.08] hover:border-amber-400/40 text-[10px] text-slate-200 cursor-pointer"
+                >
+                  Festival Build Pump
+                </button>
+              </div>
+              <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                Delay Time: {Math.round(computedFxDelaySec * 1000)} ms · LFO:{' '}
+                {(fxBpmSyncEnabled
+                  ? detectedMasterBpm / 60 / fxFilterLfoBeats
+                  : 0.5 / fxFilterLfoBeats
+                ).toFixed(2)}{' '}
+                Hz
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-2.5">
+              {/* Module 1: Low-Pass / High-Pass Filter Sweep & BPM Auto-LFO */}
+              <div className="bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-fuchsia-300">
+                    1 · Filter Sweep &amp; Auto-LFO
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {(['lowpass', 'highpass'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setFxFilterMode(mode)}
+                        className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono font-bold uppercase cursor-pointer border ${
+                          fxFilterMode === mode
+                            ? 'bg-fuchsia-500/25 border-fuchsia-400/50 text-fuchsia-200'
+                            : 'bg-white/[0.04] border-white/[0.08] text-slate-400'
+                        }`}
+                      >
+                        {mode === 'lowpass' ? 'LPF' : 'HPF'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Filter Cutoff */}
+                <label className="block space-y-1">
+                  <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                    <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                      <span>{fxFilterMode === 'lowpass' ? 'LPF Cutoff' : 'HPF Cutoff'}</span>
+                      {midiMappingBadges?.djFilterCutoff && (
+                        <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                          {midiMappingBadges.djFilterCutoff}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono tabular-nums text-fuchsia-300">
+                      {fxFilterCutoff >= 0.98
+                        ? 'Open'
+                        : (() => {
+                            const hz =
+                              fxFilterMode === 'lowpass'
+                                ? Math.round(160 * Math.pow(112.5, fxFilterCutoff))
+                                : Math.round(30 * Math.pow(160, 1 - fxFilterCutoff));
+                            return hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${hz} Hz`;
+                          })()}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.02}
+                    value={fxFilterCutoff}
+                    onChange={(e) =>
+                      onUpdateSettings({ djFilterCutoff: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-fuchsia-400 cursor-pointer"
+                  />
+                </label>
+
+                {/* Filter Resonance (Q) */}
+                <label className="block space-y-1">
+                  <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                    <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                      <span>Resonance (Q)</span>
+                      {midiMappingBadges?.djFilterResonance && (
+                        <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                          {midiMappingBadges.djFilterResonance}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono tabular-nums text-slate-300">
+                      Q {fxFilterResonance.toFixed(1)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.7}
+                    max={12}
+                    step={0.1}
+                    value={fxFilterResonance}
+                    onChange={(e) =>
+                      onUpdateSettings({ djFilterResonance: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-fuchsia-400 cursor-pointer"
+                  />
+                </label>
+
+                {/* BPM Auto-Sweep LFO Depth & Beat Cycle */}
+                <div className="space-y-1.5 pt-0.5 border-t border-white/[0.06]">
+                  <label className="block space-y-1">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                        <span>BPM Auto-Sweep LFO</span>
+                        {midiMappingBadges?.djAutoFilterDepth && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djAutoFilterDepth}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono tabular-nums text-fuchsia-300">
+                        {fxAutoFilterDepth === 0
+                          ? 'Off'
+                          : `${Math.round(fxAutoFilterDepth * 100)}%`}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={fxAutoFilterDepth}
+                      onChange={(e) =>
+                        onUpdateSettings({ djAutoFilterDepth: parseFloat(e.target.value) })
+                      }
+                      className="w-full accent-fuchsia-400 cursor-pointer"
+                    />
+                  </label>
+                  <div className="grid grid-cols-5 gap-1">
+                    {FX_FILTER_LFO_DIVISIONS.map((div) => (
+                      <button
+                        key={div.beats}
+                        type="button"
+                        onClick={() => setFxFilterLfoBeats(div.beats)}
+                        className={`py-0.5 rounded text-[9.5px] font-mono font-semibold cursor-pointer border ${
+                          fxFilterLfoBeats === div.beats
+                            ? 'bg-fuchsia-500/25 border-fuchsia-400/50 text-fuchsia-100'
+                            : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {div.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Module 2: Beat-Synced Ping-Pong Delay */}
+              <div className="bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                    2 · Beat-Synced Ping-Pong Delay
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleClearFxDelayTail}
+                    className="px-1.5 py-0.5 rounded bg-white/[0.05] hover:bg-rose-500/20 border border-white/[0.08] hover:border-rose-400/40 text-[9.5px] text-slate-300 hover:text-rose-200 cursor-pointer"
+                  >
+                    Kill Tail
+                  </button>
+                </div>
+
+                {/* Beat Division Selector OR Manual ms */}
+                {fxBpmSyncEnabled ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-slate-400">
+                      <span>Sync Division ({detectedMasterBpm.toFixed(0)} BPM)</span>
+                      <span className="font-mono tabular-nums text-cyan-300">
+                        {Math.round(computedFxDelaySec * 1000)} ms
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-6 gap-1">
+                      {FX_DELAY_DIVISIONS.map((div) => (
+                        <button
+                          key={div.beats}
+                          type="button"
+                          onClick={() => setFxDelayBeats(div.beats)}
+                          className={`py-1 rounded text-[9.5px] font-mono font-semibold cursor-pointer border ${
+                            fxDelayBeats === div.beats
+                              ? 'bg-cyan-500/25 border-cyan-400/50 text-cyan-100'
+                              : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {div.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <label className="block space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-300 font-medium">Manual Delay Time</span>
+                      <span className="font-mono tabular-nums text-cyan-300">
+                        {fxManualDelayMs} ms
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={60}
+                      max={1500}
+                      step={10}
+                      value={fxManualDelayMs}
+                      onChange={(e) => setFxManualDelayMs(parseInt(e.target.value, 10))}
+                      className="w-full accent-cyan-400 cursor-pointer"
+                    />
+                  </label>
+                )}
+
+                {/* Delay Wet Mix */}
+                <label className="block space-y-1">
+                  <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                    <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                      <span>Delay Wet Mix</span>
+                      {midiMappingBadges?.djDelayMix && (
+                        <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                          {midiMappingBadges.djDelayMix}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono tabular-nums text-cyan-300">
+                      {fxDelayMix === 0 ? 'Dry' : `${Math.round(fxDelayMix * 100)}%`}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={fxDelayMix}
+                    onChange={(e) =>
+                      onUpdateSettings({ djDelayMix: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                </label>
+
+                {/* Delay Feedback */}
+                <label className="block space-y-1">
+                  <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                    <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                      <span>Echo Feedback</span>
+                      {midiMappingBadges?.djDelayFeedback && (
+                        <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                          {midiMappingBadges.djDelayFeedback}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono tabular-nums text-slate-300">
+                      {Math.round(fxDelayFeedback * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.85}
+                    step={0.05}
+                    value={fxDelayFeedback}
+                    onChange={(e) =>
+                      onUpdateSettings({ djDelayFeedback: parseFloat(e.target.value) })
+                    }
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                </label>
+              </div>
+
+              {/* Module 3: BPM Beat Gater, Noise Gate & MIDI Controller Map Summary */}
+              <div className="bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 flex flex-col justify-between space-y-2">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                      3 · Beat Gater &amp; Noise Gate
+                    </span>
+                    <span className="text-[9.5px] font-mono text-amber-200/80">
+                      {(fxBpmSyncEnabled
+                        ? detectedMasterBpm / 60 / fxGateBeats
+                        : 2 / fxGateBeats
+                      ).toFixed(2)}{' '}
+                      Hz
+                    </span>
+                  </div>
+
+                  <label className="block space-y-1">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span className="text-slate-300 font-medium flex items-center gap-1.5">
+                        <span>Rhythmic Gate / Pump</span>
+                        {midiMappingBadges?.djBeatGateDepth && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djBeatGateDepth}
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono tabular-nums text-amber-300">
+                        {fxBeatGateDepth === 0
+                          ? 'Off'
+                          : `${Math.round(fxBeatGateDepth * 100)}%`}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={fxBeatGateDepth}
+                      onChange={(e) =>
+                        onUpdateSettings({ djBeatGateDepth: parseFloat(e.target.value) })
+                      }
+                      className="w-full accent-amber-400 cursor-pointer"
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-4 gap-1">
+                    {FX_GATE_DIVISIONS.map((div) => (
+                      <button
+                        key={div.beats}
+                        type="button"
+                        onClick={() => setFxGateBeats(div.beats)}
+                        className={`py-1 rounded text-[9.5px] font-mono font-semibold cursor-pointer border ${
+                          fxGateBeats === div.beats
+                            ? 'bg-amber-500/25 border-amber-400/50 text-amber-100'
+                            : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {div.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Noise Gate Threshold Control */}
+                  <div className="pt-2 border-t border-white/[0.06] space-y-1.5">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span
+                        className="text-slate-300 font-medium flex items-center gap-1.5"
+                        title="Automatically silences background hiss and silent gaps below threshold"
+                      >
+                        <span>Noise Gate Threshold</span>
+                        {midiMappingBadges?.djNoiseGateThreshold && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djNoiseGateThreshold}
+                          </span>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span ref={noiseGateBadgeRef} className="text-[9px] font-mono font-semibold text-slate-500">
+                          {fxNoiseGateThreshold <= -79 ? 'BYPASS' : 'OPEN'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onUpdateSettings({ djNoiseGateThreshold: -80 })}
+                          title="Click to disable Noise Gate (-80 dBFS)"
+                          className="font-mono tabular-nums text-rose-300 hover:text-rose-200 font-semibold cursor-pointer"
+                        >
+                          {formatNoiseGateThreshold(fxNoiseGateThreshold)}
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={-80}
+                      max={-18}
+                      step={1}
+                      value={fxNoiseGateThreshold}
+                      onChange={(e) => {
+                        setFxBypassed(false);
+                        onUpdateSettings({ djNoiseGateThreshold: parseInt(e.target.value, 10) });
+                      }}
+                      aria-label="Noise Gate Threshold"
+                      className="w-full accent-rose-400 cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between gap-1.5">
+                      <div className="flex items-center gap-1">
+                        {[
+                          { label: 'Off', db: -80 },
+                          { label: '-60dB', db: -60 },
+                          { label: '-45dB', db: -45 },
+                          { label: '-30dB', db: -30 },
+                        ].map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => {
+                              if (preset.db > -79) setFxBypassed(false);
+                              onUpdateSettings({ djNoiseGateThreshold: preset.db });
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-mono border cursor-pointer ${
+                              Math.round(fxNoiseGateThreshold) === preset.db
+                                ? 'bg-rose-500/20 border-rose-400/45 text-rose-200 font-semibold'
+                                : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="w-16 h-1.5 rounded bg-white/[0.06] overflow-hidden" title="Noise Gate attenuation meter">
+                        <div
+                          ref={noiseGateGrBarRef}
+                          className="h-full bg-rose-400 transition-[width] duration-75"
+                          style={{ width: '0%' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live MIDI Assignments Summary */}
+                <div className="pt-2 border-t border-white/[0.06] space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-slate-400">Active FX MIDI Bindings</span>
+                    <button
+                      type="button"
+                      onClick={onOpenMidiMapping}
+                      className="text-cyan-300 hover:text-cyan-200 font-medium cursor-pointer"
+                    >
+                      Configure →
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(
+                      [
+                        { key: 'djFilterCutoff', short: 'Cutoff' },
+                        { key: 'djFilterResonance', short: 'Res Q' },
+                        { key: 'djAutoFilterDepth', short: 'AutoLFO' },
+                        { key: 'djDelayMix', short: 'DelayMix' },
+                        { key: 'djDelayFeedback', short: 'Feedback' },
+                        { key: 'djBeatGateDepth', short: 'Gate' },
+                        { key: 'djNoiseGateThreshold', short: 'NoiseGate' },
+                        { key: 'djTransientAttack', short: 'Attack' },
+                        { key: 'djTransientSustain', short: 'Sustain' },
+                        { key: 'djTransientDither', short: 'Dither' },
+                      ] as const
+                    ).map((item) => {
+                      const badge = midiMappingBadges?.[item.key];
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={onOpenMidiMapping}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-mono border cursor-pointer ${
+                            badge
+                              ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200 font-semibold'
+                              : 'bg-white/[0.03] border-white/[0.07] text-slate-500 hover:text-slate-300'
+                          }`}
+                        >
+                          {item.short}: {badge ?? '—'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Module 4: Differential Envelope Transient Shaper (Drum Attack & Sustain) */}
+            <div className="bg-[#090b10] border border-emerald-400/25 rounded-lg p-2.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                    4 · Transient Shaper · Drum Attack &amp; Sustain
+                  </span>
+                  <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                    {Math.abs(fxTransientAttack) < 0.02 &&
+                    Math.abs(fxTransientSustain) < 0.02 &&
+                    fxTransientDither < 0.02
+                      ? 'Unity Bypass (0%)'
+                      : `Att ${fxTransientAttack >= 0 ? '+' : ''}${Math.round(fxTransientAttack * 100)}% · Sus ${fxTransientSustain >= 0 ? '+' : ''}${Math.round(fxTransientSustain * 100)}% · Dither ${fxTransientDither < 0.01 ? 'Off' : `${Math.round(fxTransientDither * 100)}%`}`}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1">
+                  {(['full', 'drums'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setFxTransientFocus(mode)}
+                      title={
+                        mode === 'full'
+                          ? 'Full-spectrum transient detector (38 Hz HPF)'
+                          : 'Drum-focused sidechain detector (>95 Hz kick snap & snare crack)'
+                      }
+                      className={`px-2 py-0.5 rounded text-[9.5px] font-semibold border cursor-pointer ${
+                        fxTransientFocus === mode
+                          ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
+                          : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {mode === 'full' ? 'Full Mix' : 'Drum Focus'}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateSettings({
+                        djTransientAttack: 0,
+                        djTransientSustain: 0,
+                        djTransientDither: 0,
+                      })
+                    }
+                    className="px-2 py-0.5 rounded text-[9.5px] font-medium bg-white/[0.04] hover:bg-white/[0.09] border border-white/[0.08] text-slate-300 cursor-pointer"
+                  >
+                    Flat 0%
+                  </button>
+                </div>
+              </div>
+
+              {/* Drum Shaping Macros */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[9.5px] uppercase tracking-wider text-slate-500 font-semibold">
+                  Drum Macros:
+                </span>
+                {[
+                  { label: 'Punchy Kick', attack: 0.55, sustain: -0.15 },
+                  { label: 'Tight Dry Kit', attack: 0.25, sustain: -0.65 },
+                  { label: 'Snappy Room', attack: 0.4, sustain: 0.45 },
+                  { label: 'Soft Percussion', attack: -0.5, sustain: 0.15 },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setFxBypassed(false);
+                      onUpdateSettings({
+                        djTransientAttack: preset.attack,
+                        djTransientSustain: preset.sustain,
+                      });
+                    }}
+                    className="px-2 py-0.5 rounded bg-white/[0.03] hover:bg-emerald-500/15 border border-white/[0.08] hover:border-emerald-400/40 text-[10px] text-slate-200 cursor-pointer"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+                {/* Envelope Shaping Curve & Real-Time Attack/Sustain Gain Meters */}
+                <div className="lg:col-span-5 bg-[#06080c] border border-white/[0.07] rounded-lg p-2 space-y-2">
+                  <div className="relative w-full h-[64px]">
+                    <svg
+                      viewBox="0 0 240 68"
+                      className="w-full h-full overflow-visible"
+                      aria-label="Transient Shaper drum envelope curve"
+                    >
+                      <line x1="0" y1="58" x2="240" y2="58" stroke="rgba(148,163,184,0.18)" strokeWidth="1" />
+                      <line x1="34" y1="6" x2="34" y2="58" stroke="rgba(52,211,153,0.22)" strokeDasharray="2 2" strokeWidth="1" />
+                      <text x="8" y="13" fill="rgba(52,211,153,0.75)" fontSize="8" fontFamily="monospace">
+                        ATTACK
+                      </text>
+                      <text x="108" y="13" fill="rgba(251,191,36,0.75)" fontSize="8" fontFamily="monospace">
+                        SUSTAIN TAIL
+                      </text>
+                      {/* Dry Reference Envelope */}
+                      <polyline
+                        fill="none"
+                        stroke="rgba(148,163,184,0.45)"
+                        strokeWidth="1.25"
+                        strokeDasharray="3 2.5"
+                        points={transientCurve.dryPoints
+                          .map((p) => `${(p.x * 240).toFixed(1)},${(58 - p.y * 42).toFixed(1)}`)
+                          .join(' ')}
+                      />
+                      {/* Shaped Envelope Fill */}
+                      <polygon
+                        fill="rgba(52,211,153,0.14)"
+                        points={`0,58 ${transientCurve.shapedPoints
+                          .map((p) => `${(p.x * 240).toFixed(1)},${(58 - p.y * 42).toFixed(1)}`)
+                          .join(' ')} 240,58`}
+                      />
+                      {/* Shaped Envelope Stroke */}
+                      <polyline
+                        fill="none"
+                        stroke="#34d399"
+                        strokeWidth="2"
+                        strokeLinejoin="round"
+                        points={transientCurve.shapedPoints
+                          .map((p) => `${(p.x * 240).toFixed(1)},${(58 - p.y * 42).toFixed(1)}`)
+                          .join(' ')}
+                      />
+                    </svg>
+                  </div>
+
+                  {/* Live Bi-Directional Gain Deflection Meters */}
+                  <div className="grid grid-cols-2 gap-2 text-[9.5px] font-mono tabular-nums">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-slate-400">
+                        <span>ATT GAIN</span>
+                        <span ref={transientAttackTextRef} className="text-emerald-300 font-semibold">
+                          0.0 dB
+                        </span>
+                      </div>
+                      <div className="relative h-1.5 rounded bg-white/[0.06] overflow-hidden">
+                        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-white/25 z-10" />
+                        <div
+                          ref={transientAttackBarRef}
+                          className="absolute top-0 bottom-0 bg-emerald-400 transition-[width,left] duration-75"
+                          style={{ left: '50%', width: '0%' }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-slate-400">
+                        <span>SUS GAIN</span>
+                        <span ref={transientSustainTextRef} className="text-amber-300 font-semibold">
+                          0.0 dB
+                        </span>
+                      </div>
+                      <div className="relative h-1.5 rounded bg-white/[0.06] overflow-hidden">
+                        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-white/25 z-10" />
+                        <div
+                          ref={transientSustainBarRef}
+                          className="absolute top-0 bottom-0 bg-amber-400 transition-[width,left] duration-75"
+                          style={{ left: '50%', width: '0%' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Independent Attack, Sustain & Dither Sliders */}
+                <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="bg-[#121620] border border-white/[0.07] rounded-lg p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span className="text-slate-200 font-semibold flex items-center gap-1.5">
+                        <span>Attack</span>
+                        {midiMappingBadges?.djTransientAttack && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djTransientAttack}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ djTransientAttack: 0 })}
+                        title="Click to snap Attack back to 0%"
+                        className="font-mono tabular-nums text-emerald-300 hover:text-emerald-200 font-semibold cursor-pointer"
+                      >
+                        {fxTransientAttack === 0
+                          ? '0%'
+                          : `${fxTransientAttack > 0 ? '+' : ''}${Math.round(fxTransientAttack * 100)}%`}
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={-1}
+                      max={1}
+                      step={0.05}
+                      value={fxTransientAttack}
+                      onChange={(e) => {
+                        setFxBypassed(false);
+                        onUpdateSettings({ djTransientAttack: parseFloat(e.target.value) });
+                      }}
+                      className="w-full accent-emerald-400 cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between text-[9px] font-mono text-slate-500">
+                      <span>Soften</span>
+                      <span>0%</span>
+                      <span>Snap</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#121620] border border-white/[0.07] rounded-lg p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span className="text-slate-200 font-semibold flex items-center gap-1.5">
+                        <span>Sustain</span>
+                        {midiMappingBadges?.djTransientSustain && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djTransientSustain}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ djTransientSustain: 0 })}
+                        title="Click to snap Sustain back to 0%"
+                        className="font-mono tabular-nums text-amber-300 hover:text-amber-200 font-semibold cursor-pointer"
+                      >
+                        {fxTransientSustain === 0
+                          ? '0%'
+                          : `${fxTransientSustain > 0 ? '+' : ''}${Math.round(fxTransientSustain * 100)}%`}
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={-1}
+                      max={1}
+                      step={0.05}
+                      value={fxTransientSustain}
+                      onChange={(e) => {
+                        setFxBypassed(false);
+                        onUpdateSettings({ djTransientSustain: parseFloat(e.target.value) });
+                      }}
+                      className="w-full accent-amber-400 cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between text-[9px] font-mono text-slate-500">
+                      <span>Tighten</span>
+                      <span>0%</span>
+                      <span>Bloom</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#121620] border border-white/[0.07] rounded-lg p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                      <span
+                        className="text-slate-200 font-semibold flex items-center gap-1.5"
+                        title="High-pass TPDF dither masks quantization & low-level truncation distortion during heavy transient shaping"
+                      >
+                        <span>Dither (TPDF)</span>
+                        {midiMappingBadges?.djTransientDither && (
+                          <span className="px-1 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[9px] font-mono text-cyan-200">
+                            {midiMappingBadges.djTransientDither}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onUpdateSettings({ djTransientDither: 0 })}
+                        title="Click to disable TPDF dither"
+                        className="font-mono tabular-nums text-sky-300 hover:text-sky-200 font-semibold cursor-pointer"
+                      >
+                        {formatTransientDitherReadout(fxTransientDither)}
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={fxTransientDither}
+                      onChange={(e) => {
+                        setFxBypassed(false);
+                        onUpdateSettings({ djTransientDither: parseFloat(e.target.value) });
+                      }}
+                      aria-label="Transient Shaper Dither Control"
+                      className="w-full accent-sky-400 cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between text-[9px] font-mono text-slate-500">
+                      <span>Off</span>
+                      <span>HP-TPDF</span>
+                      <span>Max</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Module 5: Per-Deck 3-Band EQ Sliders & BPM-Calibrated Crossover Frequencies */}
+            <div className="bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-200">
+                    5 · Per-Deck 3-Band EQ &amp; BPM Auto-Calibrated Crossovers
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    Sculpts Low, Mid, High shelves with crossover points tailored to each track&apos;s BPM
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCalibrateDeckCrossovers('both')}
+                    className="px-2 py-1 rounded text-[10px] font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/35 text-cyan-200 cursor-pointer flex items-center gap-1"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    <span>Auto-Calibrate Both</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEqA((p) => ({ ...p, lowGainDb: 0, midGainDb: 0, highGainDb: 0 }));
+                      setEqB((p) => ({ ...p, lowGainDb: 0, midGainDb: 0, highGainDb: 0 }));
+                    }}
+                    className="px-2 py-1 rounded text-[10px] font-medium bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.09] text-slate-300 cursor-pointer"
+                  >
+                    Flat Both EQs
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+                {(
+                  [
+                    {
+                      deck: 'A' as const,
+                      eq: eqA,
+                      setEq: setEqA,
+                      autoXover: eqAAutoXover,
+                      setAutoXover: setEqAAutoXover,
+                      bpm: deckALiveBpm ?? detectedMasterBpm,
+                      hasTrack: Boolean(deckATrack),
+                      trackTitle: deckATrack?.title,
+                      accentBorder: 'border-cyan-400/25',
+                      accentText: 'text-cyan-300',
+                      accentRange: 'accent-cyan-400',
+                      activeBtn: 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200',
+                    },
+                    {
+                      deck: 'B' as const,
+                      eq: eqB,
+                      setEq: setEqB,
+                      autoXover: eqBAutoXover,
+                      setAutoXover: setEqBAutoXover,
+                      bpm: deckBLiveBpm ?? detectedMasterBpm,
+                      hasTrack: Boolean(deckBTrack),
+                      trackTitle: deckBTrack?.title,
+                      accentBorder: 'border-amber-400/25',
+                      accentText: 'text-amber-300',
+                      accentRange: 'accent-amber-400',
+                      activeBtn: 'bg-amber-500/20 border-amber-400/45 text-amber-200',
+                    },
+                  ] as const
+                ).map((cfg) => {
+                  const calibration = computeBpmCalibratedEqCrossovers(cfg.bpm);
+                  const lowHz = cfg.eq.lowCrossoverHz ?? calibration.lowCrossoverHz;
+                  const midHz = cfg.eq.midCenterHz ?? calibration.midCenterHz;
+                  const highHz = cfg.eq.highCrossoverHz ?? calibration.highCrossoverHz;
+
+                  return (
+                    <div
+                      key={cfg.deck}
+                      className={`bg-[#121620] border ${cfg.accentBorder} rounded-lg p-2.5 space-y-2`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-100">
+                            <span className={cfg.accentText}>Deck {cfg.deck} EQ</span>
+                            <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                              {cfg.hasTrack ? `${cfg.bpm.toFixed(1)} BPM` : 'Master Ref'}
+                              <span className="mx-1 text-slate-600">·</span>
+                              {calibration.voicingLabel}
+                            </span>
+                          </div>
+                          {cfg.trackTitle && (
+                            <p className="text-[9.5px] text-slate-400 truncate">
+                              {cfg.trackTitle}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!cfg.autoXover) {
+                                handleCalibrateDeckCrossovers(cfg.deck);
+                              } else {
+                                cfg.setAutoXover(false);
+                              }
+                            }}
+                            title="Automatically tune Low, Mid, and High crossover points from track BPM"
+                            className={`px-1.5 py-0.5 rounded text-[9.5px] font-semibold border cursor-pointer flex items-center gap-1 ${
+                              cfg.autoXover
+                                ? cfg.activeBtn
+                                : 'bg-white/[0.04] border-white/[0.09] text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {cfg.autoXover ? (
+                              <Lock className="w-2.5 h-2.5" />
+                            ) : (
+                              <Unlock className="w-2.5 h-2.5" />
+                            )}
+                            <span>{cfg.autoXover ? 'BPM Xover' : 'Manual Hz'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              cfg.setEq((prev) => ({
+                                ...prev,
+                                lowGainDb: 0,
+                                midGainDb: 0,
+                                highGainDb: 0,
+                              }))
+                            }
+                            className="px-1.5 py-0.5 rounded text-[9.5px] bg-white/[0.04] hover:bg-white/[0.1] border border-white/[0.08] text-slate-300 cursor-pointer"
+                          >
+                            Flat
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 3-Band EQ Sliders (Low / Mid / High) */}
+                      <div className="grid grid-cols-3 gap-2">
+                        {(
+                          [
+                            {
+                              band: 'LOW',
+                              field: 'lowGainDb' as const,
+                              val: cfg.eq.lowGainDb,
+                              freqLabel: `${lowHz} Hz`,
+                            },
+                            {
+                              band: 'MID',
+                              field: 'midGainDb' as const,
+                              val: cfg.eq.midGainDb,
+                              freqLabel:
+                                midHz >= 1000 ? `${(midHz / 1000).toFixed(2)}k` : `${midHz} Hz`,
+                            },
+                            {
+                              band: 'HIGH',
+                              field: 'highGainDb' as const,
+                              val: cfg.eq.highGainDb,
+                              freqLabel: `${(highHz / 1000).toFixed(2)}k`,
+                            },
+                          ] as const
+                        ).map((item) => {
+                          const isKilled = item.val <= -17.5;
+                          return (
+                            <div
+                              key={item.band}
+                              className="bg-[#090b10] border border-white/[0.06] rounded-md p-2 space-y-1"
+                            >
+                              <div className="flex items-center justify-between text-[9.5px]">
+                                <span className="font-bold text-slate-200">{item.band}</span>
+                                <span className="font-mono text-slate-500">{item.freqLabel}</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={-18}
+                                max={9}
+                                step={0.5}
+                                value={item.val}
+                                aria-label={`Deck ${cfg.deck} ${item.band} EQ gain`}
+                                onChange={(e) => {
+                                  const next = parseFloat(e.target.value);
+                                  cfg.setEq((prev) => ({ ...prev, [item.field]: next }));
+                                }}
+                                className={`w-full ${cfg.accentRange} cursor-pointer`}
+                              />
+                              <div className="flex items-center justify-between gap-1">
+                                <span
+                                  className={`text-[10px] font-mono font-semibold tabular-nums ${
+                                    isKilled
+                                      ? 'text-rose-300'
+                                      : item.val > 0
+                                        ? cfg.accentText
+                                        : 'text-slate-300'
+                                  }`}
+                                >
+                                  {isKilled
+                                    ? 'KILL'
+                                    : `${item.val > 0 ? '+' : ''}${item.val.toFixed(1)} dB`}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    cfg.setEq((prev) => ({
+                                      ...prev,
+                                      [item.field]: isKilled ? 0 : -18,
+                                    }))
+                                  }
+                                  className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold border cursor-pointer ${
+                                    isKilled
+                                      ? 'bg-rose-500/25 border-rose-400/50 text-rose-200'
+                                      : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-rose-200'
+                                  }`}
+                                >
+                                  Kill
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Crossover Frequency Sliders */}
+                      <div className="grid grid-cols-3 gap-2 pt-1 border-t border-white/[0.06]">
+                        <label className="space-y-0.5">
+                          <div className="flex items-center justify-between text-[9px] font-mono">
+                            <span className="text-slate-400">LOW XOVER</span>
+                            <span className={cfg.accentText}>{lowHz} Hz</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={120}
+                            max={380}
+                            step={5}
+                            value={lowHz}
+                            aria-label={`Deck ${cfg.deck} Low crossover frequency`}
+                            onChange={(e) => {
+                              const hz = parseInt(e.target.value, 10);
+                              cfg.setAutoXover(false);
+                              cfg.setEq((prev) => ({ ...prev, lowCrossoverHz: hz }));
+                            }}
+                            className={`w-full ${cfg.accentRange} cursor-pointer`}
+                          />
+                        </label>
+
+                        <label className="space-y-0.5">
+                          <div className="flex items-center justify-between text-[9px] font-mono">
+                            <span className="text-slate-400">MID PEAK</span>
+                            <span className={cfg.accentText}>{midHz} Hz</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={600}
+                            max={2000}
+                            step={10}
+                            value={midHz}
+                            aria-label={`Deck ${cfg.deck} Mid center frequency`}
+                            onChange={(e) => {
+                              const hz = parseInt(e.target.value, 10);
+                              cfg.setAutoXover(false);
+                              cfg.setEq((prev) => ({ ...prev, midCenterHz: hz }));
+                            }}
+                            className={`w-full ${cfg.accentRange} cursor-pointer`}
+                          />
+                        </label>
+
+                        <label className="space-y-0.5">
+                          <div className="flex items-center justify-between text-[9px] font-mono">
+                            <span className="text-slate-400">HIGH XOVER</span>
+                            <span className={cfg.accentText}>
+                              {(highHz / 1000).toFixed(2)} kHz
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={2600}
+                            max={6500}
+                            step={25}
+                            value={highHz}
+                            aria-label={`Deck ${cfg.deck} High crossover frequency`}
+                            onChange={(e) => {
+                              const hz = parseInt(e.target.value, 10);
+                              cfg.setAutoXover(false);
+                              cfg.setEq((prev) => ({ ...prev, highCrossoverHz: hz }));
+                            }}
+                            className={`w-full ${cfg.accentRange} cursor-pointer`}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* MASTER OUTPUT BRICK-WALL LIMITER & AUTO PEAK-CALIBRATED GAIN */}
+          <div className="bg-[#121620] border border-emerald-400/25 rounded-xl p-3 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-emerald-500/25 to-cyan-500/20 border border-emerald-400/35 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-4 h-4 text-emerald-300" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-slate-100 flex flex-wrap items-center gap-2">
+                    <span>Master Brick-Wall Limiter · Anti-Clip &amp; Auto Peak Gain</span>
+                    <span
+                      ref={limiterStatusBadgeRef}
+                      className={`px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold ${
+                        limiterEnabled
+                          ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                          : 'bg-rose-500/15 border-rose-400/40 text-rose-200'
+                      }`}
+                    >
+                      {limiterEnabled ? 'BRICK-WALL SAFE' : 'BYPASSED'}
+                    </span>
+                  </h3>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    Prevents clipping across overlapping decks, Loop Deck &amp; FX and auto-calibrates trim from the loudest mix-stack peak
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setLimiterEnabled((v) => !v)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer flex items-center gap-1 ${
+                    limiterEnabled
+                      ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
+                      : 'bg-rose-500/15 border-rose-400/35 text-rose-200'
+                  }`}
+                >
+                  <ShieldCheck className="w-3 h-3" />
+                  <span>{limiterEnabled ? 'Limiter ON' : 'Limiter OFF'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!limiterEnabled}
+                  onClick={() => setLimiterAutoGainEnabled((v) => !v)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border cursor-pointer disabled:opacity-40 flex items-center gap-1 ${
+                    limiterAutoGainEnabled
+                      ? 'bg-cyan-500/20 border-cyan-400/45 text-cyan-200'
+                      : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Activity className="w-3 h-3" />
+                  <span>Auto Peak-Gain</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    loudestStackPeakRef.current = mixStackBaselinePeak;
+                    setLimiterPeakResetNonce((n) => n + 1);
+                    setStatusMessage(
+                      `Recalibrated mix-stack peak detector (${
+                        mixStackBaselinePeak > 0.001
+                          ? `${(20 * Math.log10(mixStackBaselinePeak)).toFixed(1)} dBFS`
+                          : 'baseline'
+                      }).`
+                    );
+                  }}
+                  className="px-2 py-1 rounded-lg text-[10px] font-medium bg-white/[0.05] hover:bg-white/[0.1] text-slate-200 border border-white/[0.08] cursor-pointer flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Calibrate Stack</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 items-stretch">
+              {/* Ceiling & Release Controls */}
+              <div className="lg:col-span-5 bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 space-y-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-slate-300 font-medium">Brick-Wall Ceiling</span>
+                    <span className="font-mono tabular-nums text-emerald-300">
+                      {limiterCeilingDb.toFixed(1)} dBFS
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {LIMITER_CEILING_PRESETS.map((db) => (
+                      <button
+                        key={db}
+                        type="button"
+                        onClick={() => setLimiterCeilingDb(db)}
+                        className={`py-1 rounded text-[9.5px] font-mono font-semibold border cursor-pointer ${
+                          limiterCeilingDb === db
+                            ? 'bg-emerald-500/25 border-emerald-400/50 text-emerald-100'
+                            : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {db.toFixed(1)} dB
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-slate-300 font-medium">Limiter Release</span>
+                    <span className="font-mono tabular-nums text-cyan-300">
+                      {Math.round(limiterReleaseSec * 1000)} ms
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {LIMITER_RELEASE_PRESETS.map((rel) => (
+                      <button
+                        key={rel.sec}
+                        type="button"
+                        onClick={() => setLimiterReleaseSec(rel.sec)}
+                        className={`py-1 rounded text-[9.5px] font-mono font-semibold border cursor-pointer ${
+                          limiterReleaseSec === rel.sec
+                            ? 'bg-cyan-500/25 border-cyan-400/50 text-cyan-100'
+                            : 'bg-white/[0.03] border-white/[0.07] text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {rel.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Mix-Stack Peak, Auto-Gain & Gain Reduction Meters */}
+              <div className="lg:col-span-7 bg-[#090b10] border border-white/[0.08] rounded-lg p-2.5 flex flex-col justify-between space-y-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                  <div className="rounded bg-white/[0.03] border border-white/[0.06] px-2 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-slate-400">
+                      Mix Stack Peak
+                    </div>
+                    <span
+                      ref={limiterStackPeakTextRef}
+                      className="text-[11px] font-mono font-bold tabular-nums text-amber-300"
+                    >
+                      {mixStackBaselinePeak > 0.0001
+                        ? `${20 * Math.log10(mixStackBaselinePeak) >= 0 ? '+' : ''}${(20 * Math.log10(mixStackBaselinePeak)).toFixed(1)} dBFS`
+                        : '-∞ dBFS'}
+                    </span>
+                  </div>
+
+                  <div className="rounded bg-white/[0.03] border border-white/[0.06] px-2 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-slate-400">
+                      Auto-Gain Trim
+                    </div>
+                    <span
+                      ref={limiterAutoGainTextRef}
+                      className="text-[11px] font-mono font-bold tabular-nums text-cyan-300"
+                    >
+                      0.0 dB
+                    </span>
+                  </div>
+
+                  <div className="rounded bg-white/[0.03] border border-white/[0.06] px-2 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-slate-400">
+                      Limiter GR
+                    </div>
+                    <span
+                      ref={limiterGrTextRef}
+                      className="text-[11px] font-mono font-bold tabular-nums text-rose-300"
+                    >
+                      0.0 dB
+                    </span>
+                  </div>
+
+                  <div className="rounded bg-white/[0.03] border border-white/[0.06] px-2 py-1">
+                    <div className="text-[9px] uppercase tracking-wider text-slate-400">
+                      Master Output
+                    </div>
+                    <span
+                      ref={limiterOutTextRef}
+                      className="text-[11px] font-mono font-bold tabular-nums text-emerald-300"
+                    >
+                      -∞ dBFS
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 text-[9.5px] font-mono">
+                    <span className="w-20 text-slate-400 shrink-0">PRE-STACK</span>
+                    <div className="flex-1 h-2 rounded-full bg-white/[0.05] overflow-hidden">
+                      <div
+                        ref={limiterPreBarRef}
+                        className="h-full bg-gradient-to-r from-cyan-400 via-amber-400 to-rose-500 transition-[width] duration-75"
+                        style={{ width: '4%' }}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-[9.5px] font-mono">
+                    <span className="w-20 text-slate-400 shrink-0">REDUCTION</span>
+                    <div className="flex-1 h-2 rounded-full bg-white/[0.05] overflow-hidden">
+                      <div
+                        ref={limiterGrBarRef}
+                        className="h-full bg-gradient-to-r from-amber-400 to-rose-500 transition-[width] duration-75"
+                        style={{ width: '0%' }}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-[9.5px] font-mono">
+                    <span className="w-20 text-slate-400 shrink-0">SAFE OUT</span>
+                    <div className="flex-1 h-2 rounded-full bg-white/[0.05] overflow-hidden">
+                      <div
+                        ref={limiterOutBarRef}
+                        className="h-full bg-gradient-to-r from-emerald-400 to-cyan-400 transition-[width] duration-75"
+                        style={{ width: '4%' }}
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -6785,6 +14073,420 @@ export function DjStudioModal({
                   />
                 </label>
               </div>
+            </div>
+          </div>
+
+          {/* ONE-SHOT SAMPLER DECK: Record & Trigger BPM-Quantized One-Shot Samples */}
+          <div className="bg-[#121620] border border-fuchsia-400/25 rounded-xl p-3 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500/25 to-cyan-500/20 border border-fuchsia-400/35 flex items-center justify-center shrink-0">
+                  <Mic
+                    className={`w-4 h-4 ${
+                      samplerRecordingPadId ? 'text-rose-400 animate-pulse' : 'text-fuchsia-300'
+                    }`}
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xs font-semibold text-slate-100">
+                      One-Shot Sampler Deck
+                    </h3>
+                    <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                      {detectedMasterBpm.toFixed(1)} BPM
+                      <span className="mx-1 text-slate-600">·</span>
+                      Quantize:{' '}
+                      <span className="text-fuchsia-300 font-semibold">
+                        {samplerQuantize === 'off'
+                          ? 'Free'
+                          : samplerQuantize === 0.25
+                            ? '1/4 Beat'
+                            : samplerQuantize === 0.5
+                              ? '1/2 Beat'
+                              : '1 Beat'}
+                      </span>
+                      {samplerRecordingPadId && (
+                        <>
+                          <span className="mx-1 text-slate-600">·</span>
+                          <span className="text-rose-300 font-semibold">
+                            REC {samplerRecordElapsedSec.toFixed(1)}s / 8.0s
+                          </span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    Record from Mic, Master Output, or Deck Chops and trigger one-shots snapped to the active BPM beat grid (keys 1–8)
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                {/* Record Source Selector */}
+                <div
+                  className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]"
+                  title="Select audio source for pad recording"
+                >
+                  {(
+                    [
+                      { id: 'mic', label: 'Mic' },
+                      { id: 'deckA', label: 'Deck A' },
+                      { id: 'deckB', label: 'Deck B' },
+                      { id: 'master', label: 'Master' },
+                    ] as const
+                  ).map((src) => (
+                    <button
+                      key={src.id}
+                      type="button"
+                      disabled={samplerRecordingPadId !== null}
+                      onClick={() => setSamplerRecordSource(src.id)}
+                      className={`px-2 py-1 rounded text-[10px] font-semibold cursor-pointer disabled:opacity-45 ${
+                        samplerRecordSource === src.id
+                          ? 'bg-fuchsia-500/25 text-fuchsia-200'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {src.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Quantize Selector */}
+                <div
+                  className="flex items-center p-0.5 rounded-lg bg-[#090b10] border border-white/[0.08]"
+                  title="Quantize pad triggers to detected project BPM grid"
+                >
+                  {SAMPLER_QUANTIZE_OPTIONS.map((opt) => (
+                    <button
+                      key={String(opt.value)}
+                      type="button"
+                      onClick={() => setSamplerQuantize(opt.value)}
+                      className={`px-2 py-1 rounded text-[10px] font-mono font-semibold cursor-pointer ${
+                        samplerQuantize === opt.value
+                          ? 'bg-cyan-400 text-[#090b10]'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSamplerChokeMode((v) => !v)}
+                  title="Monophonic Choke cuts previous sample when a new pad hits"
+                  className={`px-2 py-1 rounded-lg text-[10px] font-medium border cursor-pointer ${
+                    samplerChokeMode
+                      ? 'bg-amber-500/20 border-amber-400/45 text-amber-200'
+                      : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {samplerChokeMode ? 'Choke ON' : 'Poly'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSamplerKeyTriggersEnabled((v) => !v)}
+                  title="Toggle keyboard keys 1-8 to trigger pads"
+                  className={`px-2 py-1 rounded-lg text-[10px] font-medium border cursor-pointer ${
+                    samplerKeyTriggersEnabled
+                      ? 'bg-cyan-500/15 border-cyan-400/35 text-cyan-200'
+                      : 'bg-white/[0.04] border-white/[0.08] text-slate-400'
+                  }`}
+                >
+                  Keys 1–8
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleLoadFullSamplerStarterKit()}
+                  className="px-2 py-1 rounded-lg text-[10px] font-medium bg-white/[0.05] hover:bg-white/[0.11] text-slate-200 border border-white/[0.09] cursor-pointer"
+                >
+                  Load 8-Pad Kit
+                </button>
+
+                <button
+                  type="button"
+                  onClick={stopAllSamplerVoices}
+                  className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-400/35 flex items-center gap-1 cursor-pointer"
+                >
+                  <Square className="w-2.5 h-2.5 fill-current" />
+                  <span>Stop All</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Live Recording VU Bar + Sampler Master Gain */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-[#090b10] border border-white/[0.08] rounded-lg px-2.5 py-1.5">
+              <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                <span className="text-[10px] font-mono uppercase text-slate-400 shrink-0">
+                  {samplerRecordingPadId ? (
+                    <span className="text-rose-300 font-semibold">Live Rec Level</span>
+                  ) : (
+                    `Source: ${
+                      samplerRecordSource === 'mic'
+                        ? 'Microphone (auto-trims silence)'
+                        : samplerRecordSource === 'deckA'
+                          ? 'Deck A (instant 1-Beat chop @ playhead)'
+                          : samplerRecordSource === 'deckB'
+                            ? 'Deck B (instant 1-Beat chop @ playhead)'
+                            : 'Master Output (live mix + FX)'
+                    }`
+                  )}
+                </span>
+                {samplerRecordingPadId && (
+                  <div className="flex-1 max-w-[220px] h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-400 via-amber-400 to-rose-500 transition-[width] duration-75"
+                      style={{ width: `${Math.max(4, Math.round(samplerMicLevel * 100))}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <label className="flex items-center gap-2 shrink-0">
+                <Volume2 className="w-3.5 h-3.5 text-fuchsia-300" />
+                <span className="text-[10px] text-slate-300 font-medium">Sampler Out</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1.4}
+                  step={0.05}
+                  value={samplerMasterVolume}
+                  onChange={(e) => setSamplerMasterVolume(parseFloat(e.target.value))}
+                  className="w-24 accent-fuchsia-400 cursor-pointer"
+                />
+                <span className="text-[10px] font-mono tabular-nums text-fuchsia-300 w-9 text-right">
+                  {Math.round(samplerMasterVolume * 100)}%
+                </span>
+              </label>
+            </div>
+
+            {/* 8 BPM-Quantized Trigger & Record Pads Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {samplerPads.map((pad) => {
+                const isRecordingThis = samplerRecordingPadId === pad.id;
+                const isQueued = Boolean(samplerPadQueuedState[pad.id]);
+                const isPlayingThis = Boolean(samplerPadPlayingState[pad.id]);
+                const hasAudio = Boolean(pad.audioBuffer);
+
+                return (
+                  <div
+                    key={pad.id}
+                    style={{
+                      borderColor: isRecordingThis
+                        ? '#fb7185'
+                        : isPlayingThis || isQueued
+                          ? pad.colorHex
+                          : hasAudio
+                            ? `${pad.colorHex}44`
+                            : 'rgba(255,255,255,0.08)',
+                    }}
+                    className={`rounded-xl border bg-[#090b10] p-2 flex flex-col gap-1.5 transition-all ${
+                      isPlayingThis
+                        ? 'shadow-[0_0_16px_rgba(232,121,249,0.28)] scale-[0.99]'
+                        : isQueued
+                          ? 'ring-1 ring-cyan-400/70'
+                          : ''
+                    }`}
+                  >
+                    {/* Main Tactile Trigger Pad Area */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isRecordingThis) {
+                          void handleRecordSamplerPad(pad.id);
+                        } else {
+                          void handleTriggerSamplerPad(pad.id);
+                        }
+                      }}
+                      className="w-full text-left rounded-lg bg-[#121620] hover:bg-white/[0.06] border border-white/[0.06] p-2 flex flex-col gap-1.5 cursor-pointer group"
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            style={{ backgroundColor: pad.colorHex }}
+                            className="w-5 h-5 rounded text-[10px] font-mono font-bold text-[#090b10] flex items-center justify-center shrink-0"
+                          >
+                            {pad.keyHint}
+                          </span>
+                          {editingSamplerPadId === pad.id ? (
+                            <input
+                              type="text"
+                              autoFocus
+                              value={editingSamplerPadName}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setEditingSamplerPadName(e.target.value)}
+                              onBlur={() => {
+                                const trimmed = editingSamplerPadName.trim();
+                                if (trimmed) {
+                                  setSamplerPads((prev) =>
+                                    prev.map((p) =>
+                                      p.id === pad.id ? { ...p, name: trimmed } : p
+                                    )
+                                  );
+                                }
+                                setEditingSamplerPadId(null);
+                              }}
+                              onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter') {
+                                  const trimmed = editingSamplerPadName.trim();
+                                  if (trimmed) {
+                                    setSamplerPads((prev) =>
+                                      prev.map((p) =>
+                                        p.id === pad.id ? { ...p, name: trimmed } : p
+                                      )
+                                    );
+                                  }
+                                  setEditingSamplerPadId(null);
+                                } else if (e.key === 'Escape') {
+                                  setEditingSamplerPadId(null);
+                                }
+                              }}
+                              className="w-full px-1 py-0.5 rounded bg-[#090b10] border border-cyan-400 text-[11px] text-slate-100 focus:outline-none"
+                            />
+                          ) : (
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingSamplerPadId(pad.id);
+                                setEditingSamplerPadName(pad.name);
+                              }}
+                              title="Click to rename pad"
+                              className="text-[11px] font-semibold text-slate-100 truncate hover:text-cyan-200"
+                            >
+                              {pad.name}
+                            </span>
+                          )}
+                        </div>
+
+                        <span className="text-[9.5px] font-mono tabular-nums shrink-0">
+                          {isRecordingThis ? (
+                            <span className="text-rose-400 font-bold animate-pulse">REC</span>
+                          ) : isQueued ? (
+                            <span className="text-cyan-300 font-bold animate-pulse">SYNC…</span>
+                          ) : isPlayingThis ? (
+                            <span style={{ color: pad.colorHex }} className="font-bold">
+                              FIRE
+                            </span>
+                          ) : hasAudio ? (
+                            <span className="text-slate-400">
+                              {pad.durationSec.toFixed(2)}s
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">EMPTY</span>
+                          )}
+                        </span>
+                      </div>
+
+                      {/* Mini Waveform Bars */}
+                      <div className="h-8 rounded bg-[#07090d] border border-white/[0.05] px-1 flex items-center gap-[1.5px] overflow-hidden">
+                        {hasAudio && pad.peaks.length > 0 ? (
+                          pad.peaks.map((pk, barIdx) => (
+                            <div
+                              key={barIdx}
+                              style={{
+                                height: `${Math.max(12, Math.round(pk * 88))}%`,
+                                backgroundColor: isPlayingThis
+                                  ? '#ffffff'
+                                  : isQueued
+                                    ? '#22d3ee'
+                                    : pad.colorHex,
+                                opacity: isPlayingThis ? 1 : 0.78,
+                              }}
+                              className="flex-1 rounded-full transition-colors duration-75"
+                            />
+                          ))
+                        ) : (
+                          <span className="w-full text-center text-[9.5px] text-slate-500">
+                            {samplerRecordSource === 'mic'
+                              ? 'Click Rec below to capture voice/FX'
+                              : samplerRecordSource === 'master'
+                                ? 'Click Rec to capture master output'
+                                : `Click Chop to sample ${samplerRecordSource === 'deckA' ? 'Deck A' : 'Deck B'}`}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+
+                    {/* Pad Action Footer: Rec/Stop, Load File, Level, Clear */}
+                    <div className="flex items-center justify-between gap-1 text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => void handleRecordSamplerPad(pad.id)}
+                        className={`px-2 py-1 rounded font-semibold flex items-center gap-1 cursor-pointer transition-colors ${
+                          isRecordingThis
+                            ? 'bg-rose-500 text-white animate-pulse'
+                            : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-400/30'
+                        }`}
+                        title={
+                          isRecordingThis
+                            ? 'Stop recording and save one-shot'
+                            : samplerRecordSource === 'deckA' || samplerRecordSource === 'deckB'
+                              ? 'Capture 1-Beat one-shot from playing deck'
+                              : 'Record one-shot sample into this pad'
+                        }
+                      >
+                        {isRecordingThis ? (
+                          <>
+                            <Square className="w-2.5 h-2.5 fill-current" />
+                            <span>Stop</span>
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-2.5 h-2.5" />
+                            <span>
+                              {samplerRecordSource === 'deckA' || samplerRecordSource === 'deckB'
+                                ? 'Chop'
+                                : 'Rec'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          samplerTargetUploadPadIdRef.current = pad.id;
+                          samplerPadInputRef.current?.click();
+                        }}
+                        title="Load WAV/MP3 one-shot file"
+                        className="p-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-slate-300 border border-white/[0.08] cursor-pointer"
+                      >
+                        <Upload className="w-3 h-3" />
+                      </button>
+
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1.4}
+                        step={0.05}
+                        value={pad.gain}
+                        aria-label={`${pad.name} gain`}
+                        onChange={(e) => {
+                          const nextVal = parseFloat(e.target.value);
+                          setSamplerPads((prev) =>
+                            prev.map((p) => (p.id === pad.id ? { ...p, gain: nextVal } : p))
+                          );
+                        }}
+                        className="flex-1 min-w-[40px] accent-fuchsia-400 cursor-pointer"
+                      />
+
+                      <button
+                        type="button"
+                        disabled={!hasAudio}
+                        onClick={() => handleClearSamplerPad(pad.id)}
+                        title="Clear pad sample"
+                        className="p-1 rounded bg-white/[0.04] hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-white/[0.08] disabled:opacity-30 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -7177,6 +14879,11 @@ export function DjStudioModal({
                 {crate.map((track, idx) => {
                   const isA = track.id === deckATrackId;
                   const isB = track.id === deckBTrackId;
+                  const crateCamelot = getCamelotEntry(track.camelotKey);
+                  const crateMatchWithA =
+                    deckATrack && !isA && track.camelotKey && deckATrack.camelotKey
+                      ? evaluateHarmonicCompatibility(deckATrack.camelotKey, track.camelotKey)
+                      : null;
                   return (
                     <div
                       key={track.id}
@@ -7196,7 +14903,24 @@ export function DjStudioModal({
                             {track.title}
                           </div>
                           <div className="text-[10px] text-slate-400 font-mono tabular-nums truncate">
-                            {track.artist} · {getEffectiveBpm(track)} BPM · {formatDjClock(track.duration)} · {track.beatTimes.length} beats · {track.lyrics.length} lyrics
+                            {track.artist} · {getEffectiveBpm(track)} BPM
+                            {(track.camelotKey || track.musicalKey) && (
+                              <span
+                                style={{ color: crateCamelot?.colorHex ?? '#cbd5e1' }}
+                                className="font-semibold"
+                              >
+                                {' '}· {track.camelotKey ?? '--'} ({track.musicalKey ?? ''})
+                              </span>
+                            )}
+                            {crateMatchWithA?.isCompatible && (
+                              <span
+                                style={{ color: crateMatchWithA.accentHex }}
+                                className="font-semibold"
+                              >
+                                {' '}· Harmonic w/ A ({crateMatchWithA.label})
+                              </span>
+                            )}{' '}
+                            · {formatDjClock(track.duration)} · {track.beatTimes.length} beats · {track.lyrics.length} lyrics
                           </div>
                         </div>
                       </div>

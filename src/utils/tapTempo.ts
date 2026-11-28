@@ -6,6 +6,7 @@ export interface TapSample {
 
 export interface TapTempoCalibration {
   bpm: number;
+  preciseBpm: number;
   beatSensitivity: number;
   tapCount: number;
   usedEnergyCalibration: boolean;
@@ -57,7 +58,10 @@ export function computeTapTempoCalibration(
   const avgIntervalMs = weightedSum / Math.max(1, weightTotal);
   const safeRate = Math.max(0.25, playbackRate || 1);
   const trackIntervalSec = (avgIntervalMs / 1000) * safeRate;
-  const bpm = Math.round(clamp(60 / Math.max(0.15, trackIntervalSec), 40, 240));
+  const preciseBpm = Number(
+    clamp(60 / Math.max(0.15, trackIntervalSec), 40, 240).toFixed(1)
+  );
+  const bpm = Math.round(preciseBpm);
 
   // Baseline sensitivity curve mapped from tempo cadence (60 BPM -> 1.05x, 120 BPM -> 1.40x, 180+ BPM -> 1.75x)
   const tempoNorm = clamp((bpm - 60) / 120, 0, 1);
@@ -90,6 +94,7 @@ export function computeTapTempoCalibration(
 
   return {
     bpm,
+    preciseBpm,
     beatSensitivity,
     tapCount: samples.length,
     usedEnergyCalibration,

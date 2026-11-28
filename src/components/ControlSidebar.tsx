@@ -14,6 +14,7 @@ import {
   FileText,
   Image as ImageIcon,
   LayoutTemplate,
+  Link2,
   Loader2,
   Mic2,
   Palette,
@@ -169,6 +170,7 @@ interface ControlSidebarProps {
   mixClipCount?: number;
   onOpenMixStudio?: () => void;
   onOpenDjStudio?: () => void;
+  onOpenLinkDownloader?: () => void;
   containerClassName?: string;
 }
 
@@ -915,6 +917,7 @@ export function ControlSidebar({
   mixClipCount = 0,
   onOpenMixStudio,
   onOpenDjStudio,
+  onOpenLinkDownloader,
   containerClassName,
 }: ControlSidebarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
@@ -1354,6 +1357,16 @@ export function ControlSidebar({
                   <span>{isGeneratingDemo ? 'Creating...' : 'Load Demo Beat'}</span>
                 </button>
               </div>
+              {onOpenLinkDownloader && (
+                <button
+                  type="button"
+                  onClick={onOpenLinkDownloader}
+                  className="w-full px-3 py-2 rounded-lg text-xs font-medium bg-[#090b10] hover:bg-white/[0.06] text-slate-200 border border-white/[0.09] transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Link2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Paste Link &amp; Download Video / Audio</span>
+                </button>
+              )}
               {onOpenMixStudio && (
                 <button
                   type="button"

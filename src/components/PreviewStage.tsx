@@ -3,6 +3,7 @@ import {
   Captions,
   Check,
   Grid3x3,
+  Link2,
   Loader2,
   Music2,
   Play,
@@ -32,6 +33,7 @@ interface PreviewStageProps {
   autoArrangeNotice: string | null;
   onTogglePlay: () => void;
   onUploadAudioClick: () => void;
+  onOpenLinkDownloader?: () => void;
   onLoadDemo: () => void;
   lyrics: LyricLine[];
   currentTime: number;
@@ -54,6 +56,7 @@ export function PreviewStage({
   autoArrangeNotice,
   onTogglePlay,
   onUploadAudioClick,
+  onOpenLinkDownloader,
   onLoadDemo,
   lyrics,
   currentTime,
@@ -531,6 +534,16 @@ export function PreviewStage({
                 <Upload className="w-3.5 h-3.5" />
                 <span>Choose Audio / Video</span>
               </button>
+              {onOpenLinkDownloader && (
+                <button
+                  type="button"
+                  onClick={onOpenLinkDownloader}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 border border-white/[0.1] transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                >
+                  <Link2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Paste Link</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => stageCaptionInputRef.current?.click()}

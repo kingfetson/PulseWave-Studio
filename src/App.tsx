@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
 import { DjApplyMixPayload, DjStudioModal } from './components/DjStudioModal';
 import { ExportModal, ExportModalView } from './components/ExportModal';
+import { LinkDownloadModal } from './components/LinkDownloadModal';
 import { MidiMappingModal } from './components/MidiMappingModal';
 import { MixStudioModal } from './components/MixStudioModal';
 import { PreviewStage } from './components/PreviewStage';
@@ -227,6 +228,16 @@ const DEFAULT_SETTINGS: StudioSettings = {
   danceSpotlightIntensity: 1,
   danceRimColor: 'auto',
   danceShadow: true,
+  djFilterCutoff: 1,
+  djFilterResonance: 1.6,
+  djAutoFilterDepth: 0,
+  djDelayMix: 0,
+  djDelayFeedback: 0.38,
+  djBeatGateDepth: 0,
+  djTransientAttack: 0,
+  djTransientSustain: 0,
+  djTransientDither: 0,
+  djNoiseGateThreshold: -80,
 };
 
 const INITIAL_EXPORT_STATE: ExportProgressState = {
@@ -341,6 +352,7 @@ export default function App() {
   });
   const [isMixModalOpen, setIsMixModalOpen] = useState(false);
   const [isDjModalOpen, setIsDjModalOpen] = useState(false);
+  const [isLinkDownloadModalOpen, setIsLinkDownloadModalOpen] = useState(false);
 
   // Export modal & batch queue state
   const [exportState, setExportState] = useState<ExportProgressState>(INITIAL_EXPORT_STATE);
@@ -366,6 +378,9 @@ export default function App() {
   );
   const [midiEnabled, setMidiEnabled] = useState<boolean>(() => loadMidiEnabled());
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
+  const [midiInitialCategory, setMidiInitialCategory] = useState<
+    'all' | 'Audio & Visuals' | 'Lyrics & Overlay' | 'Backdrop' | 'DJ Filter & FX'
+  >('all');
   const [learningParam, setLearningParam] = useState<MidiMappableParamKey | null>(null);
   const [midiNotice, setMidiNotice] = useState<string | null>(null);
   const [tapTempoBpm, setTapTempoBpm] = useState<number | null>(null);
@@ -1170,8 +1185,92 @@ export default function App() {
     [duration, handleLyricsChange]
   );
 
+  const decodeImageFileToElement = useCallback(
+    (file: File): Promise<{ img: HTMLImageElement; objectUrl: string }> =>
+      new Promise((resolve, reject) => {
+        const objectUrl = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => resolve({ img, objectUrl });
+        img.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Failed to decode album artwork image.'));
+        };
+        img.src = objectUrl;
+      }),
+    []
+  );
+
+  const handleApplyParsedLinkMetadata = useCallback(
+    async (meta: {
+      trackTitle?: string;
+      artistName?: string;
+      albumArtFile?: File | null;
+    }) => {
+      const nextTrackTitle = meta.trackTitle?.trim() ?? '';
+      const nextArtistName = meta.artistName?.trim() ?? '';
+
+      let loadedArt: { file: File; img: HTMLImageElement; objectUrl: string } | null = null;
+      if (meta.albumArtFile) {
+        try {
+          const decodedArt = await decodeImageFileToElement(meta.albumArtFile);
+          loadedArt = { file: meta.albumArtFile, ...decodedArt };
+        } catch {
+          loadedArt = null;
+        }
+      }
+
+      if (loadedArt) {
+        customThumbnailRef.current = null;
+        if (albumUrlRef.current) {
+          URL.revokeObjectURL(albumUrlRef.current);
+        }
+        albumBlobRef.current = loadedArt.file;
+        albumUrlRef.current = loadedArt.objectUrl;
+        albumImageRef.current = loadedArt.img;
+        setAlbumImageName(loadedArt.file.name);
+      }
+
+      const nextMedia = captureCurrentMediaSnapshot(
+        loadedArt
+          ? {
+              albumImageName: loadedArt.file.name,
+              albumImageBlob: loadedArt.file,
+              albumImage: loadedArt.img,
+            }
+          : undefined
+      );
+
+      commitHistory(
+        (prev) => ({
+          ...prev,
+          settings: {
+            ...prev.settings,
+            ...(nextTrackTitle ? { trackTitle: nextTrackTitle } : {}),
+            ...(meta.artistName !== undefined ? { artistName: nextArtistName } : {}),
+            ...(nextTrackTitle || nextArtistName ? { showTrackOverlay: true } : {}),
+            ...(loadedArt ? { showCoverCard: true } : {}),
+          },
+          media: nextMedia,
+        }),
+        {
+          label: `Link metadata: ${nextTrackTitle || nextArtistName || 'Updated'}`,
+          kind: 'settings',
+        }
+      );
+      setIsProjectDirty(true);
+    },
+    [captureCurrentMediaSnapshot, commitHistory, decodeImageFileToElement]
+  );
+
   const handleAudioFileSelect = useCallback(
-    async (file: File) => {
+    async (
+      file: File,
+      metadataOverride?: {
+        trackTitle?: string;
+        artistName?: string;
+        albumArtFile?: File | null;
+      }
+    ) => {
       setAudioError(null);
       const audio = audioElRef.current;
       if (!audio) return;
@@ -1209,6 +1308,16 @@ export default function App() {
           setLastActiveProjectId(null);
         }
 
+        let loadedArt: { file: File; img: HTMLImageElement; objectUrl: string } | null = null;
+        if (metadataOverride?.albumArtFile) {
+          try {
+            const decodedArt = await decodeImageFileToElement(metadataOverride.albumArtFile);
+            loadedArt = { file: metadataOverride.albumArtFile, ...decodedArt };
+          } catch {
+            loadedArt = null;
+          }
+        }
+
         if (audioUrlRef.current) {
           URL.revokeObjectURL(audioUrlRef.current);
         }
@@ -1221,6 +1330,17 @@ export default function App() {
         audio.defaultPlaybackRate = playbackRateRef.current;
         audio.playbackRate = playbackRateRef.current;
 
+        if (loadedArt) {
+          customThumbnailRef.current = null;
+          if (albumUrlRef.current) {
+            URL.revokeObjectURL(albumUrlRef.current);
+          }
+          albumBlobRef.current = loadedArt.file;
+          albumUrlRef.current = loadedArt.objectUrl;
+          albumImageRef.current = loadedArt.img;
+          setAlbumImageName(loadedArt.file.name);
+        }
+
         const peaks = extractWaveformPeaks(decoded, 200);
         const safeTrimEnd = Number(decoded.duration.toFixed(2));
         setAudioBuffer(decoded);
@@ -1232,6 +1352,8 @@ export default function App() {
         setTrimEnd(safeTrimEnd);
 
         const baseTitle = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ');
+        const overrideTitle = metadataOverride?.trackTitle?.trim() ?? '';
+        const overrideArtist = metadataOverride?.artistName?.trim() ?? '';
         const nextMedia = captureCurrentMediaSnapshot({
           audioFileName: file.name,
           audioBlob: file,
@@ -1241,6 +1363,13 @@ export default function App() {
           trimStart: 0,
           trimEnd: safeTrimEnd,
           mixClips: [],
+          ...(loadedArt
+            ? {
+                albumImageName: loadedArt.file.name,
+                albumImageBlob: loadedArt.file,
+                albumImage: loadedArt.img,
+              }
+            : {}),
         });
         const nextProjectMeta = captureCurrentProjectMetaSnapshot();
         commitHistory(
@@ -1248,7 +1377,16 @@ export default function App() {
             ...prev,
             settings: {
               ...prev.settings,
-              trackTitle: isSwitchingTracks ? baseTitle : prev.settings.trackTitle || baseTitle,
+              trackTitle: overrideTitle
+                ? overrideTitle
+                : isSwitchingTracks
+                  ? baseTitle
+                  : prev.settings.trackTitle || baseTitle,
+              ...(metadataOverride?.artistName !== undefined
+                ? { artistName: overrideArtist }
+                : {}),
+              ...(overrideTitle || overrideArtist ? { showTrackOverlay: true } : {}),
+              ...(loadedArt ? { showCoverCard: true } : {}),
             },
             media: nextMedia,
             projectMeta: nextProjectMeta,
@@ -1265,6 +1403,7 @@ export default function App() {
       captureCurrentMediaSnapshot,
       captureCurrentProjectMetaSnapshot,
       commitHistory,
+      decodeImageFileToElement,
       ensureAudioGraph,
     ]
   );
@@ -4118,6 +4257,7 @@ export default function App() {
         onOpenProjects={() => setIsProjectsModalOpen(true)}
         onQuickSaveProject={() => void handleSaveActiveProject()}
         onLoadDemo={() => void handleLoadDemo()}
+        onOpenLinkDownloader={() => setIsLinkDownloadModalOpen(true)}
         onOpenMixStudio={() => {
           if (audioElRef.current && !audioElRef.current.paused) {
             audioElRef.current.pause();
@@ -4218,6 +4358,7 @@ export default function App() {
             }
             setIsDjModalOpen(true);
           }}
+          onOpenLinkDownloader={() => setIsLinkDownloadModalOpen(true)}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
@@ -4238,6 +4379,7 @@ export default function App() {
               setActiveTab('media');
               audioInputRef.current?.click();
             }}
+            onOpenLinkDownloader={() => setIsLinkDownloadModalOpen(true)}
             onLoadDemo={() => void handleLoadDemo()}
             lyrics={lyrics}
             currentTime={currentTime}
@@ -4391,9 +4533,11 @@ export default function App() {
         learningParam={learningParam}
         settings={settings}
         notice={midiNotice}
+        initialCategoryFilter={midiInitialCategory}
         onClose={() => {
           setLearningParam(null);
           setIsMidiModalOpen(false);
+          setMidiInitialCategory('all');
         }}
         onConnectMidi={() => void midiController.connectMidi()}
         onToggleMidiEnabled={handleToggleMidiEnabled}
@@ -4491,7 +4635,10 @@ export default function App() {
         onAutoArrange={handleAutoArrange}
         autoArrangeNotice={autoArrangeNotice}
         midiMappingBadges={midiMappingBadges}
-        onOpenMidiMapping={() => setIsMidiModalOpen(true)}
+        onOpenMidiMapping={() => {
+          setMidiInitialCategory('DJ Filter & FX');
+          setIsMidiModalOpen(true);
+        }}
         mocapClip={mocapClip}
         onMocapFileSelect={handleMocapFileSelect}
         onClearMocapClip={handleClearMocapClip}
@@ -4506,6 +4653,17 @@ export default function App() {
           setIsMixModalOpen(true);
         }}
         mixClipCount={mixClips.length}
+      />
+
+      <LinkDownloadModal
+        isOpen={isLinkDownloadModalOpen}
+        isExporting={isExporting}
+        onClose={() => setIsLinkDownloadModalOpen(false)}
+        onApplyMetadata={(meta) => void handleApplyParsedLinkMetadata(meta)}
+        onLoadIntoStudio={(file, metadata) => {
+          void handleAudioFileSelect(file, metadata);
+          setIsLinkDownloadModalOpen(false);
+        }}
       />
     </div>
   );

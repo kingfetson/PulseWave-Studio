@@ -142,6 +142,118 @@ export const MIDI_MAPPABLE_PARAMS: MidiParameterSpec[] = [
     defaultValue: 0.45,
     formatValue: (v) => `${Math.round(v * 100)}%`,
   },
+  {
+    key: 'djFilterCutoff',
+    label: 'DJ Low-Pass Filter Sweep',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 1,
+    step: 0.02,
+    defaultValue: 1,
+    formatValue: (v) => {
+      if (v >= 0.98) return 'Open (18 kHz)';
+      const hz = Math.round(160 * Math.pow(112.5, Math.max(0, Math.min(1, v))));
+      return hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${hz} Hz`;
+    },
+  },
+  {
+    key: 'djFilterResonance',
+    label: 'DJ Filter Resonance (Q)',
+    category: 'DJ Filter & FX',
+    min: 0.7,
+    max: 12,
+    step: 0.1,
+    defaultValue: 1.6,
+    formatValue: (v) => `Q ${v.toFixed(1)}`,
+  },
+  {
+    key: 'djAutoFilterDepth',
+    label: 'DJ BPM Auto-Filter Sweep',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => (v === 0 ? 'Off' : `${Math.round(v * 100)}%`),
+  },
+  {
+    key: 'djDelayMix',
+    label: 'DJ Beat-Synced Delay Mix',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => (v === 0 ? 'Dry' : `${Math.round(v * 100)}%`),
+  },
+  {
+    key: 'djDelayFeedback',
+    label: 'DJ Beat Delay Feedback',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 0.85,
+    step: 0.05,
+    defaultValue: 0.38,
+    formatValue: (v) => `${Math.round(v * 100)}%`,
+  },
+  {
+    key: 'djBeatGateDepth',
+    label: 'DJ BPM Beat Gater',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => (v === 0 ? 'Off' : `${Math.round(v * 100)}%`),
+  },
+  {
+    key: 'djTransientAttack',
+    label: 'DJ Transient Shaper Attack',
+    category: 'DJ Filter & FX',
+    min: -1,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => {
+      const pct = Math.round(v * 100);
+      if (pct === 0) return '0%';
+      return pct > 0 ? `+${pct}%` : `${pct}%`;
+    },
+  },
+  {
+    key: 'djTransientSustain',
+    label: 'DJ Transient Shaper Sustain',
+    category: 'DJ Filter & FX',
+    min: -1,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => {
+      const pct = Math.round(v * 100);
+      if (pct === 0) return '0%';
+      return pct > 0 ? `+${pct}%` : `${pct}%`;
+    },
+  },
+  {
+    key: 'djTransientDither',
+    label: 'DJ Transient Shaper Dither',
+    category: 'DJ Filter & FX',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    defaultValue: 0,
+    formatValue: (v) => (v < 0.01 ? 'Off' : `${Math.round(v * 100)}%`),
+  },
+  {
+    key: 'djNoiseGateThreshold',
+    label: 'DJ Filter Rack Noise Gate',
+    category: 'DJ Filter & FX',
+    min: -80,
+    max: -18,
+    step: 1,
+    defaultValue: -80,
+    formatValue: (v) => (v <= -79 ? 'Off' : `${Math.round(v)} dBFS`),
+  },
 ];
 
 const PARAM_MAP = new Map<MidiMappableParamKey, MidiParameterSpec>(

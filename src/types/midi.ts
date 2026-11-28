@@ -11,7 +11,17 @@ export type MidiMappableParamKey =
   | 'beatSensitivity'
   | 'lyricPosition'
   | 'bgBlur'
-  | 'bgDim';
+  | 'bgDim'
+  | 'djFilterCutoff'
+  | 'djFilterResonance'
+  | 'djAutoFilterDepth'
+  | 'djDelayMix'
+  | 'djDelayFeedback'
+  | 'djBeatGateDepth'
+  | 'djTransientAttack'
+  | 'djTransientSustain'
+  | 'djTransientDither'
+  | 'djNoiseGateThreshold';
 
 export type MidiMessageType = 'cc' | 'pitchbend' | 'note';
 
@@ -28,7 +38,7 @@ export type MidiConnectionStatus =
 export interface MidiParameterSpec {
   key: MidiMappableParamKey;
   label: string;
-  category: 'Audio & Visuals' | 'Lyrics & Overlay' | 'Backdrop';
+  category: 'Audio & Visuals' | 'Lyrics & Overlay' | 'Backdrop' | 'DJ Filter & FX';
   min: number;
   max: number;
   step: number;

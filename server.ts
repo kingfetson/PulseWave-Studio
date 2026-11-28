@@ -1,8 +1,19 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  DownloadMediaFormat,
+  fetchSafeAlbumArtwork,
+  inspectMediaLink,
+  MediaLinkError,
+  MediaQualityTier,
+  prepareMediaDownloadFile,
+  proxyMediaPreviewStream,
+} from './server/mediaDownloader.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
@@ -328,6 +339,332 @@ async function startServer(): Promise<void> {
     } catch (err) {
       const { status, message } = extractReadableError(err);
       res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/dj/automix-suggest', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        preference?: string;
+        deckA?: Record<string, unknown>;
+        deckB?: Record<string, unknown>;
+      };
+
+      if (!body.deckA || !body.deckB) {
+        res.status(400).json({ error: 'Both Deck A and Deck B structure profiles are required.' });
+        return;
+      }
+
+      const ai = getGeminiClient();
+      const preference = typeof body.preference === 'string' ? body.preference : 'balanced';
+
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          harmonicSummary: {
+            type: Type.STRING,
+            description: 'Concise 1-line summary comparing BPM, Camelot key, and energy compatibility.',
+          },
+          deckAStructure: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                startSec: { type: Type.NUMBER },
+                endSec: { type: Type.NUMBER },
+                label: { type: Type.STRING },
+                energy: { type: Type.NUMBER },
+              },
+              required: ['startSec', 'endSec', 'label', 'energy'],
+            },
+          },
+          deckBStructure: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                startSec: { type: Type.NUMBER },
+                endSec: { type: Type.NUMBER },
+                label: { type: Type.STRING },
+                energy: { type: Type.NUMBER },
+              },
+              required: ['startSec', 'endSec', 'label', 'energy'],
+            },
+          },
+          suggestions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                label: { type: Type.STRING },
+                energyMatchScore: { type: Type.NUMBER },
+                deckAOutSec: { type: Type.NUMBER },
+                deckASectionLabel: { type: Type.STRING },
+                deckBInSec: { type: Type.NUMBER },
+                deckBDropSec: { type: Type.NUMBER },
+                deckBSectionLabel: { type: Type.STRING },
+                crossfadeBeats: { type: Type.INTEGER },
+                transitionStyle: { type: Type.STRING },
+                videoMixStyle: { type: Type.STRING },
+                rationale: { type: Type.STRING },
+              },
+              required: [
+                'id',
+                'label',
+                'energyMatchScore',
+                'deckAOutSec',
+                'deckASectionLabel',
+                'deckBInSec',
+                'deckBDropSec',
+                'deckBSectionLabel',
+                'crossfadeBeats',
+                'transitionStyle',
+                'videoMixStyle',
+                'rationale',
+              ],
+            },
+          },
+        },
+        required: ['harmonicSummary', 'deckAStructure', 'deckBStructure', 'suggestions'],
+      };
+
+      const prompt =
+        `You are an expert pro club DJ & music producer analyzing two tracks for an optimal "Energy Match" transition.\n` +
+        `Mix Preference: ${preference} ('balanced' = seamless energy continuity; 'drop-slam' = high-impact outro-to-drop switch; 'smooth-blend' = long 16-32 beat phrase blend).\n\n` +
+        `DECK A (Outgoing Track):\n${JSON.stringify(body.deckA)}\n\n` +
+        `DECK B (Incoming Track):\n${JSON.stringify(body.deckB)}\n\n` +
+        `Instructions:\n` +
+        `1. Segment Deck A and Deck B into 4 to 6 clean structural phases each (e.g., Intro, Verse/Groove, Build, Main Drop, Breakdown, Outro) covering 0 to full durationSec with average energy (0-100).\n` +
+        `2. Propose 3 ranked "Energy Match" transition options ordered best-first:\n` +
+        `   - deckAOutSec: choose an exact downbeat timestamp from Deck A's downbeatSampleSec (or valid timestamp < durationSec - 2) where Deck A's energy naturally tapers, enters a breakdown, or starts its outro.\n` +
+        `   - deckBInSec: choose an exact downbeat timestamp from Deck B's downbeatSampleSec where Deck B enters cleanly so that after crossfadeBeats beats (at Deck A's BPM), Deck B lands cleanly on its drop (deckBDropSec) or main groove.\n` +
+        `   - crossfadeBeats MUST be one of: 4, 8, 16, 32.\n` +
+        `   - transitionStyle MUST be one of: "bass-swap", "filter-sweep", "beat-drop", "echo-out", "stutter-cut".\n` +
+        `   - videoMixStyle MUST be one of: "crossfade", "beat-flash", "wipe-slide", "split-dual", "zoom-punch".\n` +
+        `   - energyMatchScore is 1-100.\n` +
+        `   - rationale explains concisely (1-2 sentences) how outgoing energy, bass contour, BPM, and Camelot key align.`;
+
+      const models: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
+        { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+        { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+      ];
+
+      let rawJson = '';
+      let lastErr: unknown;
+      for (let i = 0; i < models.length; i++) {
+        const { model, thinkingLevel } = models[i];
+        try {
+          const resp = await withRetry(
+            () =>
+              ai.models.generateContent({
+                model,
+                contents: prompt,
+                config: {
+                  thinkingConfig: { thinkingLevel },
+                  responseMimeType: 'application/json',
+                  responseSchema,
+                },
+              }),
+            2
+          );
+          rawJson = (resp.text ?? '').trim();
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (isAuthOrInvalidKeyError(err) || !isTransientApiError(err) || i === models.length - 1) {
+            throw err;
+          }
+          console.warn(`${model} transiently unavailable for automix-suggest, trying fallback:`, err);
+        }
+      }
+
+      if (!rawJson) {
+        throw lastErr instanceof Error ? lastErr : new Error('Empty AI Auto-Mix response.');
+      }
+
+      const cleaned = rawJson
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '');
+      const parsed = JSON.parse(cleaned);
+      res.json(parsed);
+    } catch (err) {
+      const { status, message } = extractReadableError(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/media/inspect', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { url?: unknown };
+      const url = typeof body.url === 'string' ? body.url.trim() : '';
+      if (!url) {
+        res.status(400).json({ error: 'Please paste a valid HTTP or HTTPS media link.' });
+        return;
+      }
+      const result = await inspectMediaLink(url);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof MediaLinkError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to inspect that link.',
+      });
+    }
+  });
+
+  app.post('/api/media/download', async (req, res) => {
+    let prepared: Awaited<ReturnType<typeof prepareMediaDownloadFile>> | null = null;
+    try {
+      const body = (req.body ?? {}) as {
+        url?: unknown;
+        sourceType?: unknown;
+        format?: unknown;
+        qualityId?: unknown;
+        audioBitrate?: unknown;
+        filename?: unknown;
+      };
+
+      const url = typeof body.url === 'string' ? body.url.trim() : '';
+      const sourceType =
+        body.sourceType === 'yt-dlp' ? 'yt-dlp' : body.sourceType === 'direct' ? 'direct' : undefined;
+      const format = (
+        typeof body.format === 'string' ? body.format.trim().toLowerCase() : 'original'
+      ) as DownloadMediaFormat;
+      const qualityId = (
+        typeof body.qualityId === 'string' ? body.qualityId.trim() : 'best'
+      ) as MediaQualityTier;
+      const audioBitrate =
+        typeof body.audioBitrate === 'string' ? body.audioBitrate.trim() : undefined;
+      const filename =
+        typeof body.filename === 'string' ? body.filename.trim() : undefined;
+
+      if (!url) {
+        res.status(400).json({ error: 'A media URL is required to download.' });
+        return;
+      }
+
+      prepared = await prepareMediaDownloadFile({
+        url,
+        sourceType,
+        format,
+        qualityId,
+        audioBitrate,
+        filename,
+      });
+
+      const safeHeaderName = prepared.downloadName.replace(/["\\\r\n]/g, '_');
+      res.setHeader('Content-Type', prepared.mimeType);
+      res.setHeader('Content-Length', String(prepared.byteLength));
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${safeHeaderName}"; filename*=UTF-8''${encodeURIComponent(prepared.downloadName)}`
+      );
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Download-Filename', encodeURIComponent(prepared.downloadName));
+
+      const cleanup = prepared.cleanup;
+      const stream = fs.createReadStream(prepared.filePath);
+      let cleaned = false;
+      const runCleanup = () => {
+        if (!cleaned) {
+          cleaned = true;
+          cleanup();
+        }
+      };
+
+      res.on('close', runCleanup);
+      res.on('finish', runCleanup);
+      stream.on('error', (streamErr) => {
+        runCleanup();
+        if (!res.headersSent) {
+          res.status(500).json({ error: streamErr.message });
+        } else {
+          res.destroy();
+        }
+      });
+      stream.pipe(res);
+    } catch (err) {
+      prepared?.cleanup();
+      if (err instanceof MediaLinkError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to download media from link.',
+      });
+    }
+  });
+
+  app.get('/api/media/preview', async (req, res) => {
+    try {
+      const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+      if (!rawUrl) {
+        res.status(400).json({ error: 'Missing url parameter.' });
+        return;
+      }
+      const rangeHeader =
+        typeof req.headers.range === 'string' ? req.headers.range : undefined;
+      const upstream = await proxyMediaPreviewStream(rawUrl, rangeHeader);
+
+      res.status(upstream.status);
+      res.setHeader('Content-Type', upstream.contentType);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (upstream.contentLength) {
+        res.setHeader('Content-Length', upstream.contentLength);
+      }
+      if (upstream.contentRange) {
+        res.setHeader('Content-Range', upstream.contentRange);
+      }
+      if (upstream.acceptRanges) {
+        res.setHeader('Accept-Ranges', upstream.acceptRanges);
+      }
+
+      const nodeStream = Readable.fromWeb(
+        upstream.body as import('node:stream/web').ReadableStream<Uint8Array>
+      );
+      req.on('close', () => {
+        nodeStream.destroy();
+      });
+      nodeStream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).end();
+        } else {
+          res.destroy();
+        }
+      });
+      nodeStream.pipe(res);
+    } catch (err) {
+      if (err instanceof MediaLinkError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: 'Unable to stream media preview.' });
+    }
+  });
+
+  app.get('/api/media/artwork', async (req, res) => {
+    try {
+      const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+      if (!rawUrl) {
+        res.status(400).json({ error: 'Missing url parameter.' });
+        return;
+      }
+      const art = await fetchSafeAlbumArtwork(rawUrl);
+      res.setHeader('Content-Type', art.contentType);
+      res.setHeader('Content-Length', String(art.buffer.byteLength));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Artwork-Extension', art.extension);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.send(art.buffer);
+    } catch (err) {
+      if (err instanceof MediaLinkError) {
+        res.status(err.statusCode).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: 'Unable to fetch album artwork.' });
     }
   });
 

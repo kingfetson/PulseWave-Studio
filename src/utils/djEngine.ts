@@ -13,6 +13,8 @@ import {
   extractWaveformPeaks,
   generateDemoBeat,
 } from './audioEngine';
+import { detectMusicalKeyFromBuffer } from './djKeyDetection';
+import { extractSpectrogramWindow } from './djSpectrogram';
 import { createLyricId, parseCaptionsFile } from './lrcParser';
 import {
   analyzeBeatsFromAudioBuffer,
@@ -408,7 +410,9 @@ export function analyzeDjTrackFromBuffer(
   const parsed = parseArtistTitleFromFilename(name);
   const grid = analyzeBeatGridAndDrops(audioBuffer, options.beatSensitivity ?? 1.25);
   const triBandPeaks = extractTriBandPeaks(audioBuffer, 220);
+  const keyAnalysis = detectMusicalKeyFromBuffer(audioBuffer);
   const duration = Math.max(0.2, audioBuffer.duration);
+  const spectrogram = extractSpectrogramWindow(audioBuffer, 0, duration, 160, 24);
   const cuePoints = detectDefaultDjCuePoints({
     duration,
     downbeatTimes: grid.downbeatTimes,
@@ -444,6 +448,10 @@ export function analyzeDjTrackFromBuffer(
     lyrics: options.lyrics ? [...options.lyrics].sort((a, b) => a.time - b.time) : [],
     cuePoints,
     energyScore: grid.energyScore,
+    musicalKey: keyAnalysis.musicalKey,
+    camelotKey: keyAnalysis.camelotKey,
+    keyConfidence: keyAnalysis.confidence,
+    spectrogram,
   };
 }
 
@@ -1710,14 +1718,59 @@ export function buildCrateSetSchedule(
  * Renders the complete DJ Mix offline using Web Audio BiquadFilters (EQ Bass Swap & Sweep)
  * and tempo-matched playbackRate buffers into a crisp stereo AudioBuffer + WAV blob.
  */
+export function scanAudioBufferPeakLinear(buffer: AudioBuffer | null | undefined): number {
+  if (!buffer) return 0;
+  let peak = 0;
+  const step = Math.max(1, Math.floor(buffer.length / 120000));
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < data.length; i += step) {
+      const a = Math.abs(data[i]);
+      if (a > peak) peak = a;
+    }
+  }
+  return peak;
+}
+
+export function createBrickWallClipperCurve(
+  ceilingLinear: number,
+  samples = 8192
+): Float32Array<ArrayBuffer> {
+  const curve = new Float32Array(new ArrayBuffer(samples * 4));
+  const safeCeiling = Math.max(0.2, Math.min(0.995, ceilingLinear));
+  const kneeStart = safeCeiling * 0.92;
+  const kneeSpan = Math.max(0.005, safeCeiling - kneeStart);
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2) / (samples - 1) - 1;
+    const ax = Math.abs(x);
+    if (ax <= kneeStart) {
+      curve[i] = x;
+    } else {
+      const excess = (ax - kneeStart) / kneeSpan;
+      const shaped = kneeStart + kneeSpan * Math.tanh(excess);
+      curve[i] = Math.sign(x) * Math.min(safeCeiling, shaped);
+    }
+  }
+  return curve;
+}
+
 export async function renderOfflineDjSchedule(
   schedule: DjScheduleRenderPlan,
-  options: { normalize?: boolean; sampleRate?: number } = {}
+  options: {
+    normalize?: boolean;
+    sampleRate?: number;
+    limiterEnabled?: boolean;
+    limiterCeilingDb?: number;
+    autoGainFromPeak?: boolean;
+  } = {}
 ): Promise<{
   audioBuffer: AudioBuffer;
   wavBlob: Blob;
   duration: number;
   waveformPeaks: number[];
+  peakBeforeLimitDb: number;
+  appliedAutoGainDb: number;
+  peakAfterLimitDb: number;
 }> {
   if (schedule.segments.length === 0) {
     throw new Error('Load tracks into Deck A & Deck B before rendering a DJ mix.');
@@ -1737,10 +1790,33 @@ export async function renderOfflineDjSchedule(
     throw new Error('OfflineAudioContext is not supported in this browser.');
   }
 
+  const limiterEnabled = options.limiterEnabled !== false;
+  const ceilingDb = Math.max(-6, Math.min(-0.1, options.limiterCeilingDb ?? -0.3));
+  const ceilingLinear = Math.pow(10, ceilingDb / 20);
+  const autoGainFromPeak = options.autoGainFromPeak !== false;
+
   const offlineCtx = new OfflineCtx(2, totalSamples, sampleRate);
   const masterGain = offlineCtx.createGain();
   masterGain.gain.setValueAtTime(1, 0);
-  masterGain.connect(offlineCtx.destination);
+
+  if (limiterEnabled) {
+    const offlineLimiter = offlineCtx.createDynamicsCompressor();
+    offlineLimiter.threshold.setValueAtTime(Math.max(-24, ceilingDb - 0.6), 0);
+    offlineLimiter.knee.setValueAtTime(0, 0);
+    offlineLimiter.ratio.setValueAtTime(20, 0);
+    offlineLimiter.attack.setValueAtTime(0.001, 0);
+    offlineLimiter.release.setValueAtTime(0.08, 0);
+
+    const offlineClipper = offlineCtx.createWaveShaper();
+    offlineClipper.oversample = '4x';
+    offlineClipper.curve = createBrickWallClipperCurve(ceilingLinear);
+
+    masterGain.connect(offlineLimiter);
+    offlineLimiter.connect(offlineClipper);
+    offlineClipper.connect(offlineCtx.destination);
+  } else {
+    masterGain.connect(offlineCtx.destination);
+  }
 
   for (let idx = 0; idx < schedule.segments.length; idx++) {
     const seg = schedule.segments[idx];
@@ -1838,25 +1914,58 @@ export async function renderOfflineDjSchedule(
 
   const rendered = await offlineCtx.startRendering();
 
-  let peak = 0;
+  let rawPeak = 0;
   for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
     const data = rendered.getChannelData(ch);
     for (let i = 0; i < data.length; i++) {
       const a = Math.abs(data[i]);
-      if (a > peak) peak = a;
+      if (a > rawPeak) rawPeak = a;
     }
   }
-  if (peak > 0.0001 && (options.normalize ? peak > 0.94 || peak < 0.72 : peak > 0.98)) {
-    const scale = Math.min(options.normalize ? 2.0 : 1, 0.94 / peak);
+  const peakBeforeLimitDb =
+    rawPeak > 0.00001 ? 20 * Math.log10(rawPeak) : -60;
+
+  let appliedScale = 1;
+  if (rawPeak > 0.0001) {
+    if (autoGainFromPeak || options.normalize) {
+      if (rawPeak > ceilingLinear) {
+        appliedScale = ceilingLinear / rawPeak;
+      } else if (rawPeak < ceilingLinear * 0.78) {
+        appliedScale = Math.min(1.65, ceilingLinear / rawPeak);
+      }
+    } else if (limiterEnabled && rawPeak > ceilingLinear) {
+      appliedScale = ceilingLinear / rawPeak;
+    }
+  }
+
+  const kneeStart = ceilingLinear * 0.92;
+  const kneeSpan = Math.max(0.005, ceilingLinear - kneeStart);
+  let postPeak = 0;
+
+  if (Math.abs(appliedScale - 1) > 0.002 || (limiterEnabled && rawPeak > ceilingLinear)) {
     for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
       const data = rendered.getChannelData(ch);
       for (let i = 0; i < data.length; i++) {
-        let s = data[i] * scale;
-        if (s > 0.98 || s < -0.98) s = Math.tanh(s);
+        let s = data[i] * appliedScale;
+        if (limiterEnabled) {
+          const ax = Math.abs(s);
+          if (ax > kneeStart) {
+            const shaped = kneeStart + kneeSpan * Math.tanh((ax - kneeStart) / kneeSpan);
+            s = Math.sign(s) * Math.min(ceilingLinear, shaped);
+          }
+        }
         data[i] = s;
+        const ap = Math.abs(s);
+        if (ap > postPeak) postPeak = ap;
       }
     }
+  } else {
+    postPeak = rawPeak;
   }
+
+  const appliedAutoGainDb = 20 * Math.log10(Math.max(0.001, appliedScale));
+  const peakAfterLimitDb =
+    postPeak > 0.00001 ? 20 * Math.log10(postPeak) : -60;
 
   const wavBlob = audioBufferToWavBlob(rendered);
   const waveformPeaks = extractWaveformPeaks(rendered, 200);
@@ -1865,6 +1974,443 @@ export async function renderOfflineDjSchedule(
     wavBlob,
     duration: rendered.duration,
     waveformPeaks,
+    peakBeforeLimitDb,
+    appliedAutoGainDb,
+    peakAfterLimitDb,
+  };
+}
+
+export interface DjTransitionPreviewRender {
+  id: string;
+  suggestionId: string;
+  label: string;
+  plan: DjTransitionPlan;
+  audioBuffer: AudioBuffer;
+  previewStartSec: number;
+  previewEndSec: number;
+  durationSec: number;
+  triBandPeaks: DjTriBandPeaks;
+  transitionStyle: DjTransitionStyle;
+  crossfadeBeats: 4 | 8 | 16 | 32;
+  deckAOutSec: number;
+  deckBInSec: number;
+  deckBDropSec: number;
+}
+
+interface AutomationKeyframe {
+  t: number;
+  v: number;
+  curve?: 'linear' | 'exp' | 'step';
+}
+
+function scheduleSlicedAutomation(
+  param: AudioParam,
+  keyframes: AutomationKeyframe[],
+  winStart: number,
+  winEnd: number
+): void {
+  if (keyframes.length === 0 || winEnd <= winStart) return;
+  const sorted = [...keyframes].sort((a, b) => a.t - b.t);
+
+  const evalAt = (t: number): number => {
+    if (t <= sorted[0].t) return sorted[0].v;
+    const last = sorted[sorted.length - 1];
+    if (t >= last.t) return last.v;
+    for (let i = 1; i < sorted.length; i++) {
+      const k0 = sorted[i - 1];
+      const k1 = sorted[i];
+      if (t <= k1.t) {
+        if (k1.curve === 'step' || k1.t <= k0.t) return k0.v;
+        const frac = Math.max(0, Math.min(1, (t - k0.t) / (k1.t - k0.t)));
+        if (k1.curve === 'exp' && k0.v > 0 && k1.v > 0) {
+          return k0.v * Math.pow(k1.v / k0.v, frac);
+        }
+        return k0.v + (k1.v - k0.v) * frac;
+      }
+    }
+    return last.v;
+  };
+
+  param.setValueAtTime(evalAt(winStart), 0);
+  const localDur = Math.max(0.01, winEnd - winStart);
+
+  for (let i = 0; i < sorted.length; i++) {
+    const k = sorted[i];
+    if (k.t <= winStart + 0.0005) continue;
+    if (k.t >= winEnd - 0.0005) {
+      const endVal = evalAt(winEnd);
+      if (k.curve === 'step') {
+        param.setValueAtTime(endVal, localDur);
+      } else if (k.curve === 'exp') {
+        param.exponentialRampToValueAtTime(Math.max(0.0001, endVal), localDur);
+      } else {
+        param.linearRampToValueAtTime(endVal, localDur);
+      }
+      return;
+    }
+    const tLocal = k.t - winStart;
+    if (k.curve === 'step') {
+      param.setValueAtTime(k.v, tLocal);
+    } else if (k.curve === 'exp') {
+      param.exponentialRampToValueAtTime(Math.max(0.0001, k.v), tLocal);
+    } else {
+      param.linearRampToValueAtTime(k.v, tLocal);
+    }
+  }
+}
+
+/**
+ * Generates a fast 5-second offline preview render centered on a proposed Deck A -> Deck B
+ * transition so users can audition & scrub inside the waveform area before committing.
+ */
+export async function renderTransitionPreview5s(
+  deckA: DjTrackAsset,
+  deckB: DjTrackAsset,
+  proposal: {
+    id: string;
+    label: string;
+    deckAOutSec: number;
+    deckBInSec: number;
+    deckBDropSec?: number;
+    crossfadeBeats: 4 | 8 | 16 | 32;
+    transitionStyle: DjTransitionStyle;
+    videoMixStyle: DjVideoMixStyle;
+    triggerMode?: DjMixTriggerMode;
+    beatMatchTempo?: boolean;
+    alignPhaseToBeat?: boolean;
+  },
+  options: {
+    limiterEnabled?: boolean;
+    limiterCeilingDb?: number;
+    autoGainFromPeak?: boolean;
+    windowSeconds?: number;
+  } = {}
+): Promise<DjTransitionPreviewRender> {
+  const plan = buildDualDeckMixPlan(deckA, deckB, {
+    triggerMode: proposal.triggerMode ?? 'beats',
+    transitionStyle: proposal.transitionStyle,
+    videoMixStyle: proposal.videoMixStyle,
+    crossfadeBeats: proposal.crossfadeBeats,
+    beatMatchTempo: proposal.beatMatchTempo ?? true,
+    alignPhaseToBeat: proposal.alignPhaseToBeat ?? true,
+    customOutTimeA: proposal.deckAOutSec,
+    customInTimeB: proposal.deckBInSec,
+  });
+
+  const targetDur = Math.min(
+    options.windowSeconds ?? 5.0,
+    Math.max(1.2, plan.totalDurationSec)
+  );
+  const transitionMid = plan.transitionStartSec + plan.overlapDurationSec * 0.5;
+
+  let previewStartSec: number;
+  if (plan.overlapDurationSec <= targetDur * 0.72) {
+    const leadPad = Math.min(2.0, (targetDur - plan.overlapDurationSec) * 0.45);
+    previewStartSec = Math.max(0, plan.transitionStartSec - leadPad);
+  } else {
+    previewStartSec = Math.max(0, transitionMid - targetDur * 0.5);
+  }
+  if (previewStartSec + targetDur > plan.totalDurationSec) {
+    previewStartSec = Math.max(0, plan.totalDurationSec - targetDur);
+  }
+  const previewEndSec = Math.min(plan.totalDurationSec, previewStartSec + targetDur);
+  const actualDuration = Math.max(0.5, previewEndSec - previewStartSec);
+
+  const sampleRate = deckA.audioBuffer.sampleRate || 44100;
+  const totalSamples = Math.max(1, Math.ceil(actualDuration * sampleRate));
+
+  const OfflineCtx =
+    window.OfflineAudioContext ||
+    (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext })
+      .webkitOfflineAudioContext;
+
+  if (!OfflineCtx) {
+    throw new Error('OfflineAudioContext is not supported in this browser.');
+  }
+
+  const limiterEnabled = options.limiterEnabled !== false;
+  const ceilingDb = Math.max(-6, Math.min(-0.1, options.limiterCeilingDb ?? -0.3));
+  const ceilingLinear = Math.pow(10, ceilingDb / 20);
+
+  const offlineCtx = new OfflineCtx(2, totalSamples, sampleRate);
+  const masterGain = offlineCtx.createGain();
+  masterGain.gain.setValueAtTime(0.001, 0);
+  masterGain.gain.linearRampToValueAtTime(1.0, Math.min(0.03, actualDuration * 0.1));
+  if (actualDuration > 0.08) {
+    masterGain.gain.setValueAtTime(1.0, actualDuration - 0.035);
+    masterGain.gain.linearRampToValueAtTime(0.001, actualDuration);
+  }
+
+  if (limiterEnabled) {
+    const offlineLimiter = offlineCtx.createDynamicsCompressor();
+    offlineLimiter.threshold.setValueAtTime(Math.max(-24, ceilingDb - 0.6), 0);
+    offlineLimiter.knee.setValueAtTime(0, 0);
+    offlineLimiter.ratio.setValueAtTime(20, 0);
+    offlineLimiter.attack.setValueAtTime(0.001, 0);
+    offlineLimiter.release.setValueAtTime(0.08, 0);
+
+    const offlineClipper = offlineCtx.createWaveShaper();
+    offlineClipper.oversample = '4x';
+    offlineClipper.curve = createBrickWallClipperCurve(ceilingLinear);
+
+    masterGain.connect(offlineLimiter);
+    offlineLimiter.connect(offlineClipper);
+    offlineClipper.connect(offlineCtx.destination);
+  } else {
+    masterGain.connect(offlineCtx.destination);
+  }
+
+  // Schedule Deck A outgoing slice inside [previewStartSec, previewEndSec]
+  const aWinStart = Math.max(previewStartSec, 0);
+  const aWinEnd = Math.min(previewEndSec, plan.deckAEndSec);
+  if (aWinEnd > aWinStart + 0.02) {
+    const srcA = offlineCtx.createBufferSource();
+    srcA.buffer = deckA.audioBuffer;
+    srcA.playbackRate.setValueAtTime(1, 0);
+
+    const lowEqA = offlineCtx.createBiquadFilter();
+    lowEqA.type = 'lowshelf';
+    lowEqA.frequency.value = 230;
+
+    const sweepA = offlineCtx.createBiquadFilter();
+    sweepA.type = 'allpass';
+    sweepA.frequency.value = 1000;
+    sweepA.Q.value = 1.6;
+
+    const gainA = offlineCtx.createGain();
+    const fadeOutStart = plan.transitionStartSec;
+    const endAt = plan.deckAEndSec;
+    const fadeOut = Math.max(0.08, endAt - fadeOutStart);
+    const midOut = fadeOutStart + fadeOut * 0.5;
+
+    if (plan.transitionStyle === 'filter-sweep') {
+      sweepA.type = 'highpass';
+      scheduleSlicedAutomation(
+        sweepA.frequency,
+        [
+          { t: 0, v: 30, curve: 'linear' },
+          { t: fadeOutStart, v: 30, curve: 'linear' },
+          { t: endAt, v: 3400, curve: 'exp' },
+        ],
+        aWinStart,
+        aWinEnd
+      );
+    } else if (plan.transitionStyle === 'bass-swap') {
+      scheduleSlicedAutomation(
+        lowEqA.gain,
+        [
+          { t: 0, v: 0, curve: 'linear' },
+          { t: fadeOutStart, v: 0, curve: 'linear' },
+          { t: midOut, v: -16, curve: 'linear' },
+          { t: endAt, v: -16, curve: 'linear' },
+        ],
+        aWinStart,
+        aWinEnd
+      );
+    }
+
+    scheduleSlicedAutomation(
+      gainA.gain,
+      [
+        { t: 0, v: 1.0, curve: 'linear' },
+        { t: fadeOutStart, v: 1.0, curve: 'linear' },
+        { t: midOut, v: 0.68, curve: 'linear' },
+        { t: endAt, v: 0.0001, curve: 'linear' },
+      ],
+      aWinStart,
+      aWinEnd
+    );
+
+    srcA.connect(lowEqA);
+    lowEqA.connect(sweepA);
+    sweepA.connect(gainA);
+    gainA.connect(masterGain);
+
+    const localStartA = Math.max(0, aWinStart - previewStartSec);
+    const srcOffsetA = Math.max(0, Math.min(deckA.duration - 0.02, aWinStart));
+    const srcDurA = Math.max(0.02, Math.min(deckA.duration - srcOffsetA, aWinEnd - aWinStart));
+    srcA.start(localStartA, srcOffsetA, srcDurA);
+  }
+
+  // Schedule Deck B incoming slice inside [previewStartSec, previewEndSec]
+  const bWinStart = Math.max(previewStartSec, plan.deckBTimelineStartSec);
+  const bWinEnd = Math.min(previewEndSec, plan.totalDurationSec);
+  if (bWinEnd > bWinStart + 0.02) {
+    const srcB = offlineCtx.createBufferSource();
+    srcB.buffer = deckB.audioBuffer;
+    srcB.playbackRate.setValueAtTime(plan.deckBPlaybackRate, 0);
+
+    const lowEqB = offlineCtx.createBiquadFilter();
+    lowEqB.type = 'lowshelf';
+    lowEqB.frequency.value = 230;
+
+    const sweepB = offlineCtx.createBiquadFilter();
+    sweepB.type = 'allpass';
+    sweepB.frequency.value = 1000;
+    sweepB.Q.value = 1.6;
+
+    const gainB = offlineCtx.createGain();
+    const startB = plan.deckBTimelineStartSec;
+    const fadeIn = Math.max(0.08, plan.overlapDurationSec);
+    const endFadeB = startB + fadeIn;
+    const midB = startB + fadeIn * 0.5;
+
+    if (plan.transitionStyle === 'beat-drop') {
+      scheduleSlicedAutomation(
+        gainB.gain,
+        [
+          { t: startB, v: 0.001, curve: 'linear' },
+          { t: midB - 0.04, v: 0.32, curve: 'linear' },
+          { t: midB + 0.04, v: 1.0, curve: 'linear' },
+          { t: plan.totalDurationSec, v: 1.0, curve: 'linear' },
+        ],
+        bWinStart,
+        bWinEnd
+      );
+      scheduleSlicedAutomation(
+        lowEqB.gain,
+        [
+          { t: startB, v: -16, curve: 'linear' },
+          { t: midB - 0.03, v: -16, curve: 'linear' },
+          { t: midB + 0.05, v: 0, curve: 'linear' },
+          { t: plan.totalDurationSec, v: 0, curve: 'linear' },
+        ],
+        bWinStart,
+        bWinEnd
+      );
+    } else if (plan.transitionStyle === 'filter-sweep') {
+      sweepB.type = 'lowpass';
+      scheduleSlicedAutomation(
+        sweepB.frequency,
+        [
+          { t: startB, v: 260, curve: 'exp' },
+          { t: endFadeB, v: 18000, curve: 'exp' },
+          { t: plan.totalDurationSec, v: 18000, curve: 'linear' },
+        ],
+        bWinStart,
+        bWinEnd
+      );
+      scheduleSlicedAutomation(
+        gainB.gain,
+        [
+          { t: startB, v: 0.001, curve: 'linear' },
+          { t: endFadeB, v: 1.0, curve: 'linear' },
+          { t: plan.totalDurationSec, v: 1.0, curve: 'linear' },
+        ],
+        bWinStart,
+        bWinEnd
+      );
+    } else if (plan.transitionStyle === 'stutter-cut') {
+      const steps = 6;
+      const stepDur = fadeIn / steps;
+      const stutterKeys: AutomationKeyframe[] = [{ t: startB, v: 0.001, curve: 'step' }];
+      for (let s = 0; s < steps; s++) {
+        stutterKeys.push({
+          t: startB + s * stepDur,
+          v: s % 2 === 0 ? 0.92 : 0.14,
+          curve: 'step',
+        });
+      }
+      stutterKeys.push({ t: endFadeB, v: 1.0, curve: 'step' });
+      stutterKeys.push({ t: plan.totalDurationSec, v: 1.0, curve: 'linear' });
+      scheduleSlicedAutomation(gainB.gain, stutterKeys, bWinStart, bWinEnd);
+    } else {
+      const midSmooth = startB + fadeIn * 0.52;
+      scheduleSlicedAutomation(
+        gainB.gain,
+        [
+          { t: startB, v: 0.001, curve: 'linear' },
+          { t: midSmooth, v: 0.75, curve: 'linear' },
+          { t: endFadeB, v: 1.0, curve: 'linear' },
+          { t: plan.totalDurationSec, v: 1.0, curve: 'linear' },
+        ],
+        bWinStart,
+        bWinEnd
+      );
+      if (plan.transitionStyle === 'bass-swap') {
+        scheduleSlicedAutomation(
+          lowEqB.gain,
+          [
+            { t: startB, v: -15, curve: 'linear' },
+            { t: midSmooth - 0.05, v: -12, curve: 'linear' },
+            { t: midSmooth + 0.2, v: 0, curve: 'linear' },
+            { t: plan.totalDurationSec, v: 0, curve: 'linear' },
+          ],
+          bWinStart,
+          bWinEnd
+        );
+      }
+    }
+
+    srcB.connect(lowEqB);
+    lowEqB.connect(sweepB);
+    sweepB.connect(gainB);
+    gainB.connect(masterGain);
+
+    const localStartB = Math.max(0, bWinStart - previewStartSec);
+    const offsetBTimeline = bWinStart - plan.deckBTimelineStartSec;
+    const srcOffsetB = Math.max(
+      0,
+      Math.min(deckB.duration - 0.02, plan.deckBInTime + offsetBTimeline * plan.deckBPlaybackRate)
+    );
+    const srcDurB = Math.max(
+      0.02,
+      Math.min(deckB.duration - srcOffsetB, (bWinEnd - bWinStart) * plan.deckBPlaybackRate)
+    );
+    srcB.start(localStartB, srcOffsetB, srcDurB);
+  }
+
+  const rendered = await offlineCtx.startRendering();
+  const rawPeak = scanAudioBufferPeakLinear(rendered);
+  const autoGainFromPeak = options.autoGainFromPeak !== false;
+  let appliedScale = 1;
+  if (rawPeak > 0.0001) {
+    if (autoGainFromPeak) {
+      if (rawPeak > ceilingLinear) {
+        appliedScale = ceilingLinear / rawPeak;
+      } else if (rawPeak < ceilingLinear * 0.78) {
+        appliedScale = Math.min(1.65, ceilingLinear / rawPeak);
+      }
+    } else if (limiterEnabled && rawPeak > ceilingLinear) {
+      appliedScale = ceilingLinear / rawPeak;
+    }
+  }
+  if (Math.abs(appliedScale - 1) > 0.002) {
+    const kneeStart = ceilingLinear * 0.92;
+    const kneeSpan = Math.max(0.005, ceilingLinear - kneeStart);
+    for (let ch = 0; ch < rendered.numberOfChannels; ch++) {
+      const data = rendered.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) {
+        let s = data[i] * appliedScale;
+        if (limiterEnabled) {
+          const ax = Math.abs(s);
+          if (ax > kneeStart) {
+            const shaped = kneeStart + kneeSpan * Math.tanh((ax - kneeStart) / kneeSpan);
+            s = Math.sign(s) * Math.min(ceilingLinear, shaped);
+          }
+        }
+        data[i] = s;
+      }
+    }
+  }
+
+  const triBandPeaks = extractTriBandPeaks(rendered, 140);
+
+  return {
+    id: `preview-${proposal.id}-${Date.now()}`,
+    suggestionId: proposal.id,
+    label: proposal.label,
+    plan,
+    audioBuffer: rendered,
+    previewStartSec: Number(previewStartSec.toFixed(2)),
+    previewEndSec: Number(previewEndSec.toFixed(2)),
+    durationSec: Number(rendered.duration.toFixed(2)),
+    triBandPeaks,
+    transitionStyle: proposal.transitionStyle,
+    crossfadeBeats: proposal.crossfadeBeats,
+    deckAOutSec: proposal.deckAOutSec,
+    deckBInSec: proposal.deckBInSec,
+    deckBDropSec: proposal.deckBDropSec ?? deckB.dropTime,
   };
 }
 
@@ -2153,3 +2699,39 @@ export function createDjVideoFrameResolver(
     },
   };
 }
+
+export interface DjEqCrossoverCalibration {
+  lowCrossoverHz: number;
+  midCenterHz: number;
+  highCrossoverHz: number;
+  voicingLabel: string;
+}
+
+/**
+ * Computes frequency crossover points for a DJ 3-band EQ calibrated to track BPM:
+ * - Slower tempos (60-96 BPM): lower Low/Mid split to isolate heavy sub/808 sustain.
+ * - Mid tempos (97-129 BPM): classic club house punch and vocal mid separation.
+ * - Fast tempos (130+ BPM): higher Low/Mid & High split for crisp rapid transients.
+ */
+export function computeBpmCalibratedEqCrossovers(bpm: number): DjEqCrossoverCalibration {
+  const safeBpm = Math.max(60, Math.min(190, bpm || 120));
+  const norm = Math.max(0, Math.min(1, (safeBpm - 65) / 115));
+  const lowCrossoverHz = Math.round(170 + norm * 140);
+  const midCenterHz = Math.round(920 + norm * 540);
+  const highCrossoverHz = Math.round(3300 + norm * 1800);
+
+  const voicingLabel =
+    safeBpm < 98
+      ? 'Sub / Halftime'
+      : safeBpm < 130
+        ? 'Club / House'
+        : 'Techno / DnB';
+
+  return {
+    lowCrossoverHz,
+    midCenterHz,
+    highCrossoverHz,
+    voicingLabel,
+  };
+}
+

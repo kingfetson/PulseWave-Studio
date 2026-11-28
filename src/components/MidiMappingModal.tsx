@@ -48,6 +48,7 @@ interface MidiMappingModalProps {
   onRemoveMapping: (id: string) => void;
   onLoadStarterMappings: () => void;
   onClearAllMappings: () => void;
+  initialCategoryFilter?: CategoryFilter;
 }
 
 type CategoryFilter = 'all' | MidiParameterSpec['category'];
@@ -72,9 +73,16 @@ export function MidiMappingModal({
   onRemoveMapping,
   onLoadStarterMappings,
   onClearAllMappings,
+  initialCategoryFilter = 'all',
 }: MidiMappingModalProps) {
   const [expandedParam, setExpandedParam] = useState<MidiMappableParamKey | null>(null);
-  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(initialCategoryFilter);
+
+  useEffect(() => {
+    if (isOpen) {
+      setCategoryFilter(initialCategoryFilter);
+    }
+  }, [initialCategoryFilter, isOpen]);
 
   useEffect(() => {
     if (!isOpen && learningParam) {
@@ -106,6 +114,17 @@ export function MidiMappingModal({
     categoryFilter === 'all'
       ? MIDI_MAPPABLE_PARAMS
       : MIDI_MAPPABLE_PARAMS.filter((p) => p.category === categoryFilter);
+
+  const mappedKeys = new Set(mappings.map((m) => m.targetParam));
+  const unmappedVisibleParams = visibleParams.filter((p) => !mappedKeys.has(p.key));
+  const learningSpec = learningParam ? getMidiParamSpec(learningParam) : null;
+  const learningExistingMapping = learningParam
+    ? mappings.find((m) => m.targetParam === learningParam) ?? null
+    : null;
+  const nextUnmappedParam =
+    unmappedVisibleParams.find((p) => p.key !== learningParam) ??
+    MIDI_MAPPABLE_PARAMS.find((p) => !mappedKeys.has(p.key) && p.key !== learningParam) ??
+    null;
 
   const handleAssignManual = (spec: MidiParameterSpec, indexHint: number) => {
     const usedCcs = new Set(
@@ -141,7 +160,7 @@ export function MidiMappingModal({
       aria-modal="true"
       aria-labelledby="midi-modal-title"
     >
-      <div className="w-full max-w-4xl rounded-xl bg-[#121620] border border-white/[0.1] shadow-2xl flex flex-col max-h-[90vh]">
+      <div className="relative w-full max-w-4xl rounded-xl bg-[#121620] border border-white/[0.1] shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
         {/* Header */}
         <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
@@ -314,6 +333,7 @@ export function MidiMappingModal({
             {(
               [
                 { id: 'all', label: 'All Controls' },
+                { id: 'DJ Filter & FX', label: 'DJ Filter & FX' },
                 { id: 'Audio & Visuals', label: 'Audio & Visuals' },
                 { id: 'Lyrics & Overlay', label: 'Lyrics' },
                 { id: 'Backdrop', label: 'Backdrop' },
@@ -339,9 +359,20 @@ export function MidiMappingModal({
             })}
           </div>
 
-          <span className="text-[11px] font-mono tabular-nums text-slate-400">
-            {activeMappingsCount} active {activeMappingsCount === 1 ? 'binding' : 'bindings'}
-          </span>
+          <div className="flex items-center gap-2.5 shrink-0">
+            {unmappedVisibleParams.length > 0 && !learningParam && (
+              <button
+                type="button"
+                onClick={() => onSetLearningParam(unmappedVisibleParams[0].key)}
+                className="px-2.5 py-1 rounded-md text-[10.5px] font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-400/35 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                Learn Next Unmapped ({unmappedVisibleParams.length})
+              </button>
+            )}
+            <span className="text-[11px] font-mono tabular-nums text-slate-400">
+              {activeMappingsCount} active {activeMappingsCount === 1 ? 'binding' : 'bindings'}
+            </span>
+          </div>
         </div>
 
         {/* Parameter Bindings Table */}
@@ -421,13 +452,19 @@ export function MidiMappingModal({
                       <button
                         type="button"
                         onClick={() => onSetLearningParam(isLearning ? null : spec.key)}
-                        className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 ${
                           isLearning
                             ? 'bg-amber-400 text-[#090b10] border-amber-300'
                             : 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border-cyan-400/35'
                         }`}
                       >
-                        {isLearning ? 'Listening…' : mapping ? 'Re-Learn' : 'MIDI Learn'}
+                        {isLearning && (
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#090b10] opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#090b10]" />
+                          </span>
+                        )}
+                        <span>{isLearning ? 'Listening…' : mapping ? 'Re-Learn' : 'MIDI Learn'}</span>
                       </button>
 
                       {mapping ? (
@@ -692,6 +729,126 @@ export function MidiMappingModal({
             Done
           </button>
         </div>
+
+        {/* Visual MIDI Learn Listening Overlay */}
+        {learningSpec && (
+          <div
+            onClick={() => onSetLearningParam(null)}
+            className="absolute inset-0 z-20 bg-[#090b10]/85 backdrop-blur-md flex items-center justify-center p-6"
+            role="status"
+            aria-live="polite"
+            aria-label={`Listening for MIDI input to map ${learningSpec.label}`}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl bg-[#121620] border border-amber-400/40 shadow-[0_0_60px_rgba(251,191,36,0.16)] p-6 text-center space-y-5"
+            >
+              {/* Concentric Pulsing Signal Beacon */}
+              <div className="relative mx-auto w-24 h-24 flex items-center justify-center">
+                <span
+                  className="animate-ping absolute inset-1 rounded-full bg-amber-400/25"
+                  style={{ animationDuration: '1.6s' }}
+                />
+                <span
+                  className="animate-pulse absolute inset-3 rounded-full border border-amber-400/45 bg-amber-500/10"
+                />
+                <div className="relative w-14 h-14 rounded-full bg-gradient-to-br from-amber-400 to-cyan-400 text-[#090b10] flex items-center justify-center shadow-[0_0_24px_rgba(251,191,36,0.5)]">
+                  <Radio className="w-7 h-7 animate-pulse" />
+                </div>
+              </div>
+
+              {/* Status Badge & Target Parameter Info */}
+              <div className="space-y-2">
+                <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-amber-500/15 border border-amber-400/35 text-[10.5px] font-mono font-bold uppercase tracking-wider text-amber-200">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  <span>
+                    {learningExistingMapping
+                      ? 'Listening to Re-Map Control'
+                      : 'Listening for Unmapped Parameter'}
+                  </span>
+                </div>
+
+                <h4 className="text-lg font-bold text-white tracking-tight">
+                  {learningSpec.label}
+                </h4>
+
+                <div className="flex flex-wrap items-center justify-center gap-2 text-[11px] font-mono">
+                  <span className="px-2 py-0.5 rounded bg-white/[0.05] border border-white/[0.08] text-slate-300">
+                    {learningSpec.category}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-cyan-500/12 border border-cyan-400/30 text-cyan-200 tabular-nums">
+                    Range {learningSpec.formatValue(learningSpec.min)} –{' '}
+                    {learningSpec.formatValue(learningSpec.max)}
+                  </span>
+                  {learningExistingMapping && (
+                    <span className="px-2 py-0.5 rounded bg-white/[0.05] border border-white/[0.08] text-slate-400">
+                      Current: {formatMidiSourceLabel(learningExistingMapping)}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Instruction & Hardware Connection State */}
+              <div className="rounded-xl bg-[#090b10] border border-white/[0.08] px-4 py-3 space-y-2 text-xs">
+                <p className="text-slate-200 leading-relaxed">
+                  Move any <span className="text-amber-300 font-semibold">fader, rotary knob, pitch wheel</span>, or press a{' '}
+                  <span className="text-cyan-300 font-semibold">MIDI pad</span> on your controller to bind it automatically.
+                </p>
+
+                {connectedDevices.length > 0 ? (
+                  <div className="text-[11px] font-mono text-emerald-300 flex items-center justify-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    <span className="truncate">
+                      Ready: {connectedDevices.map((d) => d.name).join(', ')}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center gap-2 pt-1">
+                    <span className="text-[11px] text-amber-300">
+                      No controller connected yet
+                    </span>
+                    {status !== 'unsupported' && (
+                      <button
+                        type="button"
+                        onClick={onConnectMidi}
+                        className="px-2 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-400/40 text-[10.5px] font-semibold cursor-pointer"
+                      >
+                        Connect MIDI
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {lastSignal && (
+                  <div className="pt-1 border-t border-white/[0.06] text-[10.5px] font-mono tabular-nums text-slate-400 truncate">
+                    Last Signal: {formatMidiSourceLabel(lastSignal)} · Val {lastSignal.rawValue}
+                  </div>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                {nextUnmappedParam && (
+                  <button
+                    type="button"
+                    onClick={() => onSetLearningParam(nextUnmappedParam.key)}
+                    className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-400/35 transition-colors cursor-pointer"
+                  >
+                    Skip → {nextUnmappedParam.label}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => onSetLearningParam(null)}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] text-slate-200 border border-white/[0.12] transition-colors cursor-pointer"
+                >
+                  Cancel (Esc)
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

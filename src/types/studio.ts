@@ -1,3 +1,5 @@
+import type { DjSpectrogramData } from '../utils/djSpectrogram';
+
 export type AspectRatioKey = '16:9' | '9:16' | '1:1';
 
 export interface AspectRatioConfig {
@@ -581,6 +583,16 @@ export interface StudioSettings {
   particleVelocity: number; // 0.2 - 3.0 multiplier
   particleLifespan: number; // 0.3 - 3.5 seconds
   particleFlowMap: number[]; // interleaved [vx, vy] grid (16x12x2)
+  djFilterCutoff?: number; // 0 - 1 (LPF sweep: 160 Hz - 18 kHz)
+  djFilterResonance?: number; // 0.7 - 12 Q
+  djAutoFilterDepth?: number; // 0 - 1 BPM-synced LFO filter sweep depth
+  djDelayMix?: number; // 0 - 1 Beat-synced delay wet mix
+  djDelayFeedback?: number; // 0 - 0.85 Beat-synced delay feedback
+  djBeatGateDepth?: number; // 0 - 1 BPM-synced beat gate/pump depth
+  djTransientAttack?: number; // -1 to +1 Transient Shaper attack punch/soften
+  djTransientSustain?: number; // -1 to +1 Transient Shaper drum tail sustain/tighten
+  djTransientDither?: number; // 0 to 1 TPDF high-pass dither noise floor shaping
+  djNoiseGateThreshold?: number; // -80 (Off) to -18 dBFS noise gate threshold
 }
 
 export interface BeatShockwave {
@@ -938,6 +950,10 @@ export interface DjTrackAsset {
   lyrics: LyricLine[];
   cuePoints?: DjCuePoint[];
   energyScore: number;
+  musicalKey?: string;
+  camelotKey?: string;
+  keyConfidence?: number;
+  spectrogram?: DjSpectrogramData;
 }
 
 export interface DjDeckEqSettings {
@@ -946,6 +962,9 @@ export interface DjDeckEqSettings {
   highGainDb: number; // -18 to +9
   filterSweep: number; // -1 (HPF) to 0 (flat) to +1 (LPF)
   trimGain: number; // 0 to 1.5
+  lowCrossoverHz?: number; // 120 to 380 Hz
+  midCenterHz?: number; // 600 to 2000 Hz
+  highCrossoverHz?: number; // 2600 to 6500 Hz
 }
 
 
